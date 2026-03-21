@@ -253,6 +253,7 @@ export function getCacheStats() {
 export default {
   getGraph,
   setGraph,
+  invalidate: clearGraph,
   clearGraph,
   clearAllGraphs,
   getOrBuildGraph,

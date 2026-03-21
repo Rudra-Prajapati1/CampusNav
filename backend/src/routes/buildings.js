@@ -4,6 +4,11 @@ import { requireAdmin } from '../middleware/auth.js';
 
 const router = express.Router();
 
+function isMissingEntranceColumnError(error) {
+  const message = error?.message || "";
+  return message.includes("entrance_lat") || message.includes("entrance_lng");
+}
+
 // Public: Get building by ID (for user navigation)
 router.get('/:id', async (req, res) => {
   const { data, error } = await supabase
@@ -29,14 +34,48 @@ router.get('/', requireAdmin, async (req, res) => {
 
 // Admin: Create building
 router.post('/', requireAdmin, async (req, res) => {
-  const { name, description, address, logo_url } = req.body;
+  const {
+    name,
+    description,
+    address,
+    logo_url,
+    entrance_lat,
+    entrance_lng,
+  } = req.body;
   if (!name) return res.status(400).json({ error: 'Name required' });
 
-  const { data, error } = await supabase
+  const normalizedLat =
+    entrance_lat === '' || entrance_lat === undefined ? null : entrance_lat;
+  const normalizedLng =
+    entrance_lng === '' || entrance_lng === undefined ? null : entrance_lng;
+
+  let { data, error } = await supabase
     .from('buildings')
-    .insert({ name, description, address, logo_url, created_by: req.user.id })
+    .insert({
+      name,
+      description,
+      address,
+      logo_url,
+      entrance_lat: normalizedLat,
+      entrance_lng: normalizedLng,
+      created_by: req.user.id,
+    })
     .select()
     .single();
+
+  if (error && isMissingEntranceColumnError(error)) {
+    ({ data, error } = await supabase
+      .from('buildings')
+      .insert({
+        name,
+        description,
+        address,
+        logo_url,
+        created_by: req.user.id,
+      })
+      .select()
+      .single());
+  }
 
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);
@@ -44,14 +83,47 @@ router.post('/', requireAdmin, async (req, res) => {
 
 // Admin: Update building
 router.put('/:id', requireAdmin, async (req, res) => {
-  const { name, description, address, logo_url } = req.body;
+  const {
+    name,
+    description,
+    address,
+    logo_url,
+    entrance_lat,
+    entrance_lng,
+  } = req.body;
 
-  const { data, error } = await supabase
+  const normalizedLat =
+    entrance_lat === '' || entrance_lat === undefined ? null : entrance_lat;
+  const normalizedLng =
+    entrance_lng === '' || entrance_lng === undefined ? null : entrance_lng;
+
+  let { data, error } = await supabase
     .from('buildings')
-    .update({ name, description, address, logo_url })
+    .update({
+      name,
+      description,
+      address,
+      logo_url,
+      entrance_lat: normalizedLat,
+      entrance_lng: normalizedLng,
+    })
     .eq('id', req.params.id)
     .select()
     .single();
+
+  if (error && isMissingEntranceColumnError(error)) {
+    ({ data, error } = await supabase
+      .from('buildings')
+      .update({
+        name,
+        description,
+        address,
+        logo_url,
+      })
+      .eq('id', req.params.id)
+      .select()
+      .single());
+  }
 
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);

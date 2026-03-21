@@ -1,7 +1,7 @@
 import express from "express";
 import { supabase } from "../utils/supabase.js";
 import { requireAdmin } from "../middleware/auth.js";
-import { clearGraph } from "../cache/graphCache.js";
+import graphCache from "../cache/graphCache.js";
 
 const router = express.Router();
 
@@ -101,45 +101,71 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 
 // Admin: Save entire floor map (rooms + waypoints + connections in one call)
 router.post("/:id/save-map", requireAdmin, async (req, res) => {
-  const { rooms, waypoints, connections } = req.body;
-  const floorId = req.params.id;
+  const { id: floorId } = req.params;
+  const {
+    rooms = [],
+    waypoints = [],
+    connections = [],
+    scale_pixels_per_meter,
+  } = req.body;
 
   try {
-    // Delete existing data for this floor
-    await supabase
-      .from("waypoint_connections")
-      .delete()
-      .eq("floor_id", floorId);
+    await supabase.from("waypoint_connections").delete().eq("floor_id", floorId);
     await supabase.from("waypoints").delete().eq("floor_id", floorId);
     await supabase.from("rooms").delete().eq("floor_id", floorId);
 
-    // Insert rooms
-    let savedRooms = [];
-    if (rooms && rooms.length > 0) {
-      const { data, error } = await supabase
-        .from("rooms")
-        .insert(rooms.map((r) => ({ ...r, floor_id: floorId })))
-        .select();
+    if (rooms.length > 0) {
+      const { error } = await supabase.from("rooms").insert(
+        rooms.map((r) => ({
+          id: r.id,
+          floor_id: floorId,
+          name: r.name || "Unnamed",
+          type: r.type || "other",
+          x: r.x,
+          y: r.y,
+          width: r.width,
+          height: r.height,
+          color: r.color || null,
+          description: r.description || "",
+          polygon_points: r.polygon_points || null,
+        })),
+      );
       if (error) throw error;
-      savedRooms = data;
     }
 
-    // Insert waypoints
-    let savedWaypoints = [];
-    if (waypoints && waypoints.length > 0) {
-      const { data, error } = await supabase
-        .from("waypoints")
-        .insert(waypoints.map((w) => ({ ...w, floor_id: floorId })))
-        .select();
+    if (waypoints.length > 0) {
+      const { error } = await supabase.from("waypoints").insert(
+        waypoints.map((w) => ({
+          id: w.id,
+          floor_id: floorId,
+          room_id: w.room_id || null,
+          x: w.x,
+          y: w.y,
+          type: w.type || "room_center",
+          name: w.name || "",
+          linked_floor_id: w.linked_floor_id || null,
+        })),
+      );
       if (error) throw error;
-      savedWaypoints = data;
     }
 
-    // Insert connections
-    if (connections && connections.length > 0) {
+    if (connections.length > 0) {
+      const { error } = await supabase.from("waypoint_connections").insert(
+        connections.map((c) => ({
+          id: c.id,
+          floor_id: floorId,
+          waypoint_a_id: c.waypoint_a_id,
+          waypoint_b_id: c.waypoint_b_id,
+        })),
+      );
+      if (error) throw error;
+    }
+
+    if (scale_pixels_per_meter) {
       const { error } = await supabase
-        .from("waypoint_connections")
-        .insert(connections.map((c) => ({ ...c, floor_id: floorId })));
+        .from("floors")
+        .update({ scale_pixels_per_meter })
+        .eq("id", floorId);
       if (error) throw error;
     }
 
@@ -149,12 +175,16 @@ router.post("/:id/save-map", requireAdmin, async (req, res) => {
       .eq("id", floorId)
       .single();
 
-    if (floor?.building_id) {
-      clearGraph(floor.building_id);
-    }
+    if (floor?.building_id) graphCache.invalidate(floor.building_id);
 
-    res.json({ success: true, rooms: savedRooms, waypoints: savedWaypoints });
+    res.json({
+      success: true,
+      rooms: rooms.length,
+      waypoints: waypoints.length,
+      connections: connections.length,
+    });
   } catch (err) {
+    console.error("save-map error:", err);
     res.status(500).json({ error: err.message });
   }
 });

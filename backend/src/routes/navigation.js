@@ -23,6 +23,40 @@ import { requireAdmin } from "../middleware/auth.js";
 
 const router = express.Router();
 
+function toNumber(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function haversineMeters(fromLat, fromLng, toLat, toLng) {
+  const R = 6371000;
+  const toRad = (degrees) => (degrees * Math.PI) / 180;
+  const dLat = toRad(toLat - fromLat);
+  const dLng = toRad(toLng - fromLng);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(fromLat)) *
+      Math.cos(toRad(toLat)) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+}
+
+function fallbackOutdoorRoute(fromLat, fromLng, toLat, toLng, message) {
+  const distance = haversineMeters(fromLat, fromLng, toLat, toLng);
+  return {
+    coordinates: [
+      [fromLng, fromLat],
+      [toLng, toLat],
+    ],
+    distance,
+    duration: Math.max(1, Math.round(distance / 84)),
+    fallback: true,
+    message,
+  };
+}
+
 /**
  * POST /api/v1/navigation/route
  *
@@ -97,6 +131,73 @@ router.post("/route", async (req, res) => {
       error: "An error occurred while calculating the route",
       message: err.message,
     });
+  }
+});
+
+// GET /api/v1/navigation/outdoor-route
+// Proxies OpenRouteService to keep API key server-side
+router.get("/outdoor-route", async (req, res) => {
+  const fromLat = toNumber(req.query.fromLat);
+  const fromLng = toNumber(req.query.fromLng);
+  const toLat = toNumber(req.query.toLat);
+  const toLng = toNumber(req.query.toLng);
+
+  if (fromLat === null || fromLng === null || toLat === null || toLng === null) {
+    return res.status(400).json({ error: "Missing coordinates" });
+  }
+
+  const ORS_KEY = process.env.ORS_API_KEY;
+  if (!ORS_KEY) {
+    return res.json(
+      fallbackOutdoorRoute(
+        fromLat,
+        fromLng,
+        toLat,
+        toLng,
+        "ORS_API_KEY not set. Showing a direct route instead.",
+      ),
+    );
+  }
+
+  try {
+    const url =
+      "https://api.openrouteservice.org/v2/directions/foot-walking" +
+      `?start=${fromLng},${fromLat}&end=${toLng},${toLat}`;
+    const response = await fetch(url, {
+      headers: { Authorization: ORS_KEY, Accept: "application/geo+json" },
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      return res.json(
+        fallbackOutdoorRoute(
+          fromLat,
+          fromLng,
+          toLat,
+          toLng,
+          `OpenRouteService error. Showing a direct route instead. ${text}`,
+        ),
+      );
+    }
+
+    const data = await response.json();
+    const coords = data.features?.[0]?.geometry?.coordinates || [];
+    const summary = data.features?.[0]?.properties?.summary || {};
+    res.json({
+      coordinates: coords,
+      distance: Math.round(summary.distance || 0),
+      duration: Math.round((summary.duration || 0) / 60),
+    });
+  } catch (err) {
+    console.error("ORS proxy error:", err);
+    res.json(
+      fallbackOutdoorRoute(
+        fromLat,
+        fromLng,
+        toLat,
+        toLng,
+        `Could not reach OpenRouteService. Showing a direct route instead. ${err.message}`,
+      ),
+    );
   }
 });
 
