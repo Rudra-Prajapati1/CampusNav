@@ -202,3 +202,55 @@ CREATE OR REPLACE TRIGGER on_auth_user_created
 -- FUTURE: When Google Console is ready:
 -- Go to Supabase → Authentication → Providers → Google → Enable
 -- The signInWithGoogle() function in authStore.js is already coded!
+
+-- ============================================
+-- SAFE PATCHES FOR CURRENT APP VERSION
+-- Safe to run multiple times
+-- ============================================
+ALTER TABLE floors
+  ADD COLUMN IF NOT EXISTS scale_pixels_per_meter numeric DEFAULT 20;
+
+ALTER TABLE floors
+  ADD COLUMN IF NOT EXISTS map_data jsonb;
+
+ALTER TABLE buildings
+  ADD COLUMN IF NOT EXISTS entrance_lat numeric,
+  ADD COLUMN IF NOT EXISTS entrance_lng numeric;
+
+ALTER TABLE waypoints
+  ADD COLUMN IF NOT EXISTS name text,
+  ADD COLUMN IF NOT EXISTS linked_floor_id uuid REFERENCES floors(id) ON DELETE SET NULL;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'buildings' AND policyname = 'public_read_buildings'
+  ) THEN
+    CREATE POLICY "public_read_buildings" ON buildings FOR SELECT USING (true);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'floors' AND policyname = 'public_read_floors'
+  ) THEN
+    CREATE POLICY "public_read_floors" ON floors FOR SELECT USING (true);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'rooms' AND policyname = 'public_read_rooms'
+  ) THEN
+    CREATE POLICY "public_read_rooms" ON rooms FOR SELECT USING (true);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'waypoints' AND policyname = 'public_read_waypoints'
+  ) THEN
+    CREATE POLICY "public_read_waypoints" ON waypoints FOR SELECT USING (true);
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'waypoint_connections' AND policyname = 'public_read_connections'
+  ) THEN
+    CREATE POLICY "public_read_connections" ON waypoint_connections FOR SELECT USING (true);
+  END IF;
+END $$;
