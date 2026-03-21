@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import {
   Building2,
   Plus,
@@ -20,10 +21,16 @@ function BuildingModal({ building, onClose, onSave, isDark }) {
     name: building?.name || "",
     description: building?.description || "",
     address: building?.address || "",
+    entrance_lat: building?.entrance_lat || "",
+    entrance_lng: building?.entrance_lng || "",
   });
+  const [isSaving, setIsSaving] = useState(false);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    if (isSaving) return;
+
+    setIsSaving(true);
     try {
       if (building) {
         await api.buildings.update(building.id, form);
@@ -35,6 +42,8 @@ function BuildingModal({ building, onClose, onSave, isDark }) {
       onSave();
     } catch (err) {
       toast.error(err.message);
+    } finally {
+      setIsSaving(false);
     }
   };
 
@@ -53,7 +62,12 @@ function BuildingModal({ building, onClose, onSave, isDark }) {
           </h2>
           <button
             onClick={onClose}
-            className={`transition-colors ${isDark ? "text-white/30 hover:text-white" : "text-slate-400 hover:text-slate-700"}`}
+            disabled={isSaving}
+            className={`transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+              isDark
+                ? "text-white/30 hover:text-white"
+                : "text-slate-400 hover:text-slate-700"
+            }`}
           >
             <X className="w-4 h-4" />
           </button>
@@ -68,6 +82,7 @@ function BuildingModal({ building, onClose, onSave, isDark }) {
               placeholder="e.g. Main Academic Block"
               value={form.name}
               onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+              disabled={isSaving}
               required
             />
           </div>
@@ -82,7 +97,43 @@ function BuildingModal({ building, onClose, onSave, isDark }) {
               onChange={(e) =>
                 setForm((f) => ({ ...f, address: e.target.value }))
               }
+              disabled={isSaving}
             />
+          </div>
+          <div>
+            <label className={`label ${!isDark ? "text-slate-700" : ""}`}>
+              Building Entrance GPS Coordinates
+            </label>
+            <div className="flex gap-2">
+              <input
+                className={`input ${!isDark ? "bg-white border-slate-300 text-slate-900 placeholder-slate-400" : ""}`}
+                placeholder="Latitude"
+                type="number"
+                step="any"
+                value={form.entrance_lat}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, entrance_lat: e.target.value }))
+                }
+                disabled={isSaving}
+              />
+              <input
+                className={`input ${!isDark ? "bg-white border-slate-300 text-slate-900 placeholder-slate-400" : ""}`}
+                placeholder="Longitude"
+                type="number"
+                step="any"
+                value={form.entrance_lng}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, entrance_lng: e.target.value }))
+                }
+                disabled={isSaving}
+              />
+            </div>
+            <p
+              className={`text-xs mt-1 ${isDark ? "text-white/30" : "text-slate-400"}`}
+            >
+              Open Google Maps, right-click the building entrance, copy the
+              coordinates. Example for Shree PG Ahmedabad: 23.02887, 72.55078
+            </p>
           </div>
           <div>
             <label className={`label ${!isDark ? "text-slate-700" : ""}`}>
@@ -96,19 +147,42 @@ function BuildingModal({ building, onClose, onSave, isDark }) {
               onChange={(e) =>
                 setForm((f) => ({ ...f, description: e.target.value }))
               }
+              disabled={isSaving}
             />
           </div>
+          {isSaving && (
+            <p
+              className={`text-xs ${isDark ? "text-brand-300" : "text-brand-600"}`}
+            >
+              Saving building changes...
+            </p>
+          )}
           <div className="flex gap-3 pt-2">
             <button
               type="button"
               onClick={onClose}
+              disabled={isSaving}
               className="btn-secondary flex-1 justify-center"
             >
               Cancel
             </button>
-            <button type="submit" className="btn-primary flex-1 justify-center">
-              <Check className="w-4 h-4" />
-              {building ? "Save Changes" : "Create Building"}
+            <button
+              type="submit"
+              disabled={isSaving}
+              className="btn-primary flex-1 justify-center disabled:cursor-not-allowed disabled:opacity-70"
+            >
+              {isSaving ? (
+                <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+              ) : (
+                <Check className="w-4 h-4" />
+              )}
+              {isSaving
+                ? building
+                  ? "Saving..."
+                  : "Creating..."
+                : building
+                  ? "Save Changes"
+                  : "Create Building"}
             </button>
           </div>
         </form>
@@ -217,6 +291,8 @@ export default function AdminBuildings() {
   const [expandedBuilding, setExpandedBuilding] = useState(null);
   const [loading, setLoading] = useState(true);
   const [modal, setModal] = useState(null);
+
+  const navigate = useNavigate();
 
   const loadBuildings = async () => {
     setLoading(true);
@@ -441,13 +517,17 @@ export default function AdminBuildings() {
                                   Level {floor.level}
                                 </div>
                               </div>
-                              <Link
-                                to={`/admin/buildings/${b.id}/floors/${floor.id}/editor`}
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  navigate(
+                                    `/admin/buildings/${b.id}/floors/${floor.id}/editor`,
+                                  );
+                                }}
                                 className="btn-primary text-xs py-1.5 px-3"
-                                onClick={(e) => e.stopPropagation()}
                               >
                                 <Map className="w-3 h-3" /> Edit Map
-                              </Link>
+                              </button>
                               <button
                                 onClick={() => deleteFloor(floor.id, b.id)}
                                 className={`p-1.5 rounded-lg transition-all ${isDark ? "text-white/20 hover:text-red-400 hover:bg-red-500/10" : "text-slate-400 hover:text-red-500 hover:bg-red-50"}`}

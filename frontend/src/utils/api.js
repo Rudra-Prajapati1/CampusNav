@@ -16,6 +16,21 @@ const BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
 
 // Request timeout in milliseconds
 const REQUEST_TIMEOUT = 15000;
+const AUTH_TIMEOUT = 3000;
+let cachedAccessToken = null;
+
+supabase.auth.onAuthStateChange((_event, session) => {
+  cachedAccessToken = session?.access_token || null;
+});
+
+function withTimeout(promise, timeoutMs, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(message)), timeoutMs);
+    }),
+  ]);
+}
 
 /**
  * Get authorization headers from current Supabase session
@@ -23,13 +38,26 @@ const REQUEST_TIMEOUT = 15000;
  */
 async function getAuthHeaders() {
   try {
+    if (cachedAccessToken) {
+      return { Authorization: `Bearer ${cachedAccessToken}` };
+    }
+
     const {
       data: { session },
-    } = await supabase.auth.getSession();
+    } = await withTimeout(
+      supabase.auth.getSession(),
+      AUTH_TIMEOUT,
+      "Authentication lookup timed out.",
+    );
+
+    cachedAccessToken = session?.access_token || null;
+
     if (!session?.access_token) return {};
     return { Authorization: `Bearer ${session.access_token}` };
   } catch {
-    return {};
+    return cachedAccessToken
+      ? { Authorization: `Bearer ${cachedAccessToken}` }
+      : {};
   }
 }
 
