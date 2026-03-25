@@ -21,7 +21,8 @@ export default {
         },
       },
       fontFamily: {
-        display: ["DM Sans", "sans-serif"],
+        sans: ["Manrope", "sans-serif"],
+        display: ["Space Grotesk", "sans-serif"],
       },
     },
   },

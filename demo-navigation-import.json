@@ -1,0 +1,278 @@
+{
+  "version": "1.0",
+  "pixelsPerMeter": 26,
+  "floors": [
+    {
+      "id": "demo-ground-floor",
+      "name": "Ground Floor",
+      "level": 0,
+      "bgImage": null,
+      "elements": [
+        {
+          "id": "g-entrance",
+          "type": "rect",
+          "zoneType": "entrance",
+          "x": 320,
+          "y": 60,
+          "w": 240,
+          "h": 92,
+          "name": "Main Entrance",
+          "description": "Primary public entry point."
+        },
+        {
+          "id": "g-corridor",
+          "type": "rect",
+          "zoneType": "corridor",
+          "x": 320,
+          "y": 180,
+          "w": 500,
+          "h": 420,
+          "name": "Central Corridor",
+          "description": "Main circulation spine."
+        },
+        {
+          "id": "g-reception",
+          "type": "rect",
+          "zoneType": "room",
+          "x": 80,
+          "y": 220,
+          "w": 220,
+          "h": 140,
+          "name": "Reception",
+          "description": "Visitor help desk."
+        },
+        {
+          "id": "g-admissions",
+          "type": "rect",
+          "zoneType": "room",
+          "x": 80,
+          "y": 420,
+          "w": 220,
+          "h": 140,
+          "name": "Admissions",
+          "description": "Registration office."
+        },
+        {
+          "id": "g-stairs-room",
+          "type": "rect",
+          "zoneType": "staircase",
+          "x": 860,
+          "y": 210,
+          "w": 180,
+          "h": 140,
+          "name": "Stair Core",
+          "description": "Primary stair transition."
+        },
+        {
+          "id": "g-elevator-room",
+          "type": "rect",
+          "zoneType": "elevator",
+          "x": 860,
+          "y": 420,
+          "w": 180,
+          "h": 140,
+          "name": "Lift Lobby",
+          "description": "Main elevator connection."
+        },
+        { "id": "g-door-entrance", "type": "door", "x": 440, "y": 152, "name": "Entrance Door" },
+        { "id": "g-door-reception", "type": "door", "x": 300, "y": 290, "name": "Reception Door" },
+        { "id": "g-door-admissions", "type": "door", "x": 300, "y": 490, "name": "Admissions Door" },
+        { "id": "g-door-stairs", "type": "door", "x": 860, "y": 280, "name": "Stair Door" },
+        { "id": "g-door-elevator", "type": "door", "x": 860, "y": 490, "name": "Lift Door" },
+        { "id": "g-wp-entrance", "type": "waypoint", "x": 440, "y": 152, "name": "Entrance Anchor", "navType": "entrance", "linkedFloor": null },
+        { "id": "g-wp-c1", "type": "waypoint", "x": 440, "y": 290, "name": "Corridor North", "navType": "corridor", "linkedFloor": null },
+        { "id": "g-wp-c2", "type": "waypoint", "x": 650, "y": 290, "name": "Corridor East", "navType": "corridor", "linkedFloor": null },
+        { "id": "g-wp-c3", "type": "waypoint", "x": 650, "y": 490, "name": "Corridor South East", "navType": "corridor", "linkedFloor": null },
+        { "id": "g-wp-c4", "type": "waypoint", "x": 440, "y": 490, "name": "Corridor South", "navType": "corridor", "linkedFloor": null },
+        { "id": "g-wp-reception", "type": "waypoint", "x": 300, "y": 290, "name": "Reception Anchor", "navType": "room", "linkedFloor": null },
+        { "id": "g-wp-admissions", "type": "waypoint", "x": 300, "y": 490, "name": "Admissions Anchor", "navType": "room", "linkedFloor": null },
+        { "id": "g-wp-stairs", "type": "waypoint", "x": 860, "y": 280, "name": "Stair Anchor", "navType": "staircase", "linkedFloor": null },
+        { "id": "g-wp-elevator", "type": "waypoint", "x": 860, "y": 490, "name": "Lift Anchor", "navType": "elevator", "linkedFloor": null },
+        {
+          "id": "g-path-main",
+          "type": "path",
+          "points": [
+            { "x": 440, "y": 152 },
+            { "x": 440, "y": 290 },
+            { "x": 650, "y": 290 },
+            { "x": 860, "y": 280 }
+          ]
+        },
+        {
+          "id": "g-path-south",
+          "type": "path",
+          "points": [
+            { "x": 440, "y": 290 },
+            { "x": 440, "y": 490 },
+            { "x": 650, "y": 490 },
+            { "x": 860, "y": 490 }
+          ]
+        },
+        {
+          "id": "g-path-cross",
+          "type": "path",
+          "points": [
+            { "x": 650, "y": 290 },
+            { "x": 650, "y": 490 }
+          ]
+        },
+        {
+          "id": "g-path-reception",
+          "type": "path",
+          "points": [
+            { "x": 300, "y": 290 },
+            { "x": 440, "y": 290 }
+          ]
+        },
+        {
+          "id": "g-path-admissions",
+          "type": "path",
+          "points": [
+            { "x": 300, "y": 490 },
+            { "x": 440, "y": 490 }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "demo-first-floor",
+      "name": "First Floor",
+      "level": 1,
+      "bgImage": null,
+      "elements": [
+        {
+          "id": "f-corridor",
+          "type": "rect",
+          "zoneType": "corridor",
+          "x": 320,
+          "y": 180,
+          "w": 500,
+          "h": 420,
+          "name": "Central Corridor",
+          "description": "Main first-floor circulation."
+        },
+        {
+          "id": "f-ai-lab",
+          "type": "rect",
+          "zoneType": "room",
+          "x": 80,
+          "y": 220,
+          "w": 220,
+          "h": 140,
+          "name": "AI Lab 2.14",
+          "description": "Door-to-door routing target."
+        },
+        {
+          "id": "f-dean-office",
+          "type": "rect",
+          "zoneType": "room",
+          "x": 80,
+          "y": 420,
+          "w": 220,
+          "h": 140,
+          "name": "Dean Office",
+          "description": "Administrative office."
+        },
+        {
+          "id": "f-seminar",
+          "type": "rect",
+          "zoneType": "room",
+          "x": 520,
+          "y": 60,
+          "w": 260,
+          "h": 92,
+          "name": "Seminar Hall",
+          "description": "Event room connected to upper corridor."
+        },
+        {
+          "id": "f-stairs-room",
+          "type": "rect",
+          "zoneType": "staircase",
+          "x": 860,
+          "y": 210,
+          "w": 180,
+          "h": 140,
+          "name": "Stair Core",
+          "description": "Primary stair transition."
+        },
+        {
+          "id": "f-elevator-room",
+          "type": "rect",
+          "zoneType": "elevator",
+          "x": 860,
+          "y": 420,
+          "w": 180,
+          "h": 140,
+          "name": "Lift Lobby",
+          "description": "Main elevator connection."
+        },
+        { "id": "f-door-ai", "type": "door", "x": 300, "y": 290, "name": "AI Lab Door" },
+        { "id": "f-door-dean", "type": "door", "x": 300, "y": 490, "name": "Dean Office Door" },
+        { "id": "f-door-seminar", "type": "door", "x": 650, "y": 152, "name": "Seminar Hall Door" },
+        { "id": "f-door-stairs", "type": "door", "x": 860, "y": 280, "name": "Stair Door" },
+        { "id": "f-door-elevator", "type": "door", "x": 860, "y": 490, "name": "Lift Door" },
+        { "id": "f-wp-ai", "type": "waypoint", "x": 300, "y": 290, "name": "AI Lab Anchor", "navType": "room", "linkedFloor": null },
+        { "id": "f-wp-dean", "type": "waypoint", "x": 300, "y": 490, "name": "Dean Office Anchor", "navType": "room", "linkedFloor": null },
+        { "id": "f-wp-seminar", "type": "waypoint", "x": 650, "y": 152, "name": "Seminar Anchor", "navType": "room", "linkedFloor": null },
+        { "id": "f-wp-c1", "type": "waypoint", "x": 440, "y": 290, "name": "Corridor North", "navType": "corridor", "linkedFloor": null },
+        { "id": "f-wp-c2", "type": "waypoint", "x": 650, "y": 290, "name": "Corridor East", "navType": "corridor", "linkedFloor": null },
+        { "id": "f-wp-c3", "type": "waypoint", "x": 650, "y": 490, "name": "Corridor South East", "navType": "corridor", "linkedFloor": null },
+        { "id": "f-wp-c4", "type": "waypoint", "x": 440, "y": 490, "name": "Corridor South", "navType": "corridor", "linkedFloor": null },
+        { "id": "f-wp-stairs", "type": "waypoint", "x": 860, "y": 280, "name": "Stair Anchor", "navType": "staircase", "linkedFloor": null },
+        { "id": "f-wp-elevator", "type": "waypoint", "x": 860, "y": 490, "name": "Lift Anchor", "navType": "elevator", "linkedFloor": null },
+        {
+          "id": "f-path-main",
+          "type": "path",
+          "points": [
+            { "x": 440, "y": 290 },
+            { "x": 650, "y": 290 },
+            { "x": 860, "y": 280 }
+          ]
+        },
+        {
+          "id": "f-path-south",
+          "type": "path",
+          "points": [
+            { "x": 440, "y": 490 },
+            { "x": 650, "y": 490 },
+            { "x": 860, "y": 490 }
+          ]
+        },
+        {
+          "id": "f-path-cross",
+          "type": "path",
+          "points": [
+            { "x": 440, "y": 290 },
+            { "x": 440, "y": 490 },
+            { "x": 650, "y": 490 },
+            { "x": 650, "y": 290 }
+          ]
+        },
+        {
+          "id": "f-path-ai",
+          "type": "path",
+          "points": [
+            { "x": 300, "y": 290 },
+            { "x": 440, "y": 290 }
+          ]
+        },
+        {
+          "id": "f-path-dean",
+          "type": "path",
+          "points": [
+            { "x": 300, "y": 490 },
+            { "x": 440, "y": 490 }
+          ]
+        },
+        {
+          "id": "f-path-seminar",
+          "type": "path",
+          "points": [
+            { "x": 650, "y": 152 },
+            { "x": 650, "y": 290 }
+          ]
+        }
+      ]
+    }
+  ]
+}

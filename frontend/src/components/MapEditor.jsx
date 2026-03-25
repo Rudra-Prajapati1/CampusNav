@@ -24,8 +24,11 @@ const FILLS = {
 };
 const ZONE_TYPES = ["room","corridor","staircase","elevator","outdoor","entrance","toilet","parking"];
 const TOOLS = ["select","rect","polygon","path","waypoint","door","label","measure"];
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const uid = () => uuidv4();
+const isUuid = (value) => typeof value === "string" && UUID_PATTERN.test(value);
 const snap = (v, on) => (on ? Math.round(v / 20) * 20 : v);
 const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
 
@@ -46,16 +49,62 @@ function pointInPoly(x, y, pts) {
   return inside;
 }
 
+function pointNearRect(point, rect, tolerance = 26) {
+  return (
+    point.x >= rect.x - tolerance &&
+    point.x <= rect.x + rect.w + tolerance &&
+    point.y >= rect.y - tolerance &&
+    point.y <= rect.y + rect.h + tolerance
+  );
+}
+
+function findDoorForRoom(room, doors) {
+  const matches = doors.filter((door) => pointNearRect(door, room));
+  if (!matches.length) return null;
+
+  const centerX = room.x + room.w / 2;
+  const centerY = room.y + room.h / 2;
+  return matches.reduce((best, current) =>
+    Math.hypot(current.x - centerX, current.y - centerY) <
+    Math.hypot(best.x - centerX, best.y - centerY)
+      ? current
+      : best,
+  );
+}
+
+function normalizeImportedFloors(floors) {
+  if (!Array.isArray(floors)) return [];
+
+  const floorIdMap = new Map();
+  floors.forEach((floor) => {
+    floorIdMap.set(floor.id, isUuid(floor.id) ? floor.id : uid());
+  });
+
+  return floors.map((floor) => ({
+    ...floor,
+    id: floorIdMap.get(floor.id),
+    elements: (floor.elements || []).map((element) => ({
+      ...element,
+      id: isUuid(element.id) ? element.id : uid(),
+      linkedFloor: element.linkedFloor
+        ? floorIdMap.get(element.linkedFloor) || element.linkedFloor
+        : null,
+      points: element.points?.map((point) => ({ ...point })),
+    })),
+  }));
+}
+
 // ─── Styles ──────────────────────────────────────────────────────────────────
 const css = `
   .cne-root {
     display: flex; flex-direction: column; height: 100vh; overflow: hidden;
-    background: #0f1117; color: #e8eaf6;
-    font-family: 'SF Pro Display', -apple-system, system-ui, sans-serif;
-    --bg:#0f1117; --bg2:#161b27; --bg3:#1e2535; --bg4:#252d3f;
-    --border:#2a3450; --border2:#3a4a6a;
-    --accent:#4f6ef7; --accent2:#6b8bff; --accentdim:rgba(79,110,247,0.15);
-    --text:#e8eaf6; --text2:#8892b0; --text3:#4a5568;
+    background: radial-gradient(circle at top left, rgba(93, 162, 255, 0.12), transparent 32%), #08111d;
+    color: #edf5ff;
+    font-family: 'Manrope', -apple-system, system-ui, sans-serif;
+    --bg:#08111d; --bg2:#0f1d2d; --bg3:#122437; --bg4:#162b42;
+    --border:rgba(149, 176, 211, 0.14); --border2:rgba(149, 176, 211, 0.24);
+    --accent:#0f6efd; --accent2:#88bbff; --accentdim:rgba(15,110,253,0.16);
+    --text:#edf5ff; --text2:#a2b1c4; --text3:#71839a;
     --green:#22d3a5; --amber:#f59e0b; --red:#ef4444; --purple:#a78bfa;
   }
   .cne-topbar {
@@ -635,6 +684,15 @@ export default function MapEditor({ onSave, buildingId, floorId }) {
   };
 
   useEffect(() => {
+    const canvas = mainRef.current;
+    if (!canvas) return undefined;
+
+    const handleWheel = (event) => onWheel(event);
+    canvas.addEventListener("wheel", handleWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", handleWheel);
+  }, []);
+
+  useEffect(() => {
     const onKeyDown = (e) => {
       if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
       if (e.key === "Delete" || e.key === "Backspace") deleteSelected();
@@ -708,35 +766,42 @@ export default function MapEditor({ onSave, buildingId, floorId }) {
     draw();
   };
   const autoNav = () => {
-    const rooms = els().filter(e =>
+    const roomElements = els().filter(e =>
       e.type === "rect" &&
       ["room", "corridor", "staircase", "elevator", "entrance"].includes(e.zoneType)
     );
-    if (rooms.length < 2) { showToast("Need at least 2 rooms"); return; }
+    if (roomElements.length < 2) { showToast("Need at least 2 rooms"); return; }
     pushHistory();
     S.floors[S.currentFloor].elements =
       els().filter(e => e.type !== "waypoint" && e.type !== "path");
-    const wps = rooms.map(r => ({
-      id: uid(),
-      type: "waypoint",
-      x: r.x + r.w / 2,
-      y: r.y + r.h / 2,
-      name: r.name,
-      linkedFloor: null,
-      floor_id: null,
-    }));
-    const corridorWps = wps.filter((_, i) => rooms[i].zoneType === "corridor");
-    const roomWps = wps.filter((_, i) => rooms[i].zoneType !== "corridor");
+    const doorElements = els().filter(e => e.type === "door");
+    const wps = roomElements.map(r => {
+      const door = findDoorForRoom(r, doorElements);
+      return {
+        id: uid(),
+        type: "waypoint",
+        x: door?.x ?? r.x + r.w / 2,
+        y: door?.y ?? r.y + r.h / 2,
+        name: r.name,
+        navType: r.zoneType,
+        linkedFloor: null,
+        floor_id: null,
+      };
+    });
+    const transitWps = wps.filter((_, i) =>
+      ["corridor", "staircase", "elevator", "entrance"].includes(roomElements[i].zoneType),
+    );
+    const roomWps = wps.filter((_, i) => roomElements[i].zoneType === "room");
     const paths = [];
 
-    if (corridorWps.length >= 2) {
-      const sorted = [...corridorWps].sort((a, b) => a.x - b.x);
+    if (transitWps.length >= 2) {
+      const sorted = [...transitWps].sort((a, b) => a.x - b.x);
       paths.push({ id: uid(), type: "path", points: sorted.map(w => ({ x: w.x, y: w.y })) });
     }
 
     roomWps.forEach(rwp => {
-      const target = corridorWps.length > 0
-        ? corridorWps.reduce((best, cwp) =>
+      const target = transitWps.length > 0
+        ? transitWps.reduce((best, cwp) =>
             Math.hypot(rwp.x - cwp.x, rwp.y - cwp.y) <
             Math.hypot(rwp.x - best.x, rwp.y - best.y) ? cwp : best)
         : null;
@@ -749,14 +814,14 @@ export default function MapEditor({ onSave, buildingId, floorId }) {
       }
     });
 
-    if (corridorWps.length === 0 && wps.length >= 2) {
+    if (transitWps.length === 0 && wps.length >= 2) {
       paths.push({ id: uid(), type: "path", points: wps.map(w => ({ x: w.x, y: w.y })) });
     }
 
     wps.forEach(w => els().push(w));
     paths.forEach(p => els().push(p));
     refresh(); draw();
-    showToast(`Generated ${wps.length} waypoints and ${paths.length} paths`);
+    showToast(`Generated ${wps.length} waypoints and ${paths.length} paths from room and door anchors`);
   };
   const validateMap = () => {
     const issues = [];
@@ -781,7 +846,15 @@ export default function MapEditor({ onSave, buildingId, floorId }) {
     reader.onload = (ev) => {
       try {
         const data = JSON.parse(ev.target.result);
-        if (data.floors) { S.floors = data.floors; if (data.pixelsPerMeter) S.pixelsPerMeter = data.pixelsPerMeter; S.currentFloor = 0; S.selected = []; refresh(); draw(); showToast("Imported"); }
+        if (data.floors) {
+          S.floors = normalizeImportedFloors(data.floors);
+          if (data.pixelsPerMeter) S.pixelsPerMeter = data.pixelsPerMeter;
+          S.currentFloor = 0;
+          S.selected = [];
+          refresh();
+          draw();
+          showToast("Imported");
+        }
       } catch { showToast("Invalid JSON"); }
     };
     reader.readAsText(file);
@@ -818,6 +891,13 @@ export default function MapEditor({ onSave, buildingId, floorId }) {
   const saveMap = () => {
     const currentFloorData = S.floors[S.currentFloor];
     const elements = currentFloorData.elements;
+    const persistedIdMap = new Map();
+
+    const getPersistedId = (id) => {
+      if (isUuid(id)) return id;
+      if (!persistedIdMap.has(id)) persistedIdMap.set(id, uid());
+      return persistedIdMap.get(id);
+    };
 
     const zoneToType = {
       room: "other",
@@ -830,19 +910,38 @@ export default function MapEditor({ onSave, buildingId, floorId }) {
       parking: "other",
     };
 
-    const findRoomId = (wx, wy) => {
-      const room = elements.find(el =>
+    const findRoomElement = (wx, wy) =>
+      elements.find(el =>
         el.type === "rect" &&
         wx >= el.x && wx <= el.x + el.w &&
         wy >= el.y && wy <= el.y + el.h
       );
-      return room ? room.id : null;
+    const findRoomId = (wx, wy) => {
+      const room = findRoomElement(wx, wy);
+      return room ? getPersistedId(room.id) : null;
+    };
+
+    const inferWaypointType = (waypointElement, roomElement) => {
+      const zoneType = waypointElement.navType || roomElement?.zoneType || "room";
+      if (waypointElement.linkedFloor || zoneType === "staircase" || zoneType === "elevator") {
+        return zoneType === "elevator" ? "elevator" : "stairs";
+      }
+
+      const typeMap = {
+        corridor: "corridor",
+        staircase: "stairs",
+        elevator: "elevator",
+        entrance: "entrance",
+        room: "room_center",
+      };
+
+      return typeMap[zoneType] || "manual";
     };
 
     const rooms = elements
       .filter(el => el.type === "rect" || el.type === "polygon")
       .map(el => ({
-        id: el.id,
+        id: getPersistedId(el.id),
         name: el.name || "Unnamed",
         type: zoneToType[el.zoneType] || "other",
         x: Math.round(el.x || 0),
@@ -856,15 +955,18 @@ export default function MapEditor({ onSave, buildingId, floorId }) {
 
     const waypointElements = elements.filter(el => el.type === "waypoint");
 
-    const waypoints = waypointElements.map(el => ({
-      id: el.id,
-      x: Math.round(el.x),
-      y: Math.round(el.y),
-      type: el.linkedFloor ? "stairs" : "room_center",
-      room_id: findRoomId(el.x, el.y),
-      name: el.name || "",
-      linked_floor_id: el.linkedFloor || null,
-    }));
+    const waypoints = waypointElements.map(el => {
+      const roomElement = findRoomElement(el.x, el.y);
+      return {
+        id: getPersistedId(el.id),
+        x: Math.round(el.x),
+        y: Math.round(el.y),
+        type: inferWaypointType(el, roomElement),
+        room_id: roomElement?.zoneType === "corridor" ? null : findRoomId(el.x, el.y),
+        name: el.name || "",
+        linked_floor_id: isUuid(el.linkedFloor) ? el.linkedFloor : null,
+      };
+    });
 
     const connections = [];
     const connectedPairs = new Set();
@@ -888,13 +990,25 @@ export default function MapEditor({ onSave, buildingId, floorId }) {
             connectedPairs.add(key);
             connections.push({
               id: uuidv4(),
-              waypoint_a_id: wpA.id,
-              waypoint_b_id: wpB.id,
+              waypoint_a_id: getPersistedId(wpA.id),
+              waypoint_b_id: getPersistedId(wpB.id),
             });
           }
         }
       }
     });
+
+    if (persistedIdMap.size > 0) {
+      currentFloorData.elements.forEach((element) => {
+        if (persistedIdMap.has(element.id)) {
+          element.id = persistedIdMap.get(element.id);
+        }
+        if (element.linkedFloor && !isUuid(element.linkedFloor)) {
+          element.linkedFloor = null;
+        }
+      });
+      S.selected = S.selected.map((id) => persistedIdMap.get(id) || id);
+    }
 
     const fullEditorState = {
       floors: S.floors,
@@ -1082,7 +1196,7 @@ export default function MapEditor({ onSave, buildingId, floorId }) {
           <canvas ref={bgRef} style={{ zIndex: 0 }} />
           <canvas ref={mainRef} style={{ zIndex: 1 }}
             onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
-            onDoubleClick={onDblClick} onWheel={onWheel} />
+            onDoubleClick={onDblClick} />
           <div className="cne-info">{toolHints[S.tool] || ""}</div>
           <div className="cne-zoom">
             <button className="cne-zoom-btn" onClick={() => { S.zoom = Math.min(S.zoom * 1.2, 8); draw(); }}>+</button>

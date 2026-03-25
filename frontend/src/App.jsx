@@ -19,12 +19,10 @@ function ProtectedRoute({ children }) {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-surface-950 dark:bg-surface-950">
+      <div className="page-shell flex min-h-screen items-center justify-center">
         <div className="flex flex-col items-center gap-4">
           <div className="w-10 h-10 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
-          <p className="text-white/40 text-sm font-display">
-            Loading CampusNav...
-          </p>
+          <p className="text-sm font-display subtle-text">Loading CampusNav...</p>
         </div>
       </div>
     );
@@ -42,18 +40,18 @@ function ThemedToaster() {
       position="top-right"
       toastOptions={{
         style: {
-          background: isDark ? "#1e293b" : "#ffffff",
-          color: isDark ? "#fff" : "#1e293b",
+          background: isDark ? "rgba(10, 22, 37, 0.96)" : "rgba(255, 255, 255, 0.98)",
+          color: isDark ? "#edf5ff" : "#112031",
           border: isDark
-            ? "1px solid rgba(255,255,255,0.1)"
-            : "1px solid rgba(0,0,0,0.1)",
-          borderRadius: "12px",
+            ? "1px solid rgba(149,176,211,0.16)"
+            : "1px solid rgba(120,137,165,0.2)",
+          borderRadius: "18px",
           fontSize: "14px",
           boxShadow: isDark
-            ? "0 4px 24px rgba(0,0,0,0.3)"
-            : "0 4px 24px rgba(0,0,0,0.08)",
+            ? "0 16px 42px rgba(1,7,14,0.34)"
+            : "0 18px 44px rgba(20,42,74,0.12)",
         },
-        success: { iconTheme: { primary: "#6366f1", secondary: "#fff" } },
+        success: { iconTheme: { primary: "#0f6efd", secondary: "#fff" } },
         error: { iconTheme: { primary: "#ef4444", secondary: "#fff" } },
       }}
     />

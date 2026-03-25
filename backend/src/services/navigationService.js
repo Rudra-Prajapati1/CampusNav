@@ -47,6 +47,162 @@ const FLOOR_CHANGE_PENALTY_SECONDS = 30;
  * Default pixels-per-meter scale when floor doesn't specify.
  */
 const DEFAULT_SCALE = 50;
+const ROOM_EDGE_PADDING = 24;
+const GRAPH_WAYPOINT_PREFERENCE = new Set([
+  "corridor",
+  "manual",
+  "entrance",
+  "stairs",
+  "elevator",
+]);
+
+function roomCenter(room) {
+  return {
+    x: room.x + room.width / 2,
+    y: room.y + room.height / 2,
+  };
+}
+
+function extractEditorElements(floor) {
+  const floors = floor?.map_data?.floors;
+  if (!Array.isArray(floors) || floors.length === 0) return [];
+
+  const matched =
+    floors.find((entry) => entry.id === floor.id) ||
+    floors.find((entry) => entry.name === floor.name) ||
+    floors.find((entry) => entry.level === floor.level) ||
+    floors[0];
+
+  return Array.isArray(matched?.elements) ? matched.elements : [];
+}
+
+function pointInsideRoomWithTolerance(point, room, tolerance = ROOM_EDGE_PADDING) {
+  return (
+    point.x >= room.x - tolerance &&
+    point.x <= room.x + room.width + tolerance &&
+    point.y >= room.y - tolerance &&
+    point.y <= room.y + room.height + tolerance
+  );
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function pointDistance(a, b) {
+  return Math.hypot(a.x - b.x, a.y - b.y);
+}
+
+function projectPointToRoomEdge(room, targetPoint) {
+  const center = roomCenter(room);
+  const dx = (targetPoint?.x ?? center.x) - center.x;
+  const dy = (targetPoint?.y ?? center.y) - center.y;
+
+  if (dx === 0 && dy === 0) {
+    return { x: room.x + room.width, y: center.y };
+  }
+
+  const halfWidth = room.width / 2;
+  const halfHeight = room.height / 2;
+  const scale = 1 / Math.max(Math.abs(dx) / halfWidth, Math.abs(dy) / halfHeight);
+
+  return {
+    x: clamp(center.x + dx * scale, room.x, room.x + room.width),
+    y: clamp(center.y + dy * scale, room.y, room.y + room.height),
+  };
+}
+
+function findDoorAnchor(room, floor) {
+  const doors = extractEditorElements(floor).filter((element) => element?.type === "door");
+  if (!doors.length) return null;
+
+  const center = roomCenter(room);
+  const candidates = doors.filter((door) =>
+    pointInsideRoomWithTolerance({ x: door.x, y: door.y }, room),
+  );
+
+  if (!candidates.length) return null;
+
+  return candidates.reduce((best, current) =>
+    pointDistance(current, center) < pointDistance(best, center) ? current : best,
+  );
+}
+
+function chooseGraphWaypoint(anchor, room, waypoints) {
+  const sameFloor = waypoints.filter((wp) => wp.floor_id === room.floor_id);
+  if (!sameFloor.length) return null;
+
+  const ranked = sameFloor
+    .map((wp) => ({
+      wp,
+      distance: pointDistance(anchor, wp),
+      preferred:
+        wp.room_id !== room.id ||
+        GRAPH_WAYPOINT_PREFERENCE.has(wp.type) ||
+        wp.type !== "room_center",
+    }))
+    .sort(
+      (a, b) =>
+        a.distance + (a.preferred ? 0 : 160) - (b.distance + (b.preferred ? 0 : 160)),
+    );
+
+  return ranked[0]?.wp || null;
+}
+
+function buildRoomAnchor(room, floor, waypoints) {
+  const door = findDoorAnchor(room, floor);
+  const center = roomCenter(room);
+  const graphWaypoint = chooseGraphWaypoint(door || center, room, waypoints);
+
+  if (door) {
+    return {
+      anchor: { x: door.x, y: door.y },
+      graphWaypoint,
+      kind: "door",
+    };
+  }
+
+  return {
+    anchor: projectPointToRoomEdge(room, graphWaypoint || center),
+    graphWaypoint,
+    kind: "edge",
+  };
+}
+
+function createVirtualWaypoint(room, anchor, label, kind) {
+  return {
+    id: `${kind}_anchor_${room.id}`,
+    x: anchor.x,
+    y: anchor.y,
+    floor_id: room.floor_id,
+    room_id: room.id,
+    type: "door_anchor",
+    name: label,
+    is_virtual: true,
+  };
+}
+
+function prependVirtualWaypoint(path, waypoint) {
+  if (!path.length) return [waypoint];
+
+  const first = path[0];
+  if (pointDistance(first, waypoint) < 1 && first.floor_id === waypoint.floor_id) {
+    return path;
+  }
+
+  return [waypoint, ...path];
+}
+
+function appendVirtualWaypoint(path, waypoint) {
+  if (!path.length) return [waypoint];
+
+  const last = path[path.length - 1];
+  if (pointDistance(last, waypoint) < 1 && last.floor_id === waypoint.floor_id) {
+    return path;
+  }
+
+  return [...path, waypoint];
+}
 
 /**
  * Calculate the full navigation route between two rooms.
@@ -117,9 +273,17 @@ export async function calculateRoute(fromRoomId, toRoomId, buildingId) {
     );
   }
 
-  // ─── Step 4: Find start and end waypoints ─────────────────────────
-  const startWaypoint = waypoints.find((w) => w.room_id === fromRoomId);
-  const endWaypoint = waypoints.find((w) => w.room_id === toRoomId);
+  // ─── Step 4: Find room anchors and graph entry points ─────────────
+  const floorById = new Map(floors.map((floor) => [floor.id, floor]));
+  const fromFloor = floorById.get(fromRoom.floor_id);
+  const toFloor = floorById.get(toRoom.floor_id);
+
+  const startAnchor = buildRoomAnchor(fromRoom, fromFloor, waypoints);
+  const endAnchor = buildRoomAnchor(toRoom, toFloor, waypoints);
+  const startWaypoint =
+    startAnchor.graphWaypoint || waypoints.find((w) => w.room_id === fromRoomId);
+  const endWaypoint =
+    endAnchor.graphWaypoint || waypoints.find((w) => w.room_id === toRoomId);
 
   if (!startWaypoint) {
     throw new NavigationError(
@@ -172,9 +336,23 @@ export async function calculateRoute(fromRoomId, toRoomId, buildingId) {
   }
 
   // ─── Step 7: Convert path IDs to waypoint objects ─────────────────
-  const pathWaypoints = pathResult.path
+  let pathWaypoints = pathResult.path
     .map((wpId) => waypointMap[wpId])
     .filter(Boolean);
+
+  pathWaypoints = prependVirtualWaypoint(
+    pathWaypoints,
+    createVirtualWaypoint(
+      fromRoom,
+      startAnchor.anchor,
+      `${fromRoom.name} start`,
+      "start",
+    ),
+  );
+  pathWaypoints = appendVirtualWaypoint(
+    pathWaypoints,
+    createVirtualWaypoint(toRoom, endAnchor.anchor, `${toRoom.name} destination`, "end"),
+  );
 
   // ─── Step 8: Calculate real-world distance ────────────────────────
   const floorScaleMap = new Map();
@@ -224,6 +402,18 @@ export async function calculateRoute(fromRoomId, toRoomId, buildingId) {
     floor_changes: floorChanges,
     from_room: fromRoom,
     to_room: toRoom,
+    anchors: {
+      from: {
+        ...startAnchor.anchor,
+        floor_id: fromRoom.floor_id,
+        kind: startAnchor.kind,
+      },
+      to: {
+        ...endAnchor.anchor,
+        floor_id: toRoom.floor_id,
+        kind: endAnchor.kind,
+      },
+    },
     metadata: {
       algorithm: cachedRoute ? "cached" : "astar",
       compute_time_ms: computeTime,

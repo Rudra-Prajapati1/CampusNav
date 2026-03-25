@@ -1,25 +1,30 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import {
+  startTransition,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { useParams, useSearchParams } from "react-router-dom";
-import { MapContainer, TileLayer, Marker, Polyline, useMap } from "react-leaflet";
+import { MapContainer, Marker, Polyline, TileLayer, useMap } from "react-leaflet";
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import {
-  Search,
+  Building2,
+  Compass,
+  Crosshair,
+  Moon,
   Navigation,
-  MapPin,
-  X,
-  ChevronDown,
-  ArrowRight,
-  RotateCcw,
+  Search,
+  Sparkles,
+  Sun,
+  Wifi,
   ZoomIn,
   ZoomOut,
-  Clock,
-  Footprints,
-  Crosshair,
-  Building2,
-  Sun,
-  Moon,
 } from "lucide-react";
+import IndoorCanvas from "../../components/navigation/IndoorCanvas.jsx";
+import { useSensorFusion } from "../../hooks/useSensorFusion.js";
 import { api } from "../../utils/api.js";
 import { useTheme } from "../../context/themeContext.jsx";
 
@@ -31,7 +36,8 @@ L.Icon.Default.mergeOptions({
 });
 
 const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY;
-const USE_MAPTILER = import.meta.env.VITE_USE_MAPTILER === "true" && MAPTILER_KEY;
+const USE_MAPTILER =
+  import.meta.env.VITE_USE_MAPTILER === "true" && Boolean(MAPTILER_KEY);
 const TILE_URL = USE_MAPTILER
   ? `https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=${MAPTILER_KEY}`
   : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
@@ -39,53 +45,62 @@ const TILE_ATTRIBUTION = USE_MAPTILER
   ? '&copy; <a href="https://www.maptiler.com">MapTiler</a> &copy; <a href="https://www.openstreetmap.org">OpenStreetMap</a>'
   : '&copy; <a href="https://www.openstreetmap.org">OpenStreetMap</a> contributors';
 
-const ROOM_COLORS = {
-  classroom: { color: "#6366f1", bg: "rgba(99,102,241,0.18)" },
-  lab: { color: "#8b5cf6", bg: "rgba(139,92,246,0.18)" },
-  office: { color: "#06b6d4", bg: "rgba(6,182,212,0.18)" },
-  toilet: { color: "#64748b", bg: "rgba(100,116,139,0.18)" },
-  stairs: { color: "#f59e0b", bg: "rgba(245,158,11,0.18)" },
-  elevator: { color: "#10b981", bg: "rgba(16,185,129,0.18)" },
-  entrance: { color: "#ef4444", bg: "rgba(239,68,68,0.18)" },
-  canteen: { color: "#f97316", bg: "rgba(249,115,22,0.18)" },
-  corridor: { color: "#94a3b8", bg: "rgba(148,163,184,0.1)" },
-  other: { color: "#a3a3a3", bg: "rgba(163,163,163,0.12)" },
-};
-
-function MapCenter({ center }) {
-  const map = useMap();
-  useEffect(() => {
-    if (center) map.setView(center, map.getZoom(), { animate: true });
-  }, [center, map]);
-  return null;
-}
-
-function MapResize() {
-  const map = useMap();
-
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      map.invalidateSize();
-    }, 0);
-
-    return () => clearTimeout(timer);
-  }, [map]);
-
-  return null;
-}
-
-function pinIcon(color) {
+function pinIcon(color, size = 16) {
   return L.divIcon({
     className: "",
-    html: `<div style="width:14px;height:14px;background:${color};border:3px solid white;border-radius:50%;box-shadow:0 2px 8px rgba(0,0,0,0.3)"></div>`,
-    iconSize: [14, 14],
-    iconAnchor: [7, 7],
+    html: `<div style="width:${size}px;height:${size}px;background:${color};border:3px solid white;border-radius:999px;box-shadow:0 10px 24px rgba(15,23,42,0.2)"></div>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
   });
 }
 
-function buildDirectRoute(from, to) {
-  if (!from || !to) return null;
-  return [from, to];
+function FitMapToPoints({ points, fallbackCenter, fallbackZoom = 18 }) {
+  const map = useMap();
+
+  useEffect(() => {
+    if (points?.length > 1) {
+      map.fitBounds(points, { padding: [46, 46], maxZoom: 20 });
+    } else if (fallbackCenter) {
+      map.setView(fallbackCenter, fallbackZoom, { animate: true });
+    }
+  }, [fallbackCenter, fallbackZoom, map, points]);
+
+  return null;
+}
+
+function OutdoorMapControls() {
+  const map = useMap();
+
+  return (
+    <div className="absolute bottom-4 right-4 z-[500] flex flex-col gap-2">
+      <button onClick={() => map.zoomIn()} className="btn-secondary h-11 w-11 rounded-full p-0">
+        <ZoomIn className="h-4 w-4" />
+      </button>
+      <button onClick={() => map.zoomOut()} className="btn-secondary h-11 w-11 rounded-full p-0">
+        <ZoomOut className="h-4 w-4" />
+      </button>
+    </div>
+  );
+}
+
+function getStepVisual(step) {
+  const type = typeof step === "string" ? "" : step?.type || "";
+  const text = typeof step === "string" ? step : step?.text || "";
+
+  if (type.includes("stairs") || type.includes("elevator")) {
+    return { label: "Floor", accent: "text-amber-500", text };
+  }
+  if (type.includes("turn")) {
+    return { label: "Turn", accent: "text-brand-500", text };
+  }
+  if (type === "start") {
+    return { label: "Start", accent: "text-emerald-500", text };
+  }
+  if (type === "arrive") {
+    return { label: "Arrive", accent: "text-rose-500", text };
+  }
+
+  return { label: "Walk", accent: "text-sky-500", text };
 }
 
 export default function NavigatePage() {
@@ -95,142 +110,230 @@ export default function NavigatePage() {
   const { isDark, toggleTheme } = useTheme();
 
   const [mode, setMode] = useState(fromRoomId ? "indoor" : "outdoor");
-
   const [building, setBuilding] = useState(null);
   const [floors, setFloors] = useState([]);
   const [currentFloor, setCurrentFloor] = useState(null);
   const [floorData, setFloorData] = useState(null);
+  const [floorImage, setFloorImage] = useState(null);
 
   const [userLocation, setUserLocation] = useState(null);
-  const [mapCenter, setMapCenter] = useState(null);
+  const [locationLoading, setLocationLoading] = useState(false);
   const [outdoorRoute, setOutdoorRoute] = useState(null);
   const [outdoorRouteMessage, setOutdoorRouteMessage] = useState("");
-  const [locationLoading, setLocationLoading] = useState(false);
 
   const [fromRoom, setFromRoom] = useState(null);
   const [toRoom, setToRoom] = useState(null);
   const [indoorRoute, setIndoorRoute] = useState(null);
   const [routeLoading, setRouteLoading] = useState(false);
 
+  const [selectingFor, setSelectingFor] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
-  const [selectingFor, setSelectingFor] = useState(null);
-  const [showSteps, setShowSteps] = useState(false);
+  const [searchLoading, setSearchLoading] = useState(false);
 
-  const canvasRef = useRef(null);
-  const containerRef = useRef(null);
-  const imgRef = useRef(null);
-  const animFrameRef = useRef(null);
-  const [pan, setPan] = useState({ x: 40, y: 40 });
-  const [zoom, setZoom] = useState(0.9);
-  const [isPanning, setIsPanning] = useState(false);
-  const [panStart, setPanStart] = useState(null);
-  const [canvasSize, setCanvasSize] = useState({ w: 800, h: 600 });
-  const [pathAnimOffset, setPathAnimOffset] = useState(0);
+  const deferredSearchQuery = useDeferredValue(searchQuery.trim());
+  const sensorFusion = useSensorFusion(mode === "indoor");
 
   useEffect(() => {
     if (!buildingId) return;
+
     api.buildings
       .get(buildingId)
-      .then((b) => {
-        setBuilding(b);
-        const sorted = (b.floors || []).sort((a, z) => a.level - z.level);
-        setFloors(sorted);
-        if (sorted.length > 0) setCurrentFloor(sorted[0]);
-        if (b.entrance_lat && b.entrance_lng) {
-          setMapCenter([parseFloat(b.entrance_lat), parseFloat(b.entrance_lng)]);
+      .then((data) => {
+        setBuilding(data);
+        const orderedFloors = [...(data.floors || [])].sort(
+          (left, right) => left.level - right.level,
+        );
+        setFloors(orderedFloors);
+        if (orderedFloors.length > 0) {
+          setCurrentFloor((previous) => previous || orderedFloors[0]);
         }
       })
-      .catch(console.error);
+      .catch((error) => console.error(error));
   }, [buildingId]);
 
   useEffect(() => {
-    if (!fromRoomId || !floors.length) return;
+    if (!fromRoomId) return;
+
     api.rooms
       .get(fromRoomId)
       .then((room) => {
         setFromRoom(room);
-        const found = floors.find((floor) => floor.id === room.floor_id);
-        if (found) setCurrentFloor(found);
+        setMode("indoor");
       })
-      .catch(console.error);
-  }, [fromRoomId, floors]);
+      .catch((error) => console.error(error));
+  }, [fromRoomId]);
+
+  useEffect(() => {
+    if (!fromRoom?.floor_id || !floors.length) return;
+    const floor = floors.find((entry) => entry.id === fromRoom.floor_id);
+    if (floor) setCurrentFloor(floor);
+  }, [floors, fromRoom]);
 
   useEffect(() => {
     if (!currentFloor) return;
+
+    let cancelled = false;
+    setFloorData(null);
+    setFloorImage(null);
+
     api.floors
       .get(currentFloor.id)
       .then((data) => {
+        if (cancelled) return;
         setFloorData(data);
-        imgRef.current = null;
-        if (data.floor_plan_url) {
-          const img = new Image();
-          img.crossOrigin = "anonymous";
-          img.src = data.floor_plan_url;
-          img.onload = () => {
-            imgRef.current = img;
-          };
-        }
+
+        if (!data.floor_plan_url) return;
+
+        const image = new Image();
+        image.crossOrigin = "anonymous";
+        image.onload = () => {
+          if (!cancelled) setFloorImage(image);
+        };
+        image.src = data.floor_plan_url;
       })
-      .catch(console.error);
+      .catch((error) => console.error(error));
+
+    return () => {
+      cancelled = true;
+    };
   }, [currentFloor]);
+
+  useEffect(() => {
+    if (!deferredSearchQuery || !buildingId) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      return;
+    }
+
+    let cancelled = false;
+    setSearchLoading(true);
+
+    const timer = setTimeout(() => {
+      api.rooms
+        .search(buildingId, deferredSearchQuery)
+        .then((results) => {
+          if (cancelled) return;
+          startTransition(() => setSearchResults(results || []));
+        })
+        .catch(() => {
+          if (!cancelled) setSearchResults([]);
+        })
+        .finally(() => {
+          if (!cancelled) setSearchLoading(false);
+        });
+    }, 220);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [buildingId, deferredSearchQuery]);
+
+  const selectRoom = useCallback(
+    (room) => {
+      if (selectingFor === "from") setFromRoom(room);
+      else setToRoom(room);
+
+      setSearchQuery("");
+      setSearchResults([]);
+      setSelectingFor(null);
+      setIndoorRoute(null);
+    },
+    [selectingFor],
+  );
+
+  const floorPathMap = useMemo(() => {
+    const grouped = new Map();
+    (indoorRoute?.path || []).forEach((point) => {
+      if (!grouped.has(point.floor_id)) grouped.set(point.floor_id, []);
+      grouped.get(point.floor_id).push(point);
+    });
+    return grouped;
+  }, [indoorRoute]);
+
+  const currentFloorPath = currentFloor ? floorPathMap.get(currentFloor.id) || [] : [];
+
+  const outdoorFitPoints = useMemo(() => {
+    if (outdoorRoute?.length) return outdoorRoute;
+
+    const points = [];
+    if (userLocation) points.push(userLocation);
+    if (building?.entrance_lat && building?.entrance_lng) {
+      points.push([
+        Number.parseFloat(building.entrance_lat),
+        Number.parseFloat(building.entrance_lng),
+      ]);
+    }
+    return points;
+  }, [building, outdoorRoute, userLocation]);
+
+  const visibleFloors = useMemo(() => {
+    if (!indoorRoute?.floors_involved?.length) return floors;
+    const routeFloorIds = new Set(indoorRoute.floors_involved);
+    return floors.filter((floor) => routeFloorIds.has(floor.id));
+  }, [floors, indoorRoute]);
 
   const getUserLocation = useCallback(() => {
     if (!navigator.geolocation) {
-      alert("GPS not supported by your browser.");
+      window.alert("Geolocation is not supported by this browser.");
       return;
     }
+
     setLocationLoading(true);
     navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        const loc = [pos.coords.latitude, pos.coords.longitude];
-        setUserLocation(loc);
-        setMapCenter(loc);
-        setLocationLoading(false);
-        if (building?.entrance_lat && building?.entrance_lng) {
-          fetch(
-            `/api/v1/navigation/outdoor-route?fromLat=${loc[0]}&fromLng=${loc[1]}&toLat=${building.entrance_lat}&toLng=${building.entrance_lng}`,
-          )
-            .then(async (r) => {
-              const data = await r.json().catch(() => ({}));
-              if (!r.ok) {
-                throw new Error(data.error || "Could not load outdoor route.");
-              }
-              return data;
-            })
-            .then((data) => {
-              if (data.coordinates?.length) {
-                setOutdoorRoute(data.coordinates.map((c) => [c[1], c[0]]));
-                setOutdoorRouteMessage(data.message || "");
-              } else {
-                setOutdoorRoute(
-                  buildDirectRoute(loc, [
-                    parseFloat(building.entrance_lat),
-                    parseFloat(building.entrance_lng),
-                  ]),
-                );
-                setOutdoorRouteMessage(
-                  "Walking directions are unavailable right now, so showing a direct line to the entrance.",
-                );
-              }
-            })
-            .catch((err) => {
-              console.error(err);
-              setOutdoorRoute(
-                buildDirectRoute(loc, [
-                  parseFloat(building.entrance_lat),
-                  parseFloat(building.entrance_lng),
-                ]),
-              );
-              setOutdoorRouteMessage(
-                "Walking directions are unavailable right now, so showing a direct line to the entrance.",
-              );
-            });
+      async (position) => {
+        const currentLocation = [
+          position.coords.latitude,
+          position.coords.longitude,
+        ];
+        setUserLocation(currentLocation);
+
+        if (!building?.entrance_lat || !building?.entrance_lng) {
+          setLocationLoading(false);
+          return;
+        }
+
+        try {
+          const response = await fetch(
+            `/api/v1/navigation/outdoor-route?fromLat=${currentLocation[0]}&fromLng=${currentLocation[1]}&toLat=${building.entrance_lat}&toLng=${building.entrance_lng}`,
+          );
+          const data = await response.json();
+
+          if (data.coordinates?.length) {
+            setOutdoorRoute(data.coordinates.map((coord) => [coord[1], coord[0]]));
+            setOutdoorRouteMessage(data.message || "");
+          } else {
+            setOutdoorRoute([
+              currentLocation,
+              [
+                Number.parseFloat(building.entrance_lat),
+                Number.parseFloat(building.entrance_lng),
+              ],
+            ]);
+            setOutdoorRouteMessage(
+              "Walking directions are temporarily unavailable, so a direct approach line is shown instead.",
+            );
+          }
+        } catch (error) {
+          console.error(error);
+          setOutdoorRoute([
+            currentLocation,
+            [
+              Number.parseFloat(building.entrance_lat),
+              Number.parseFloat(building.entrance_lng),
+            ],
+          ]);
+          setOutdoorRouteMessage(
+            "Walking directions are temporarily unavailable, so a direct approach line is shown instead.",
+          );
+        } finally {
+          setLocationLoading(false);
         }
       },
       () => {
         setLocationLoading(false);
-        alert("Could not get location. Please allow location access.");
+        window.alert("Unable to access location. Please enable GPS permission.");
       },
       { enableHighAccuracy: true, timeout: 10000 },
     );
@@ -238,649 +341,377 @@ export default function NavigatePage() {
 
   const getIndoorRoute = useCallback(async () => {
     if (!fromRoom || !toRoom) return;
+
     setRouteLoading(true);
     try {
       const result = await api.navigation.route(fromRoom.id, toRoom.id, buildingId);
       setIndoorRoute(result);
-      setShowSteps(true);
-      if (result.floors_involved?.length > 0) {
-        const found = floors.find((floor) => floor.id === result.floors_involved[0]);
-        if (found) setCurrentFloor(found);
-      }
-    } catch (err) {
-      alert(err.message);
+      const firstFloor = floors.find((floor) => floor.id === result.floors_involved?.[0]);
+      if (firstFloor) setCurrentFloor(firstFloor);
+    } catch (error) {
+      window.alert(error.message || "Unable to calculate route.");
     } finally {
       setRouteLoading(false);
     }
-  }, [fromRoom, toRoom, buildingId, floors]);
-
-  useEffect(() => {
-    if (!searchQuery.trim() || !buildingId) {
-      setSearchResults([]);
-      return;
-    }
-    const timeoutId = setTimeout(() => {
-      api.rooms
-        .search(buildingId, searchQuery)
-        .then(setSearchResults)
-        .catch(() => setSearchResults([]));
-    }, 300);
-    return () => clearTimeout(timeoutId);
-  }, [searchQuery, buildingId]);
-
-  const selectRoom = useCallback(
-    (room) => {
-      if (selectingFor === "from") setFromRoom(room);
-      else setToRoom(room);
-      setSearchQuery("");
-      setSearchResults([]);
-      setSelectingFor(null);
-    },
-    [selectingFor],
-  );
-
-  useEffect(() => {
-    const update = () => {
-      if (containerRef.current) {
-        const { width, height } = containerRef.current.getBoundingClientRect();
-        setCanvasSize({ w: width, h: height });
-      }
-    };
-    update();
-    window.addEventListener("resize", update);
-    return () => window.removeEventListener("resize", update);
-  }, []);
-
-  useEffect(() => {
-    if (!indoorRoute) return;
-    const animate = () => {
-      setPathAnimOffset((offset) => (offset + 0.5) % 20);
-      animFrameRef.current = requestAnimationFrame(animate);
-    };
-    animFrameRef.current = requestAnimationFrame(animate);
-    return () => {
-      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
-    };
-  }, [indoorRoute]);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !floorData || mode !== "indoor") return;
-    const ctx = canvas.getContext("2d");
-
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.save();
-    ctx.translate(pan.x, pan.y);
-    ctx.scale(zoom, zoom);
-    ctx.imageSmoothingEnabled = true;
-
-    if (imgRef.current) {
-      ctx.globalAlpha = 0.3;
-      ctx.drawImage(
-        imgRef.current,
-        0,
-        0,
-        floorData.floor_plan_width || 1200,
-        floorData.floor_plan_height || 800,
-      );
-      ctx.globalAlpha = 1;
-    }
-
-    const rooms = floorData.rooms || [];
-    const pathOnFloor = (indoorRoute?.path || []).filter(
-      (wp) => wp.floor_id === currentFloor?.id,
-    );
-
-    rooms.forEach((room) => {
-      const type = ROOM_COLORS[room.type] || ROOM_COLORS.other;
-      const isFrom = fromRoom?.id === room.id;
-      const isTo = toRoom?.id === room.id;
-      const onRoute = pathOnFloor.some((wp) => wp.room_id === room.id);
-
-      ctx.fillStyle = isFrom
-        ? "rgba(34,197,94,0.25)"
-        : isTo
-          ? "rgba(239,68,68,0.25)"
-          : onRoute
-            ? "rgba(99,102,241,0.25)"
-            : room.color || type.bg;
-      ctx.beginPath();
-      ctx.roundRect(room.x, room.y, room.width, room.height, 8 / zoom);
-      ctx.fill();
-
-      ctx.strokeStyle = isFrom
-        ? "#22c55e"
-        : isTo
-          ? "#ef4444"
-          : onRoute
-            ? "#6366f1"
-            : type.color + "60";
-      ctx.lineWidth = (isFrom || isTo || onRoute ? 2.5 : 1.5) / zoom;
-      ctx.stroke();
-
-      const fontSize = Math.max(9, Math.min(13, room.width / 8)) / zoom;
-      ctx.fillStyle = isDark ? "rgba(255,255,255,0.85)" : "rgba(30,41,59,0.85)";
-      ctx.font = `500 ${fontSize}px system-ui`;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(room.name, room.x + room.width / 2, room.y + room.height / 2);
-
-      if (isFrom || isTo) {
-        const cx = room.x + room.width / 2;
-        const cy = room.y - 14 / zoom;
-        ctx.beginPath();
-        ctx.arc(cx, cy, 8 / zoom, 0, Math.PI * 2);
-        ctx.fillStyle = isFrom ? "#22c55e" : "#ef4444";
-        ctx.fill();
-        ctx.fillStyle = "#fff";
-        ctx.font = `bold ${10 / zoom}px system-ui`;
-        ctx.fillText(isFrom ? "A" : "B", cx, cy);
-      }
-    });
-
-    if (pathOnFloor.length > 1) {
-      ctx.beginPath();
-      ctx.moveTo(pathOnFloor[0].x, pathOnFloor[0].y);
-      pathOnFloor.slice(1).forEach((wp) => ctx.lineTo(wp.x, wp.y));
-      ctx.shadowColor = "#6366f1";
-      ctx.shadowBlur = 16;
-      ctx.strokeStyle = "#6366f1";
-      ctx.lineWidth = 4 / zoom;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.setLineDash([12, 8]);
-      ctx.lineDashOffset = -pathAnimOffset;
-      ctx.stroke();
-      ctx.setLineDash([]);
-      ctx.shadowBlur = 0;
-      pathOnFloor.forEach((wp) => {
-        ctx.beginPath();
-        ctx.arc(wp.x, wp.y, 5 / zoom, 0, Math.PI * 2);
-        ctx.fillStyle = "#818cf8";
-        ctx.fill();
-        ctx.strokeStyle = "#fff";
-        ctx.lineWidth = 1.5 / zoom;
-        ctx.stroke();
-      });
-    }
-
-    ctx.restore();
-  }, [
-    floorData,
-    fromRoom,
-    toRoom,
-    indoorRoute,
-    pan,
-    zoom,
-    canvasSize,
-    pathAnimOffset,
-    currentFloor,
-    isDark,
-    mode,
-  ]);
-
-  const onMouseDown = (e) => {
-    setIsPanning(true);
-    setPanStart({ x: e.clientX - pan.x, y: e.clientY - pan.y });
-  };
-
-  const onMouseMove = (e) => {
-    if (isPanning && panStart) {
-      setPan({ x: e.clientX - panStart.x, y: e.clientY - panStart.y });
-    }
-  };
-
-  const onMouseUp = () => {
-    setIsPanning(false);
-    setPanStart(null);
-  };
-
-  const onWheel = (e) => {
-    e.preventDefault();
-    setZoom((value) => Math.min(4, Math.max(0.3, value * (e.deltaY > 0 ? 0.9 : 1.1))));
-  };
-
-  const touchRef = useRef({ d: 0 });
-
-  const onTouchStart = (e) => {
-    if (e.touches.length === 1) {
-      setIsPanning(true);
-      setPanStart({
-        x: e.touches[0].clientX - pan.x,
-        y: e.touches[0].clientY - pan.y,
-      });
-    } else if (e.touches.length === 2) {
-      const dx = e.touches[0].clientX - e.touches[1].clientX;
-      const dy = e.touches[0].clientY - e.touches[1].clientY;
-      touchRef.current.d = Math.sqrt(dx * dx + dy * dy);
-    }
-  };
-
-  const onTouchMove = (e) => {
-    e.preventDefault();
-    if (e.touches.length === 1 && isPanning && panStart) {
-      setPan({
-        x: e.touches[0].clientX - panStart.x,
-        y: e.touches[0].clientY - panStart.y,
-      });
-    } else if (e.touches.length === 2) {
-      const dx = e.touches[0].clientX - e.touches[1].clientX;
-      const dy = e.touches[0].clientY - e.touches[1].clientY;
-      const distance = Math.sqrt(dx * dx + dy * dy);
-      if (touchRef.current.d > 0) {
-        setZoom((value) =>
-          Math.min(4, Math.max(0.3, value * distance / touchRef.current.d)),
-        );
-      }
-      touchRef.current.d = distance;
-    }
-  };
-
-  const onTouchEnd = () => {
-    setIsPanning(false);
-    setPanStart(null);
-    touchRef.current.d = 0;
-  };
+  }, [buildingId, floors, fromRoom, toRoom]);
 
   return (
-    <div className={`h-screen flex flex-col overflow-hidden ${isDark ? "bg-surface-950" : "bg-gray-50"}`}>
-      <div className="flex-shrink-0 px-4 pt-safe-top">
-        <div className="flex items-center gap-2.5 py-3">
-          <div className="w-7 h-7 bg-gradient-to-br from-brand-500 to-violet-500 rounded-lg flex items-center justify-center flex-shrink-0">
-            <Navigation className="w-3.5 h-3.5 text-white" />
-          </div>
-          <h1
-            className={`font-display font-bold text-sm flex-1 truncate ${isDark ? "text-white" : "text-gray-900"}`}
-          >
-            {building?.name || "CampusNav"}
-          </h1>
-          <button
-            onClick={toggleTheme}
-            className={`p-2 rounded-xl ${isDark ? "glass text-white/50 hover:text-white" : "bg-gray-100 text-gray-500 hover:text-gray-900"}`}
-            aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
-          >
-            {isDark ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
-          </button>
-          <div
-            className={`flex rounded-xl overflow-hidden border text-xs ${isDark ? "border-white/10" : "border-gray-200"}`}
-          >
-            {["outdoor", "indoor"].map((entry) => (
-              <button
-                key={entry}
-                onClick={() => setMode(entry)}
-                className={`px-3 py-1.5 font-medium transition-all capitalize ${
-                  mode === entry
-                    ? "bg-brand-600 text-white"
-                    : isDark
-                      ? "text-white/40 hover:text-white"
-                      : "text-gray-500 hover:text-gray-900"
-                }`}
-              >
-                {entry}
-              </button>
-            ))}
-          </div>
-          {mode === "indoor" && floors.length > 1 && (
-            <select
-              value={currentFloor?.id || ""}
-              onChange={(e) => {
-                const found = floors.find((floor) => floor.id === e.target.value);
-                if (found) setCurrentFloor(found);
-              }}
-              className={`text-xs px-2 py-1.5 rounded-xl border focus:outline-none ${isDark ? "glass text-white border-white/10" : "bg-white text-gray-900 border-gray-200"}`}
-            >
-              {floors.map((floor) => (
-                <option key={floor.id} value={floor.id}>
-                  {floor.name}
-                </option>
-              ))}
-            </select>
-          )}
-        </div>
-
-        {mode === "outdoor" && (
-          <div className="pb-3 space-y-2">
-            <button
-              onClick={getUserLocation}
-              disabled={locationLoading}
-              className="btn-primary w-full justify-center"
-            >
-              {locationLoading ? (
-                <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
-              ) : (
-                <Crosshair className="w-4 h-4" />
-              )}
-              {locationLoading ? "Getting location..." : "Find My Location & Get Walking Route"}
-            </button>
-            {!building?.entrance_lat && (
-              <p className="text-xs text-center text-amber-400">
-                Entrance coordinates not set. Ask admin to add them.
-              </p>
-            )}
-            {outdoorRouteMessage && (
-              <p className={`text-xs text-center ${isDark ? "text-white/50" : "text-gray-500"}`}>
-                {outdoorRouteMessage}
-              </p>
-            )}
-            <div
-              className={`flex items-center justify-center gap-4 rounded-xl px-3 py-2 text-xs ${
-                isDark ? "glass text-white/60" : "bg-white border border-gray-200 text-gray-600"
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                <span className="block h-3 w-3 rounded-full bg-green-500 ring-2 ring-white" />
-                <span>You</span>
+    <div className="page-shell page-grid min-h-screen p-3 sm:p-4">
+      <div className="mx-auto flex h-[calc(100dvh-1.5rem)] w-full max-w-[1600px] flex-col overflow-hidden rounded-[32px] border border-[var(--border)] bg-[var(--surface)] shadow-card lg:h-[calc(100dvh-2rem)]">
+        <header className="flex flex-col gap-4 border-b border-[var(--border)] px-4 py-4 sm:px-6">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="flex items-center gap-4">
+              <div className="flex h-12 w-12 items-center justify-center rounded-[22px] bg-gradient-to-br from-brand-500 via-sky-500 to-cyan-400 text-white">
+                <Compass className="h-5 w-5" />
               </div>
-              <div className="flex items-center gap-2">
-                <span className="block h-3 w-3 rounded-full bg-brand-500 ring-2 ring-white" />
-                <span>Building entrance</span>
+              <div>
+                <div className="badge mb-2">
+                  <Sparkles className="h-3.5 w-3.5 text-brand-500" />
+                  Navigation workspace
+                </div>
+                <h1 className="font-display text-2xl font-bold sm:text-3xl">
+                  {building?.name || "Campus navigation"}
+                </h1>
+                <p className="text-sm subtle-text">
+                  A cleaner, map-first route experience for outdoor and indoor wayfinding.
+                </p>
               </div>
             </div>
-            <button
-              onClick={() => setMode("indoor")}
-              className={`w-full flex items-center justify-center gap-2 py-2 rounded-xl text-sm border ${isDark ? "glass text-white/60" : "bg-white border-gray-200 text-gray-600"}`}
-            >
-              <Building2 className="w-4 h-4" />
-              Already inside? Switch to Indoor Navigation
-            </button>
-          </div>
-        )}
 
-        {mode === "indoor" && (
-          <div className="space-y-2 pb-3">
-            <div
-              onClick={() => {
-                setSelectingFor("from");
-                setSearchQuery("");
-              }}
-              className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer border ${
-                selectingFor === "from"
-                  ? "border-green-500/40"
-                  : isDark
-                    ? "glass"
-                    : "bg-white border-gray-200"
-              }`}
-            >
-              <div className="w-5 h-5 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0">
-                <span className="text-white text-[9px] font-bold">A</span>
-              </div>
-              <span
-                className={`text-sm flex-1 ${fromRoom ? (isDark ? "text-white" : "text-gray-900") : isDark ? "text-white/30" : "text-gray-400"}`}
-              >
-                {fromRoom?.name || "Starting point / your location"}
-              </span>
-              {fromRoom && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setFromRoom(null);
-                    setIndoorRoute(null);
-                  }}
-                  className="text-white/30 hover:text-white"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-
-            <div
-              onClick={() => {
-                setSelectingFor("to");
-                setSearchQuery("");
-              }}
-              className={`flex items-center gap-2.5 px-3 py-2.5 rounded-xl cursor-pointer border ${
-                selectingFor === "to"
-                  ? "border-red-500/40"
-                  : isDark
-                    ? "glass"
-                    : "bg-white border-gray-200"
-              }`}
-            >
-              <div className="w-5 h-5 bg-red-500 rounded-full flex items-center justify-center flex-shrink-0">
-                <span className="text-white text-[9px] font-bold">B</span>
-              </div>
-              <span
-                className={`text-sm flex-1 ${toRoom ? (isDark ? "text-white" : "text-gray-900") : isDark ? "text-white/30" : "text-gray-400"}`}
-              >
-                {toRoom?.name || "Where do you want to go?"}
-              </span>
-              {toRoom && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setToRoom(null);
-                    setIndoorRoute(null);
-                  }}
-                  className="text-white/30 hover:text-white"
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-
-            {selectingFor && (
-              <div className="relative animate-in">
-                <Search
-                  className={`w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 ${isDark ? "text-white/30" : "text-gray-400"}`}
-                />
-                <input
-                  className="input pl-9"
-                  placeholder="Search rooms..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  autoFocus
-                />
-                {searchResults.length > 0 && (
-                  <div
-                    className={`absolute top-full left-0 right-0 mt-2 rounded-xl overflow-hidden z-50 max-h-48 overflow-y-auto shadow-xl ${isDark ? "glass" : "bg-white border border-gray-200"}`}
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="inline-flex rounded-full border border-[var(--border)] bg-[var(--surface-strong)] p-1">
+                {["outdoor", "indoor"].map((entry) => (
+                  <button
+                    key={entry}
+                    onClick={() => setMode(entry)}
+                    className={`rounded-full px-4 py-2 text-sm font-semibold capitalize transition-all ${
+                      mode === entry ? "bg-brand-500 text-white" : "text-[var(--text-muted)]"
+                    }`}
                   >
-                    {searchResults.map((room) => (
+                    {entry}
+                  </button>
+                ))}
+              </div>
+              <button onClick={toggleTheme} className="btn-secondary h-11 w-11 rounded-full p-0">
+                {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
+            </div>
+          </div>
+        </header>
+
+        <div className="min-h-0 flex-1 lg:grid lg:grid-cols-[370px_minmax(0,1fr)]">
+          <aside className="min-h-0 overflow-y-auto border-b border-[var(--border)] p-4 lg:border-b-0 lg:border-r lg:p-5">
+            <div className="card-muted rounded-[28px] p-5">
+              <div className="text-xs font-bold uppercase tracking-[0.18em] text-[var(--text-soft)]">
+                Route summary
+              </div>
+              <div className="mt-3 flex items-center justify-between gap-3">
+                <div>
+                  <div className="font-display text-2xl font-bold">
+                    {mode === "outdoor" ? "Approach the building" : "Plan your indoor route"}
+                  </div>
+                  <p className="mt-1 text-sm leading-7 subtle-text">
+                    {building?.address || "Ask an admin to configure building details and entrances."}
+                  </p>
+                </div>
+                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-500/10 text-brand-500">
+                  {mode === "outdoor" ? <Navigation className="h-5 w-5" /> : <Navigation className="h-5 w-5" />}
+                </div>
+              </div>
+            </div>
+
+            {mode === "outdoor" ? (
+              <div className="mt-4 space-y-4">
+                <div className="card p-5">
+                  <div className="text-sm font-semibold">Get walking guidance</div>
+                  <p className="mt-2 text-sm leading-7 subtle-text">
+                    Outdoor routing uses your live GPS position and the building entrance saved by the admin team.
+                  </p>
+                  <button onClick={getUserLocation} disabled={locationLoading} className="btn-primary mt-5 w-full">
+                    <Crosshair className="h-4 w-4" />
+                    {locationLoading ? "Locating..." : "Find my location"}
+                  </button>
+                  {outdoorRouteMessage && <p className="mt-3 text-sm subtle-text">{outdoorRouteMessage}</p>}
+                </div>
+              </div>
+            ) : (
+              <div className="mt-4 space-y-4">
+                <div className="card p-5">
+                  <div className="text-sm font-semibold">Indoor planner</div>
+                  <div className="mt-4 space-y-3">
+                    {[
+                      { key: "from", label: "Starting point", room: fromRoom, accent: "bg-emerald-500" },
+                      { key: "to", label: "Destination", room: toRoom, accent: "bg-rose-500" },
+                    ].map((field) => (
                       <button
-                        key={room.id}
-                        onClick={() => selectRoom(room)}
-                        className={`w-full flex items-center gap-3 px-3 py-2.5 text-left ${isDark ? "hover:bg-white/5" : "hover:bg-gray-50"}`}
+                        key={field.key}
+                        onClick={() => {
+                          setSelectingFor(field.key);
+                          setSearchQuery("");
+                        }}
+                        className={`w-full rounded-[22px] border px-4 py-4 text-left transition-all ${
+                          selectingFor === field.key
+                            ? "border-brand-400/40 bg-brand-500/10"
+                            : "border-[var(--border)] bg-[var(--surface-muted)]"
+                        }`}
                       >
-                        <MapPin className="w-3.5 h-3.5 text-brand-400 flex-shrink-0" />
-                        <div>
-                          <div className={`text-sm ${isDark ? "text-white" : "text-gray-900"}`}>
-                            {room.name}
-                          </div>
-                          <div
-                            className={`text-xs capitalize ${isDark ? "text-white/30" : "text-gray-500"}`}
-                          >
-                            {room.type}
-                          </div>
+                        <div className="flex items-center gap-3">
+                          <span className={`h-3.5 w-3.5 rounded-full ${field.accent}`} />
+                          <span className="text-xs font-bold uppercase tracking-[0.18em] text-[var(--text-soft)]">
+                            {field.label}
+                          </span>
                         </div>
+                        <div className="mt-2 font-semibold">{field.room?.name || "Choose a room"}</div>
+                      </button>
+                    ))}
+                  </div>
+
+                  {selectingFor && (
+                    <div className="mt-4">
+                      <div className="relative">
+                        <Search className="pointer-events-none absolute left-4 top-1/2 h-4 w-4 -translate-y-1/2 text-[var(--text-soft)]" />
+                        <input
+                          className="input pl-11"
+                          placeholder="Search rooms..."
+                          autoFocus
+                          value={searchQuery}
+                          onChange={(event) => setSearchQuery(event.target.value)}
+                        />
+                      </div>
+                      <div className="mt-3 max-h-64 space-y-2 overflow-y-auto">
+                        {searchLoading ? (
+                          <div className="rounded-[20px] border border-[var(--border)] bg-[var(--surface-muted)] px-4 py-4 text-sm subtle-text">
+                            Searching rooms...
+                          </div>
+                        ) : searchResults.length === 0 ? (
+                          <div className="rounded-[20px] border border-[var(--border)] bg-[var(--surface-muted)] px-4 py-4 text-sm subtle-text">
+                            Start typing to search available rooms.
+                          </div>
+                        ) : (
+                          searchResults.map((room) => (
+                            <button
+                              key={room.id}
+                              onClick={() => selectRoom(room)}
+                              className="w-full rounded-[20px] border border-[var(--border)] bg-[var(--surface-muted)] px-4 py-4 text-left transition-all hover:border-brand-300/30 hover:bg-[var(--surface-strong)]"
+                            >
+                              <div className="font-semibold">{room.name}</div>
+                              <div className="mt-1 text-sm capitalize subtle-text">{room.type}</div>
+                            </button>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  )}
+
+                  <button onClick={getIndoorRoute} disabled={!fromRoom || !toRoom || routeLoading} className="btn-primary mt-5 w-full">
+                    <Navigation className="h-4 w-4" />
+                    {routeLoading ? "Calculating route..." : "Get best route"}
+                  </button>
+                </div>
+
+                {indoorRoute && (
+                  <div className="card p-5">
+                    <div className="grid gap-3 sm:grid-cols-3">
+                      <div className="metric-card p-4">
+                        <div className="metric-label">Distance</div>
+                        <div className="mt-2 font-display text-3xl font-bold">{indoorRoute.distance}m</div>
+                      </div>
+                      <div className="metric-card p-4">
+                        <div className="metric-label">ETA</div>
+                        <div className="mt-2 font-display text-3xl font-bold">
+                          {indoorRoute.estimated_time || Math.max(1, Math.round(indoorRoute.distance / 84))}m
+                        </div>
+                      </div>
+                      <div className="metric-card p-4">
+                        <div className="metric-label">Floor changes</div>
+                        <div className="mt-2 font-display text-3xl font-bold">{indoorRoute.floor_changes || 0}</div>
+                      </div>
+                    </div>
+
+                    {visibleFloors.length > 0 && (
+                      <div className="mt-4 flex flex-wrap gap-2">
+                        {visibleFloors.map((floor) => (
+                          <button
+                            key={floor.id}
+                            onClick={() => setCurrentFloor(floor)}
+                            className={`rounded-full px-4 py-2 text-sm font-semibold transition-all ${
+                              currentFloor?.id === floor.id
+                                ? "bg-brand-500 text-white"
+                                : "border border-[var(--border)] bg-[var(--surface-muted)]"
+                            }`}
+                          >
+                            {floor.name}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="card p-5">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-semibold">Sensor fusion beta</div>
+                      <p className="mt-1 text-sm subtle-text">
+                        Motion and orientation data are available as a progressive enhancement for supported devices.
+                      </p>
+                    </div>
+                    <Wifi className="h-4.5 w-4.5 text-brand-500" />
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-2 gap-3">
+                    {[
+                      ["Heading", sensorFusion.heading !== null ? `${Math.round(sensorFusion.heading)}°` : "--"],
+                      ["Steps", sensorFusion.stepCount],
+                      ["Motion", sensorFusion.movement],
+                      ["Gyro", sensorFusion.gyroscope || 0],
+                    ].map(([label, value]) => (
+                      <div key={label} className="metric-card p-4">
+                        <div className="metric-label">{label}</div>
+                        <div className="mt-2 font-display text-2xl font-bold">{value}</div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {sensorFusion.permissionNeeded && !sensorFusion.permissionGranted && (
+                    <button onClick={sensorFusion.requestPermission} className="btn-secondary mt-4 w-full">
+                      Enable motion sensors
+                    </button>
+                  )}
+                </div>
+
+                {indoorRoute && (
+                  <div className="card p-5">
+                    <div className="text-sm font-semibold">Directions</div>
+                    <div className="mt-4 space-y-3">
+                      {(indoorRoute.instructions || indoorRoute.steps || []).map((step, index) => {
+                        const visual = getStepVisual(step);
+                        return (
+                          <div key={index} className="rounded-[22px] border border-[var(--border)] bg-[var(--surface-muted)] px-4 py-4">
+                            <div className={`text-xs font-bold uppercase tracking-[0.18em] ${visual.accent}`}>
+                              {visual.label}
+                            </div>
+                            <div className="mt-2 text-sm leading-7">{visual.text}</div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </aside>
+
+          <section className="min-h-0 overflow-hidden p-4 lg:p-5">
+            <div className="grid h-full min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-4">
+              <div className="card-muted flex flex-col gap-3 rounded-[28px] px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+                <div>
+                  <div className="font-semibold">
+                    {mode === "outdoor" ? "Outdoor approach view" : currentFloor?.name || "Indoor map"}
+                  </div>
+                  <div className="text-sm subtle-text">
+                    {mode === "outdoor"
+                      ? "High zoom and auto-fit are enabled for the outdoor map."
+                      : "Indoor zooming and floor alignment are recalculated when the route or floor changes."}
+                  </div>
+                </div>
+
+                {mode === "indoor" && floors.length > 1 && (
+                  <div className="flex flex-wrap gap-2">
+                    {floors.map((floor) => (
+                      <button
+                        key={floor.id}
+                        onClick={() => setCurrentFloor(floor)}
+                        className={`rounded-full px-4 py-2 text-sm font-semibold transition-all ${
+                          currentFloor?.id === floor.id
+                            ? "bg-brand-500 text-white"
+                            : "border border-[var(--border)] bg-[var(--surface-strong)]"
+                        }`}
+                      >
+                        {floor.name}
                       </button>
                     ))}
                   </div>
                 )}
-                <button
-                  onClick={() => setSelectingFor(null)}
-                  className={`absolute right-3 top-1/2 -translate-y-1/2 ${isDark ? "text-white/30" : "text-gray-400"}`}
-                >
-                  <X className="w-3.5 h-3.5" />
-                </button>
               </div>
-            )}
 
-            {fromRoom && toRoom && !indoorRoute && (
-              <button
-                onClick={getIndoorRoute}
-                disabled={routeLoading}
-                className="btn-primary w-full justify-center animate-in"
-              >
-                {routeLoading ? (
-                  <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+              <div className="min-h-0">
+                {mode === "outdoor" ? (
+                  <div className="h-full overflow-hidden rounded-[28px] border border-[var(--border)]">
+                    {building?.entrance_lat && building?.entrance_lng ? (
+                      <MapContainer
+                        center={[
+                          Number.parseFloat(building.entrance_lat),
+                          Number.parseFloat(building.entrance_lng),
+                        ]}
+                        zoom={18}
+                        minZoom={3}
+                        maxZoom={22}
+                        zoomControl={false}
+                        style={{ width: "100%", height: "100%" }}
+                      >
+                        <TileLayer
+                          url={TILE_URL}
+                          attribution={TILE_ATTRIBUTION}
+                          maxZoom={22}
+                          maxNativeZoom={USE_MAPTILER ? 22 : 19}
+                          tileSize={USE_MAPTILER ? 512 : 256}
+                          zoomOffset={USE_MAPTILER ? -1 : 0}
+                        />
+                        <FitMapToPoints
+                          points={outdoorFitPoints}
+                          fallbackCenter={[
+                            Number.parseFloat(building.entrance_lat),
+                            Number.parseFloat(building.entrance_lng),
+                          ]}
+                        />
+                        {userLocation && <Marker position={userLocation} icon={pinIcon("#059669")} />}
+                        <Marker
+                          position={[
+                            Number.parseFloat(building.entrance_lat),
+                            Number.parseFloat(building.entrance_lng),
+                          ]}
+                          icon={pinIcon("#0f6efd")}
+                        />
+                        {outdoorRoute?.length > 0 && (
+                          <Polyline positions={outdoorRoute} pathOptions={{ color: "#0f6efd", weight: 6, opacity: 0.88 }} />
+                        )}
+                        <OutdoorMapControls />
+                      </MapContainer>
+                    ) : (
+                      <div className="flex h-full items-center justify-center p-6">
+                        <div className="text-center">
+                          <Building2 className="mx-auto h-12 w-12 text-[var(--text-soft)]" />
+                          <div className="mt-4 font-display text-2xl font-bold">Entrance coordinates missing</div>
+                          <p className="mt-2 text-sm leading-7 subtle-text">
+                            Ask an admin to set the building entrance latitude and longitude before using outdoor navigation.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : floorData ? (
+                  <IndoorCanvas
+                    floorData={floorData}
+                    floorImage={floorImage}
+                    pathPoints={currentFloorPath}
+                    fromRoom={fromRoom}
+                    toRoom={toRoom}
+                    currentFloorId={currentFloor?.id}
+                    isDark={isDark}
+                  />
                 ) : (
-                  <Navigation className="w-4 h-4" />
+                  <div className="flex h-full items-center justify-center rounded-[28px] border border-[var(--border)] bg-[var(--surface-strong)]">
+                    <div className="flex flex-col items-center gap-4">
+                      <div className="h-10 w-10 rounded-full border-2 border-brand-500 border-t-transparent animate-spin" />
+                      <div className="text-sm subtle-text">Loading indoor map...</div>
+                    </div>
+                  </div>
                 )}
-                {routeLoading ? "Finding route..." : "Get Directions"}
-              </button>
-            )}
-
-            {indoorRoute && (
-              <div
-                className={`flex items-center gap-4 px-3 py-2 rounded-xl ${isDark ? "glass" : "bg-white border border-gray-200"}`}
-              >
-                <div className="flex items-center gap-1.5">
-                  <Footprints className="w-3.5 h-3.5 text-brand-400" />
-                  <span className={`text-sm font-medium ${isDark ? "text-white" : "text-gray-900"}`}>
-                    {indoorRoute.distance}m
-                  </span>
-                </div>
-                <div className="flex items-center gap-1.5">
-                  <Clock className="w-3.5 h-3.5 text-brand-400" />
-                  <span className={`text-sm font-medium ${isDark ? "text-white" : "text-gray-900"}`}>
-                    ~{Math.max(1, Math.round(indoorRoute.distance / 84))} min
-                  </span>
-                </div>
-              </div>
-            )}
-          </div>
-        )}
-      </div>
-
-      {mode === "outdoor" ? (
-        <div className="flex-1 min-h-0 px-4 pb-4">
-          {mapCenter ? (
-            <div
-              className={`h-full min-h-0 overflow-hidden rounded-2xl border ${
-                isDark ? "border-white/10" : "border-gray-200 bg-white"
-              }`}
-            >
-              <MapContainer
-                center={mapCenter}
-                zoom={17}
-                style={{ width: "100%", height: "100%" }}
-                zoomControl={false}
-              >
-                <TileLayer
-                  url={TILE_URL}
-                  attribution={TILE_ATTRIBUTION}
-                  tileSize={USE_MAPTILER ? 512 : 256}
-                  zoomOffset={USE_MAPTILER ? -1 : 0}
-                />
-                <MapCenter center={mapCenter} />
-                <MapResize />
-                {userLocation && <Marker position={userLocation} icon={pinIcon("#22c55e")} />}
-                {building?.entrance_lat && building?.entrance_lng && (
-                  <Marker
-                    position={[parseFloat(building.entrance_lat), parseFloat(building.entrance_lng)]}
-                    icon={pinIcon("#6366f1")}
-                  />
-                )}
-                {outdoorRoute && (
-                  <Polyline
-                    positions={outdoorRoute}
-                    pathOptions={{ color: "#6366f1", weight: 5, opacity: 0.85 }}
-                  />
-                )}
-              </MapContainer>
-            </div>
-          ) : (
-            <div className="flex h-full items-center justify-center rounded-2xl border border-dashed border-gray-300">
-              <div className="text-center px-4">
-                <Navigation
-                  className={`w-12 h-12 mx-auto mb-3 ${isDark ? "text-white/20" : "text-gray-300"}`}
-                />
-                <p className={`text-sm ${isDark ? "text-white/40" : "text-gray-500"}`}>
-                  Tap "Find My Location" above to load the map
-                </p>
               </div>
             </div>
-          )}
+          </section>
         </div>
-      ) : (
-        <div ref={containerRef} className="flex-1 relative" style={{ minHeight: "300px" }}>
-          <canvas
-            ref={canvasRef}
-            width={canvasSize.w}
-            height={canvasSize.h}
-            style={{ cursor: isPanning ? "grabbing" : "grab", touchAction: "none" }}
-            onMouseDown={onMouseDown}
-            onMouseMove={onMouseMove}
-            onMouseUp={onMouseUp}
-            onMouseLeave={onMouseUp}
-            onWheel={onWheel}
-            onTouchStart={onTouchStart}
-            onTouchMove={onTouchMove}
-            onTouchEnd={onTouchEnd}
-          />
-          <div className="absolute top-3 right-3 flex flex-col gap-1">
-            {[
-              { icon: <ZoomIn className="w-3.5 h-3.5" />, fn: () => setZoom((value) => Math.min(4, value * 1.2)) },
-              { icon: <ZoomOut className="w-3.5 h-3.5" />, fn: () => setZoom((value) => Math.max(0.3, value * 0.8)) },
-              { icon: <RotateCcw className="w-3 h-3" />, fn: () => { setPan({ x: 40, y: 40 }); setZoom(0.9); } },
-            ].map((button, index) => (
-              <button
-                key={index}
-                onClick={button.fn}
-                className={`w-8 h-8 flex items-center justify-center rounded-xl ${isDark ? "glass text-white/50 hover:text-white" : "bg-white text-gray-500 shadow-sm border border-gray-200"}`}
-              >
-                {button.icon}
-              </button>
-            ))}
-          </div>
-          {!floorData && (
-            <div className="absolute inset-0 flex items-center justify-center">
-              <div className="w-8 h-8 border-2 border-brand-500 border-t-transparent rounded-full animate-spin" />
-            </div>
-          )}
-        </div>
-      )}
-
-      {mode === "indoor" && indoorRoute && showSteps && (
-        <div
-          className={`flex-shrink-0 border-t max-h-56 overflow-y-auto animate-in ${isDark ? "glass border-white/5" : "bg-white border-gray-200"}`}
-        >
-          <div
-            className={`flex items-center justify-between px-4 py-3 border-b sticky top-0 ${isDark ? "glass border-white/5" : "bg-white border-gray-200"}`}
-          >
-            <span className={`font-display font-semibold text-sm ${isDark ? "text-white" : "text-gray-900"}`}>
-              Directions
-            </span>
-            <button
-              onClick={() => setShowSteps(false)}
-              className={isDark ? "text-white/30" : "text-gray-400"}
-            >
-              <ChevronDown className="w-4 h-4" />
-            </button>
-          </div>
-          <div className="p-4 space-y-2">
-            {(indoorRoute.steps || indoorRoute.instructions || []).map((step, index) => (
-              <div
-                key={index}
-                className={`flex items-start gap-3 p-2 rounded-lg ${isDark ? "hover:bg-white/3" : "hover:bg-gray-50"}`}
-              >
-                <div
-                  className={`w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 text-sm mt-0.5 ${isDark ? "bg-brand-600/20" : "bg-brand-50"}`}
-                >
-                  Pin
-                </div>
-                <span className={`text-sm ${isDark ? "text-white/80" : "text-gray-700"}`}>
-                  {typeof step === "string" ? step : step.text || step}
-                </span>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {mode === "indoor" && indoorRoute && !showSteps && (
-        <button
-          onClick={() => setShowSteps(true)}
-          className={`flex-shrink-0 border-t w-full flex items-center justify-between px-4 py-3 animate-in ${isDark ? "glass border-white/5" : "bg-white border-gray-200"}`}
-        >
-          <span className={`text-sm font-medium ${isDark ? "text-white" : "text-gray-900"}`}>
-            View step-by-step directions
-          </span>
-          <ArrowRight className="w-4 h-4 text-brand-400" />
-        </button>
-      )}
-
-      <div className={`flex-shrink-0 text-center py-2 text-xs ${isDark ? "text-white/15" : "text-gray-300"}`}>
-        Powered by CampusNav
       </div>
     </div>
   );
