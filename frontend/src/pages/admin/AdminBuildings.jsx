@@ -1,30 +1,43 @@
-import { useEffect, useState } from "react";
+// CampusNav redesign — AdminBuildings.jsx — updated
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Building2,
   ChevronDown,
-  Edit2,
+  Edit3,
   Layers,
-  Map,
   MapPin,
   Plus,
+  Search,
   Trash2,
   X,
 } from "lucide-react";
 import toast from "react-hot-toast";
+import { getIndustry, INDUSTRY_TYPES, resolvePoiIcon } from "../../config/poiTypes.js";
 import { api } from "../../utils/api.js";
 
-function ModalShell({ title, onClose, children, width = "max-w-xl" }) {
+function formatDate(dateValue) {
+  if (!dateValue) return "Not available";
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(dateValue));
+}
+
+function ModalShell({ title, children, onClose, width = "max-w-2xl" }) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 p-4 backdrop-blur-sm">
-      <div className={`glass-light w-full ${width} rounded-[30px] p-6 sm:p-7`}>
-        <div className="mb-6 flex items-center justify-between gap-3">
-          <h2 className="font-display text-2xl font-bold">{title}</h2>
-          <button onClick={onClose} className="btn-ghost h-11 w-11 rounded-full p-0">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 px-4 py-8">
+      <div className={`card w-full ${width}`}>
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <h2 className="text-2xl font-bold tracking-[-0.02em]">{title}</h2>
+          </div>
+          <button onClick={onClose} className="btn-ghost px-3">
             <X className="h-4 w-4" />
           </button>
         </div>
-        {children}
+        <div className="mt-6">{children}</div>
       </div>
     </div>
   );
@@ -33,6 +46,7 @@ function ModalShell({ title, onClose, children, width = "max-w-xl" }) {
 function BuildingModal({ building, onClose, onSave }) {
   const [form, setForm] = useState({
     name: building?.name || "",
+    industry: building?.industry || "education",
     description: building?.description || "",
     address: building?.address || "",
     entrance_lat: building?.entrance_lat || "",
@@ -62,80 +76,110 @@ function BuildingModal({ building, onClose, onSave }) {
   };
 
   return (
-    <ModalShell title={building ? "Edit building" : "Create building"} onClose={onClose}>
-      <form onSubmit={handleSubmit} className="space-y-4">
-        <div>
-          <label className="label">Building name</label>
-          <input
-            className="input"
-            placeholder="Main Academic Block"
-            value={form.name}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, name: event.target.value }))
-            }
-            required
-          />
+    <ModalShell title={building ? "Edit Building" : "Add Building"} onClose={onClose}>
+      <form onSubmit={handleSubmit}>
+        <div className="grid gap-4 md:grid-cols-2">
+          <div>
+            <label className="field-label">Building Name</label>
+            <input
+              className="input"
+              value={form.name}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, name: event.target.value }))
+              }
+              placeholder="Main Academic Block"
+              required
+            />
+          </div>
+          <div>
+            <label className="field-label">Industry</label>
+            <select
+              className="select"
+              value={form.industry}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, industry: event.target.value }))
+              }
+            >
+              {Object.values(INDUSTRY_TYPES).map((industry) => (
+                <option key={industry.id} value={industry.id}>
+                  {industry.label}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
 
-        <div>
-          <label className="label">Address</label>
+        <div className="mt-4">
+          <label className="field-label">Address</label>
           <input
             className="input"
-            placeholder="123 Campus Road"
             value={form.address}
             onChange={(event) =>
               setForm((current) => ({ ...current, address: event.target.value }))
             }
+            placeholder="123 Campus Road"
           />
         </div>
 
-        <div className="grid gap-4 sm:grid-cols-2">
-          <div>
-            <label className="label">Entrance latitude</label>
-            <input
-              className="input"
-              type="number"
-              step="any"
-              placeholder="23.02887"
-              value={form.entrance_lat}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, entrance_lat: event.target.value }))
-              }
-            />
-          </div>
-          <div>
-            <label className="label">Entrance longitude</label>
-            <input
-              className="input"
-              type="number"
-              step="any"
-              placeholder="72.55078"
-              value={form.entrance_lng}
-              onChange={(event) =>
-                setForm((current) => ({ ...current, entrance_lng: event.target.value }))
-              }
-            />
-          </div>
-        </div>
-
-        <div>
-          <label className="label">Description</label>
+        <div className="mt-4">
+          <label className="field-label">Description</label>
           <textarea
-            className="input min-h-[130px] resize-y"
-            placeholder="Brief context about the building, departments, or public use."
+            className="textarea"
             value={form.description}
             onChange={(event) =>
               setForm((current) => ({ ...current, description: event.target.value }))
             }
+            placeholder="Describe the venue, departments, or public areas."
           />
         </div>
 
-        <div className="flex flex-col gap-3 pt-2 sm:flex-row">
-          <button type="button" onClick={onClose} className="btn-secondary flex-1">
+        <div className="mt-4 grid gap-4 md:grid-cols-2">
+          <div>
+            <label className="field-label">Entrance Latitude</label>
+            <input
+              className="input"
+              type="number"
+              step="any"
+              value={form.entrance_lat}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  entrance_lat: event.target.value,
+                }))
+              }
+              placeholder="23.02887"
+            />
+            <p className="mt-2 text-xs subtle-text">
+              Used to anchor the indoor floor plan on the real-world map.
+            </p>
+          </div>
+          <div>
+            <label className="field-label">Entrance Longitude</label>
+            <input
+              className="input"
+              type="number"
+              step="any"
+              value={form.entrance_lng}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  entrance_lng: event.target.value,
+                }))
+              }
+              placeholder="72.55078"
+            />
+            <p className="mt-2 text-xs subtle-text">
+              Add the building entrance point to enable outdoor-to-indoor alignment.
+            </p>
+          </div>
+        </div>
+
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+          <button type="button" onClick={onClose} className="btn-secondary">
             Cancel
           </button>
-          <button type="submit" disabled={saving} className="btn-primary flex-1">
-            {saving ? "Saving..." : building ? "Save changes" : "Create building"}
+          <button type="submit" disabled={saving} className="btn-primary">
+            {saving ? "Saving..." : building ? "Save Changes" : "Create Building"}
           </button>
         </div>
       </form>
@@ -143,7 +187,7 @@ function BuildingModal({ building, onClose, onSave }) {
   );
 }
 
-function FloorModal({ buildingId, floor, onClose, onSave }) {
+function FloorModal({ floor, buildingId, onClose, onSave }) {
   const [form, setForm] = useState({
     name: floor?.name || "",
     level: floor?.level ?? 0,
@@ -172,23 +216,22 @@ function FloorModal({ buildingId, floor, onClose, onSave }) {
   };
 
   return (
-    <ModalShell title={floor ? "Edit floor" : "Add floor"} onClose={onClose} width="max-w-lg">
-      <form onSubmit={handleSubmit} className="space-y-4">
+    <ModalShell title={floor ? "Edit Floor" : "Add Floor"} onClose={onClose} width="max-w-lg">
+      <form onSubmit={handleSubmit}>
         <div>
-          <label className="label">Floor name</label>
+          <label className="field-label">Floor Name</label>
           <input
             className="input"
-            placeholder="Ground floor"
             value={form.name}
             onChange={(event) =>
               setForm((current) => ({ ...current, name: event.target.value }))
             }
+            placeholder="Ground Floor"
             required
           />
         </div>
-
-        <div>
-          <label className="label">Level</label>
+        <div className="mt-4">
+          <label className="field-label">Level</label>
           <input
             className="input"
             type="number"
@@ -200,18 +243,36 @@ function FloorModal({ buildingId, floor, onClose, onSave }) {
               }))
             }
           />
-          <p className="mt-2 text-sm subtle-text">Use `0` for ground floor, `1` for first floor, and `-1` for basement.</p>
+          <p className="mt-2 text-sm subtle-text">
+            Use `0` for ground level, `1` for first floor, and negative values
+            for basements.
+          </p>
         </div>
-
-        <div className="flex flex-col gap-3 pt-2 sm:flex-row">
-          <button type="button" onClick={onClose} className="btn-secondary flex-1">
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+          <button type="button" onClick={onClose} className="btn-secondary">
             Cancel
           </button>
-          <button type="submit" disabled={saving} className="btn-primary flex-1">
-            {saving ? "Saving..." : floor ? "Save floor" : "Create floor"}
+          <button type="submit" disabled={saving} className="btn-primary">
+            {saving ? "Saving..." : floor ? "Save Floor" : "Create Floor"}
           </button>
         </div>
       </form>
+    </ModalShell>
+  );
+}
+
+function ConfirmModal({ title, description, onCancel, onConfirm, confirming }) {
+  return (
+    <ModalShell title={title} onClose={onCancel} width="max-w-lg">
+      <p className="text-sm subtle-text">{description}</p>
+      <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+        <button type="button" onClick={onCancel} className="btn-secondary">
+          Cancel
+        </button>
+        <button type="button" onClick={onConfirm} disabled={confirming} className="btn-danger">
+          {confirming ? "Deleting..." : "Delete"}
+        </button>
+      </div>
     </ModalShell>
   );
 }
@@ -220,9 +281,13 @@ export default function AdminBuildings() {
   const navigate = useNavigate();
   const [buildings, setBuildings] = useState([]);
   const [floorsByBuilding, setFloorsByBuilding] = useState({});
-  const [expandedBuilding, setExpandedBuilding] = useState(null);
+  const [expandedBuildingId, setExpandedBuildingId] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [industryFilter, setIndustryFilter] = useState("all");
   const [modal, setModal] = useState(null);
+  const [deleteState, setDeleteState] = useState(null);
+  const [deleting, setDeleting] = useState(false);
 
   const loadBuildings = async () => {
     setLoading(true);
@@ -247,256 +312,313 @@ export default function AdminBuildings() {
     setFloorsByBuilding((current) => ({ ...current, [buildingId]: floors }));
   };
 
-  const toggleBuilding = async (buildingId) => {
-    const next = expandedBuilding === buildingId ? null : buildingId;
-    setExpandedBuilding(next);
+  const filteredBuildings = useMemo(() => {
+    return buildings.filter((building) => {
+      const matchesSearch =
+        !searchQuery ||
+        `${building.name} ${building.address || ""} ${building.industry || ""}`
+          .toLowerCase()
+          .includes(searchQuery.toLowerCase());
+      const matchesIndustry =
+        industryFilter === "all" || (building.industry || "education") === industryFilter;
+      return matchesSearch && matchesIndustry;
+    });
+  }, [buildings, industryFilter, searchQuery]);
+
+  const handleToggleBuilding = async (buildingId) => {
+    const next = expandedBuildingId === buildingId ? null : buildingId;
+    setExpandedBuildingId(next);
     if (next && !floorsByBuilding[buildingId]) {
       await loadFloors(buildingId);
     }
   };
 
-  const handleDeleteBuilding = async (buildingId) => {
-    if (!window.confirm("Delete this building and its floors?")) return;
-    try {
-      await api.buildings.delete(buildingId);
-      toast.success("Building deleted");
-      loadBuildings();
-    } catch (error) {
-      toast.error(error.message || "Unable to delete building");
-    }
-  };
+  const confirmDelete = async () => {
+    if (!deleteState) return;
+    setDeleting(true);
 
-  const handleDeleteFloor = async (floorId, buildingId) => {
-    if (!window.confirm("Delete this floor?")) return;
     try {
-      await api.floors.delete(floorId);
-      toast.success("Floor deleted");
-      loadFloors(buildingId);
+      if (deleteState.type === "building") {
+        await api.buildings.delete(deleteState.id);
+        toast.success("Building deleted");
+        await loadBuildings();
+      } else {
+        await api.floors.delete(deleteState.id);
+        toast.success("Floor deleted");
+        await loadFloors(deleteState.buildingId);
+      }
+      setDeleteState(null);
     } catch (error) {
-      toast.error(error.message || "Unable to delete floor");
+      toast.error(error.message || "Delete failed");
+    } finally {
+      setDeleting(false);
     }
   };
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-4 sm:px-6 sm:py-6">
-      <div className="mx-auto flex max-w-6xl flex-col gap-6">
-        <section className="card p-6 sm:p-8">
-          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
-            <div>
-              <div className="badge mb-4">
-                <Building2 className="h-3.5 w-3.5 text-brand-500" />
-                Map operations
-              </div>
-              <h1 className="font-display text-3xl font-bold sm:text-4xl">Buildings and floor maps</h1>
-              <p className="mt-3 max-w-3xl text-base leading-8 subtle-text">
-                Keep the admin route focused on operations: building setup, floor creation, and map editing all live here while public navigation stays separate.
-              </p>
-            </div>
+    <div className="mx-auto flex max-w-page flex-col gap-6">
+      <section className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+        <div className="page-header">
+          <span className="section-label">Buildings</span>
+          <h1>Buildings & Floors</h1>
+          <p>
+            Manage building records, assign industries, create floors, and open
+            the floor editor from one workspace.
+          </p>
+        </div>
+        <button onClick={() => setModal({ type: "building" })} className="btn-primary">
+          <Plus className="h-4 w-4" />
+          Add Building
+        </button>
+      </section>
 
-            <button
-              onClick={() => setModal({ type: "building", data: null })}
-              className="btn-primary"
-            >
-              <Plus className="h-4 w-4" />
-              New building
-            </button>
-          </div>
-        </section>
-
-        {loading ? (
-          <div className="space-y-4">
-            {Array.from({ length: 3 }).map((_, index) => (
-              <div
-                key={index}
-                className="h-36 animate-pulse rounded-[28px] border border-[var(--border)] bg-[var(--surface)]"
+      <section className="card">
+        <div className="grid gap-4 lg:grid-cols-[1fr_220px]">
+          <div>
+            <label className="field-label">Search Buildings</label>
+            <div className="map-editor__search">
+              <Search className="h-4 w-4 text-muted" />
+              <input
+                value={searchQuery}
+                onChange={(event) => setSearchQuery(event.target.value)}
+                placeholder="Search by name, address, or industry"
               />
-            ))}
+            </div>
           </div>
-        ) : buildings.length === 0 ? (
-          <section className="card p-10 text-center">
-            <Building2 className="mx-auto h-12 w-12 text-[var(--text-soft)]" />
-            <h2 className="mt-5 font-display text-3xl font-bold">No buildings configured yet</h2>
-            <p className="mx-auto mt-3 max-w-xl text-sm leading-7 subtle-text">
-              Create your first building, set the entrance coordinates, and add floors so you can start testing navigation end to end.
-            </p>
-            <button
-              onClick={() => setModal({ type: "building", data: null })}
-              className="btn-primary mt-6"
+          <div>
+            <label className="field-label">Filter by Industry</label>
+            <select
+              className="select"
+              value={industryFilter}
+              onChange={(event) => setIndustryFilter(event.target.value)}
             >
+              <option value="all">All industries</option>
+              {Object.values(INDUSTRY_TYPES).map((industry) => (
+                <option key={industry.id} value={industry.id}>
+                  {industry.label}
+                </option>
+              ))}
+            </select>
+          </div>
+        </div>
+      </section>
+
+      {loading ? (
+        <div className="space-y-4">
+          {Array.from({ length: 3 }).map((_, index) => (
+            <div key={index} className="h-32 animate-pulse rounded-xl bg-surface-alt" />
+          ))}
+        </div>
+      ) : filteredBuildings.length === 0 ? (
+        <div className="card">
+          <div className="empty-state">
+            <div className="icon-chip">
+              <Building2 className="h-5 w-5" />
+            </div>
+            <h3 className="text-xl font-semibold">No buildings yet</h3>
+            <p className="max-w-md text-sm subtle-text">
+              Add your first building to start mapping floors and publishing
+              navigation data.
+            </p>
+            <button onClick={() => setModal({ type: "building" })} className="btn-primary">
               <Plus className="h-4 w-4" />
-              Create first building
+              Add Your First Building
             </button>
-          </section>
-        ) : (
-          <div className="space-y-4">
-            {buildings.map((building) => {
-              const floors = floorsByBuilding[building.id] || [];
-              const isExpanded = expandedBuilding === building.id;
+          </div>
+        </div>
+      ) : (
+        filteredBuildings.map((building) => {
+          const industry = getIndustry(building.industry || "education");
+          const IndustryIcon = resolvePoiIcon(industry.icon);
+          const floors = floorsByBuilding[building.id] || [];
+          const isExpanded = expandedBuildingId === building.id;
 
-              return (
-                <article key={building.id} className="card overflow-hidden p-0">
-                  <div
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => toggleBuilding(building.id)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        event.preventDefault();
-                        toggleBuilding(building.id);
-                      }
-                    }}
-                    className="flex w-full flex-col gap-4 px-5 py-5 text-left sm:px-6"
-                  >
-                    <div className="flex flex-col gap-4 lg:flex-row lg:items-center">
-                      <div className="flex items-center gap-4">
-                        <div className="flex h-14 w-14 flex-shrink-0 items-center justify-center rounded-[22px] bg-brand-500/10 text-brand-500">
-                          <Building2 className="h-6 w-6" />
-                        </div>
-                        <div className="min-w-0">
-                          <div className="truncate font-display text-2xl font-bold">{building.name}</div>
-                          <div className="mt-1 flex flex-wrap gap-3 text-sm subtle-text">
-                            <span className="inline-flex items-center gap-1.5">
-                              <MapPin className="h-4 w-4" />
-                              {building.address || "No address set"}
-                            </span>
-                            <span className="inline-flex items-center gap-1.5">
-                              <Layers className="h-4 w-4" />
-                              {floors.length || building.floors?.[0]?.count || 0} floors
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="ml-auto flex flex-wrap items-center gap-2">
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            setModal({ type: "building", data: building });
-                          }}
-                          className="btn-secondary"
-                        >
-                          <Edit2 className="h-4 w-4" />
-                          Edit
-                        </button>
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleDeleteBuilding(building.id);
-                          }}
-                          className="btn-danger"
-                        >
-                          <Trash2 className="h-4 w-4" />
-                          Delete
-                        </button>
-                        <div className="btn-ghost rounded-full border border-[var(--border)]">
-                          <ChevronDown
-                            className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : ""}`}
-                          />
-                        </div>
-                      </div>
+          return (
+            <article key={building.id} className="card">
+              <div className="flex flex-col gap-5 xl:flex-row xl:items-start xl:justify-between">
+                <div className="flex gap-4">
+                  <div className="icon-chip h-12 w-12">
+                    <IndustryIcon className="h-5 w-5" />
+                  </div>
+                  <div>
+                    <h2 className="text-2xl font-bold tracking-[-0.02em]">
+                      {building.name}
+                    </h2>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <span className="badge-neutral">{industry.label}</span>
+                      <span className="badge-neutral">
+                        <Layers className="h-3.5 w-3.5" />
+                        {floors.length || building.floors?.[0]?.count || 0} floors
+                      </span>
+                      <span className="badge-neutral">
+                        <MapPin className="h-3.5 w-3.5" />
+                        {building.address || "Address not added"}
+                      </span>
                     </div>
+                    <p className="mt-3 text-sm subtle-text">
+                      Last updated {formatDate(building.updated_at)}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    onClick={() => setModal({ type: "building", building })}
+                    className="btn-secondary"
+                  >
+                    <Edit3 className="h-4 w-4" />
+                    Edit
+                  </button>
+                  <button
+                    onClick={() => handleToggleBuilding(building.id)}
+                    className="btn-secondary"
+                  >
+                    Manage Floors
+                    <ChevronDown
+                      className={`h-4 w-4 transition-transform ${
+                        isExpanded ? "rotate-180" : ""
+                      }`}
+                    />
+                  </button>
+                  <button
+                    onClick={() =>
+                      setDeleteState({
+                        type: "building",
+                        id: building.id,
+                        description: `Delete ${building.name} and all associated floors?`,
+                      })
+                    }
+                    className="btn-danger"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Delete
+                  </button>
+                </div>
+              </div>
+
+              {isExpanded && (
+                <div className="mt-6 border-t border-default pt-6">
+                  <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                      <div className="section-label">Floors</div>
+                      <p className="mt-2 text-sm subtle-text">
+                        Create floors, adjust levels, and open the map editor.
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setModal({ type: "floor", buildingId: building.id })}
+                      className="btn-primary"
+                    >
+                      <Plus className="h-4 w-4" />
+                      Add Floor
+                    </button>
                   </div>
 
-                  {isExpanded && (
-                    <div className="border-t border-[var(--border)] px-5 pb-5 pt-4 sm:px-6">
-                      <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                        <div>
-                          <div className="text-xs font-bold uppercase tracking-[0.18em] text-[var(--text-soft)]">
-                            Floors
+                  {floors.length === 0 ? (
+                    <div className="empty-state">
+                      <div className="icon-chip">
+                        <Layers className="h-5 w-5" />
+                      </div>
+                      <h3 className="text-lg font-semibold">No floors yet</h3>
+                      <p className="max-w-md text-sm subtle-text">
+                        Add the first floor to begin drawing rooms, doors,
+                        waypoints, and paths.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="space-y-3">
+                      {floors.map((floor) => (
+                        <div
+                          key={floor.id}
+                          className="flex flex-col gap-4 rounded-xl border border-default bg-surface-alt p-4 lg:flex-row lg:items-center"
+                        >
+                          <div className="icon-chip h-10 w-10">
+                            <Layers className="h-4 w-4" />
                           </div>
-                          <div className="mt-1 text-sm subtle-text">
-                            Add levels and open the editor for map, doors, and route improvements.
+                          <div className="min-w-0 flex-1">
+                            <div className="font-semibold text-primary">{floor.name}</div>
+                            <div className="text-sm subtle-text">Level {floor.level}</div>
+                          </div>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              onClick={() =>
+                                setModal({
+                                  type: "floor",
+                                  buildingId: building.id,
+                                  floor,
+                                })
+                              }
+                              className="btn-secondary"
+                            >
+                              <Edit3 className="h-4 w-4" />
+                              Edit
+                            </button>
+                            <button
+                              onClick={() =>
+                                navigate(`/admin/buildings/${building.id}/floors/${floor.id}/editor`)
+                              }
+                              className="btn-primary"
+                            >
+                              Open Editor
+                            </button>
+                            <button
+                              onClick={() =>
+                                setDeleteState({
+                                  type: "floor",
+                                  id: floor.id,
+                                  buildingId: building.id,
+                                  description: `Delete ${floor.name} from ${building.name}?`,
+                                })
+                              }
+                              className="btn-danger"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                              Delete
+                            </button>
                           </div>
                         </div>
-                        <button
-                          onClick={() =>
-                            setModal({ type: "floor", data: null, buildingId: building.id })
-                          }
-                          className="btn-secondary"
-                        >
-                          <Plus className="h-4 w-4" />
-                          Add floor
-                        </button>
-                      </div>
-
-                      <div className="space-y-3">
-                        {floors.length === 0 ? (
-                          <div className="rounded-[22px] border border-dashed border-[var(--border-strong)] bg-[var(--surface-muted)] px-4 py-6 text-sm subtle-text">
-                            No floors yet. Add one to start the indoor map editor.
-                          </div>
-                        ) : (
-                          floors.map((floor) => (
-                            <div
-                              key={floor.id}
-                              className="flex flex-col gap-4 rounded-[24px] border border-[var(--border)] bg-[var(--surface-muted)] px-4 py-4 lg:flex-row lg:items-center"
-                            >
-                              <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-500/10 text-brand-500">
-                                <Layers className="h-5 w-5" />
-                              </div>
-                              <div className="min-w-0 flex-1">
-                                <div className="font-semibold">{floor.name}</div>
-                                <div className="mt-1 text-sm subtle-text">Level {floor.level}</div>
-                              </div>
-                              <div className="flex flex-wrap gap-2">
-                                <button
-                                  onClick={() => setModal({ type: "floor", data: floor, buildingId: building.id })}
-                                  className="btn-secondary"
-                                >
-                                  <Edit2 className="h-4 w-4" />
-                                  Edit
-                                </button>
-                                <button
-                                  onClick={() =>
-                                    navigate(`/admin/buildings/${building.id}/floors/${floor.id}/editor`)
-                                  }
-                                  className="btn-primary"
-                                >
-                                  <Map className="h-4 w-4" />
-                                  Open editor
-                                </button>
-                                <button
-                                  onClick={() => handleDeleteFloor(floor.id, building.id)}
-                                  className="btn-danger"
-                                >
-                                  <Trash2 className="h-4 w-4" />
-                                  Delete
-                                </button>
-                              </div>
-                            </div>
-                          ))
-                        )}
-                      </div>
+                      ))}
                     </div>
                   )}
-                </article>
-              );
-            })}
-          </div>
-        )}
-      </div>
+                </div>
+              )}
+            </article>
+          );
+        })
+      )}
 
       {modal?.type === "building" && (
         <BuildingModal
-          building={modal.data}
+          building={modal.building || null}
           onClose={() => setModal(null)}
-          onSave={() => {
+          onSave={async () => {
             setModal(null);
-            loadBuildings();
+            await loadBuildings();
           }}
         />
       )}
 
       {modal?.type === "floor" && (
         <FloorModal
+          floor={modal.floor || null}
           buildingId={modal.buildingId}
-          floor={modal.data}
           onClose={() => setModal(null)}
-          onSave={() => {
+          onSave={async () => {
+            const buildingId = modal.buildingId;
             setModal(null);
-            loadFloors(modal.buildingId);
+            await loadFloors(buildingId);
+            await loadBuildings();
           }}
+        />
+      )}
+
+      {deleteState && (
+        <ConfirmModal
+          title={deleteState.type === "building" ? "Delete building" : "Delete floor"}
+          description={deleteState.description}
+          onCancel={() => setDeleteState(null)}
+          onConfirm={confirmDelete}
+          confirming={deleting}
         />
       )}
     </div>

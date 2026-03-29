@@ -1,31 +1,20 @@
-/**
- * CampusNav Theme System
- *
- * Provides light/dark mode switching via React Context.
- * Persists preference to localStorage.
- * Applies 'dark' class to document root for Tailwind dark: variants.
- */
-
+// CampusNav redesign — themeContext.jsx — updated
 import {
   createContext,
-  useContext,
-  useState,
-  useEffect,
   useCallback,
+  useContext,
+  useEffect,
+  useState,
 } from "react";
 
 const ThemeContext = createContext(null);
 
 const STORAGE_KEY = "campusnav-theme";
 
-/**
- * Read initial theme from localStorage or system preference
- * @returns {'light'|'dark'}
- */
 function getInitialTheme() {
-  if (typeof window === "undefined") return "dark";
+  if (typeof window === "undefined") return "light";
 
-  const stored = localStorage.getItem(STORAGE_KEY);
+  const stored = window.localStorage.getItem(STORAGE_KEY);
   if (stored === "light" || stored === "dark") return stored;
 
   if (window.matchMedia?.("(prefers-color-scheme: dark)").matches) {
@@ -35,60 +24,50 @@ function getInitialTheme() {
   return "light";
 }
 
-/**
- * Apply theme class to document root
- * @param {'light'|'dark'} theme
- */
 function applyThemeToDOM(theme) {
   const root = document.documentElement;
-  if (theme === "dark") {
-    root.classList.add("dark");
-    root.classList.remove("light");
-  } else {
-    root.classList.add("light");
-    root.classList.remove("dark");
-  }
-  // Also set color-scheme for native elements (scrollbars, inputs)
+  root.dataset.theme = theme;
+  root.classList.toggle("dark", theme === "dark");
+  root.classList.toggle("light", theme === "light");
   root.style.colorScheme = theme;
 }
 
 export function ThemeProvider({ children }) {
   const [theme, setThemeState] = useState(getInitialTheme);
 
-  // Apply theme on mount and changes
   useEffect(() => {
     applyThemeToDOM(theme);
-    localStorage.setItem(STORAGE_KEY, theme);
+    window.localStorage.setItem(STORAGE_KEY, theme);
   }, [theme]);
 
-  const setTheme = useCallback((newTheme) => {
-    setThemeState(newTheme);
+  const setTheme = useCallback((value) => {
+    setThemeState(value);
   }, []);
 
   const toggleTheme = useCallback(() => {
-    setThemeState((prev) => (prev === "dark" ? "light" : "dark"));
+    setThemeState((previous) => (previous === "dark" ? "light" : "dark"));
   }, []);
 
-  const isDark = theme === "dark";
-
   return (
-    <ThemeContext.Provider value={{ theme, setTheme, toggleTheme, isDark }}>
+    <ThemeContext.Provider
+      value={{
+        theme,
+        setTheme,
+        toggleTheme,
+        isDark: theme === "dark",
+      }}
+    >
       {children}
     </ThemeContext.Provider>
   );
 }
 
-/**
- * Hook to access theme context
- * @returns {{ theme: string, setTheme: Function, toggleTheme: Function, isDark: boolean }}
- */
 export function useTheme() {
-  const ctx = useContext(ThemeContext);
-  if (!ctx) {
+  const context = useContext(ThemeContext);
+  if (!context) {
     throw new Error("useTheme must be used within a ThemeProvider");
   }
-  return ctx;
+  return context;
 }
 
 export default ThemeContext;
-    

@@ -1,1304 +1,2326 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+// CampusNav redesign — MapEditor.jsx — updated
+import {
+  forwardRef,
+  useEffect,
+  useImperativeHandle,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { v4 as uuidv4 } from "uuid";
+import toast from "react-hot-toast";
+import {
+  Accessibility,
+  Check,
+  ChevronDown,
+  DoorOpen,
+  Download,
+  Eye,
+  EyeOff,
+  GitBranch,
+  HelpCircle,
+  ImagePlus,
+  Import,
+  LayoutGrid,
+  Layers,
+  Magnet,
+  MapPin,
+  MousePointer2,
+  Move,
+  MoveDiagonal2,
+  PencilRuler,
+  RectangleHorizontal,
+  Search,
+  SearchCheck,
+  Sparkles,
+  Spline,
+  Trash2,
+  X,
+} from "lucide-react";
+import {
+  DEFAULT_INDUSTRY,
+  formatRoomTypeLabel,
+  getRoomTypeMeta,
+  getRoomTypes,
+  resolvePoiIcon,
+} from "../config/poiTypes.js";
 
-// ─── Constants ───────────────────────────────────────────────────────────────
-const COLORS = {
-  room: "#3b82f6",
-  corridor: "#22d3a5",
-  staircase: "#a78bfa",
-  elevator: "#f59e0b",
-  outdoor: "#34d399",
-  entrance: "#fb923c",
-  toilet: "#94a3b8",
-  parking: "#64748b",
-};
-const FILLS = {
-  room: "rgba(30,58,95,0.75)",
-  corridor: "rgba(26,42,26,0.75)",
-  staircase: "rgba(42,26,58,0.75)",
-  elevator: "rgba(42,32,10,0.75)",
-  outdoor: "rgba(20,40,25,0.75)",
-  entrance: "rgba(50,30,15,0.75)",
-  toilet: "rgba(30,35,45,0.75)",
-  parking: "rgba(20,25,35,0.75)",
-};
-const ZONE_TYPES = ["room","corridor","staircase","elevator","outdoor","entrance","toilet","parking"];
-const TOOLS = ["select","rect","polygon","path","waypoint","door","label","measure"];
-const UUID_PATTERN =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const GRID = 20;
+const MIN_ZOOM = 0.25;
+const MAX_ZOOM = 6;
+const MIN_SIZE = 24;
+const LINK_DIST = 48;
+const WAYPOINTS = ["junction", "entrance", "destination"];
+const TRANSITIONS = ["none", "stairs", "elevator"];
+const ROOM_ALIASES = { toilet: "restroom", staircase: "stairs" };
 
-const uid = () => uuidv4();
-const isUuid = (value) => typeof value === "string" && UUID_PATTERN.test(value);
-const snap = (v, on) => (on ? Math.round(v / 20) * 20 : v);
-const dist = (ax, ay, bx, by) => Math.hypot(ax - bx, ay - by);
+const TOOLS = [
+  { group: "Draw", id: "room", label: "Room", key: "R", icon: RectangleHorizontal },
+  { group: "Draw", id: "door", label: "Door", key: "D", icon: DoorOpen },
+  { group: "Draw", id: "waypoint", label: "Waypoint", key: "W", icon: MapPin },
+  { group: "Draw", id: "path", label: "Path", key: "P", icon: Spline },
+  { group: "Edit", id: "select", label: "Select", key: "S", icon: MousePointer2 },
+  { group: "Edit", id: "move", label: "Move", key: "M", icon: Move },
+  { group: "Edit", id: "resize", label: "Resize", key: "E", icon: MoveDiagonal2 },
+  { group: "Edit", id: "delete", label: "Delete", key: "Del", icon: Trash2 },
+];
 
-function distToSegment(px, py, a, b) {
-  const dx = b.x - a.x, dy = b.y - a.y;
-  if (dx === 0 && dy === 0) return dist(px, py, a.x, a.y);
-  const t = Math.max(0, Math.min(1, ((px - a.x) * dx + (py - a.y) * dy) / (dx * dx + dy * dy)));
-  return dist(px, py, a.x + t * dx, a.y + t * dy);
-}
+const clone = (value) => JSON.parse(JSON.stringify(value));
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+const snap = (value, enabled) =>
+  enabled ? Math.round(value / GRID) * GRID : value;
+const slugify = (value) =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "") || "custom";
+const dist = (a, b) => Math.hypot((a.x || 0) - (b.x || 0), (a.y || 0) - (b.y || 0));
 
-function pointInPoly(x, y, pts) {
+function pointInPoly(point, points) {
   let inside = false;
-  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
-    if (((pts[i].y > y) !== (pts[j].y > y)) &&
-      (x < ((pts[j].x - pts[i].x) * (y - pts[i].y)) / (pts[j].y - pts[i].y) + pts[i].x))
+  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
+    if (
+      points[i].y > point.y !== points[j].y > point.y &&
+      point.x <
+        ((points[j].x - points[i].x) * (point.y - points[i].y)) /
+          (points[j].y - points[i].y) +
+          points[i].x
+    ) {
       inside = !inside;
+    }
   }
   return inside;
 }
 
-function pointNearRect(point, rect, tolerance = 26) {
+function segDist(point, a, b) {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  if (dx === 0 && dy === 0) return dist(point, a);
+  const t = clamp(
+    ((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy),
+    0,
+    1,
+  );
+  return dist(point, { x: a.x + t * dx, y: a.y + t * dy });
+}
+
+function boundsFromPoints(points = []) {
+  return points.reduce(
+    (acc, point) => ({
+      minX: Math.min(acc.minX, point.x),
+      minY: Math.min(acc.minY, point.y),
+      maxX: Math.max(acc.maxX, point.x),
+      maxY: Math.max(acc.maxY, point.y),
+    }),
+    {
+      minX: points[0]?.x ?? 0,
+      minY: points[0]?.y ?? 0,
+      maxX: points[0]?.x ?? 0,
+      maxY: points[0]?.y ?? 0,
+    },
+  );
+}
+
+function getBounds(element) {
+  if (element.kind === "room" && element.shape === "polygon") {
+    const box = boundsFromPoints(element.points);
+    return {
+      x: box.minX,
+      y: box.minY,
+      width: box.maxX - box.minX,
+      height: box.maxY - box.minY,
+    };
+  }
+  if (element.kind === "path") {
+    const box = boundsFromPoints(element.points);
+    return {
+      x: box.minX,
+      y: box.minY,
+      width: box.maxX - box.minX,
+      height: box.maxY - box.minY,
+    };
+  }
+  if (element.kind === "door" || element.kind === "waypoint") {
+    return { x: element.x - 12, y: element.y - 12, width: 24, height: 24 };
+  }
+  return {
+    x: element.x || 0,
+    y: element.y || 0,
+    width: element.width || 0,
+    height: element.height || 0,
+  };
+}
+
+function roomCenter(room) {
+  const box = getBounds(room);
+  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+}
+
+function handlePoints(element) {
+  const box = getBounds(element);
+  const mx = box.x + box.width / 2;
+  const my = box.y + box.height / 2;
+  return [
+    { id: "nw", x: box.x, y: box.y },
+    { id: "n", x: mx, y: box.y },
+    { id: "ne", x: box.x + box.width, y: box.y },
+    { id: "e", x: box.x + box.width, y: my },
+    { id: "se", x: box.x + box.width, y: box.y + box.height },
+    { id: "s", x: mx, y: box.y + box.height },
+    { id: "sw", x: box.x, y: box.y + box.height },
+    { id: "w", x: box.x, y: my },
+  ];
+}
+
+function defaultRoomType(industryId) {
+  return getRoomTypes(industryId).find((entry) => !entry.isCustom)?.id || "custom";
+}
+
+function normalizeRoomType(rawType, industryId) {
+  const next = ROOM_ALIASES[rawType] || rawType;
+  if (!next) return { roomType: defaultRoomType(industryId), customLabel: "", customValue: "" };
+  if (getRoomTypes(industryId).some((entry) => entry.id === next)) {
+    return { roomType: next, customLabel: "", customValue: "" };
+  }
+  return {
+    roomType: "custom",
+    customLabel: formatRoomTypeLabel(rawType),
+    customValue: rawType,
+  };
+}
+
+function resolvedRoomType(room) {
+  return room.roomType === "custom"
+    ? room.customValue || slugify(room.customLabel)
+    : room.roomType;
+}
+
+function roomLabel(room, industryId) {
+  if (room.roomType !== "custom") {
+    const meta = getRoomTypeMeta(industryId, room.roomType);
+    if (!meta?.isCustom) return meta.label;
+  }
+  return room.customLabel || formatRoomTypeLabel(room.customValue || "custom");
+}
+
+function hit(point, element) {
+  if (element.kind === "room" && element.shape === "polygon") {
+    return pointInPoly(point, element.points || []);
+  }
+  if (element.kind === "path") {
+    return element.points.some((entry, index) => {
+      if (!index) return false;
+      return segDist(point, element.points[index - 1], entry) <= 10;
+    });
+  }
+  const box = getBounds(element);
   return (
-    point.x >= rect.x - tolerance &&
-    point.x <= rect.x + rect.w + tolerance &&
-    point.y >= rect.y - tolerance &&
-    point.y <= rect.y + rect.h + tolerance
+    point.x >= box.x &&
+    point.x <= box.x + box.width &&
+    point.y >= box.y &&
+    point.y <= box.y + box.height
   );
 }
 
-function findDoorForRoom(room, doors) {
-  const matches = doors.filter((door) => pointNearRect(door, room));
-  if (!matches.length) return null;
-
-  const centerX = room.x + room.w / 2;
-  const centerY = room.y + room.h / 2;
-  return matches.reduce((best, current) =>
-    Math.hypot(current.x - centerX, current.y - centerY) <
-    Math.hypot(best.x - centerX, best.y - centerY)
-      ? current
-      : best,
+function floorEntry(mapData, floorData) {
+  const floors = Array.isArray(mapData?.floors) ? mapData.floors : [];
+  return (
+    floors.find((entry) => entry.id === floorData?.id) ||
+    floors.find((entry) => entry.name === floorData?.name) ||
+    floors.find((entry) => entry.level === floorData?.level) ||
+    floors[0] ||
+    null
   );
 }
 
-function normalizeImportedFloors(floors) {
-  if (!Array.isArray(floors)) return [];
-
-  const floorIdMap = new Map();
-  floors.forEach((floor) => {
-    floorIdMap.set(floor.id, isUuid(floor.id) ? floor.id : uid());
-  });
-
-  return floors.map((floor) => ({
-    ...floor,
-    id: floorIdMap.get(floor.id),
-    elements: (floor.elements || []).map((element) => ({
-      ...element,
-      id: isUuid(element.id) ? element.id : uid(),
-      linkedFloor: element.linkedFloor
-        ? floorIdMap.get(element.linkedFloor) || element.linkedFloor
-        : null,
-      points: element.points?.map((point) => ({ ...point })),
-    })),
-  }));
-}
-
-// ─── Styles ──────────────────────────────────────────────────────────────────
-const css = `
-  .cne-root {
-    display: flex; flex-direction: column; height: 100vh; overflow: hidden;
-    background: radial-gradient(circle at top left, rgba(93, 162, 255, 0.12), transparent 32%), #08111d;
-    color: #edf5ff;
-    font-family: 'Manrope', -apple-system, system-ui, sans-serif;
-    --bg:#08111d; --bg2:#0f1d2d; --bg3:#122437; --bg4:#162b42;
-    --border:rgba(149, 176, 211, 0.14); --border2:rgba(149, 176, 211, 0.24);
-    --accent:#0f6efd; --accent2:#88bbff; --accentdim:rgba(15,110,253,0.16);
-    --text:#edf5ff; --text2:#a2b1c4; --text3:#71839a;
-    --green:#22d3a5; --amber:#f59e0b; --red:#ef4444; --purple:#a78bfa;
-  }
-  .cne-topbar {
-    display: flex; align-items: center; gap: 6px; padding: 0 12px;
-    height: 52px; background: var(--bg2); border-bottom: 1px solid var(--border);
-    flex-shrink: 0; overflow-x: auto; overflow-y: hidden;
-  }
-  .cne-topbar::-webkit-scrollbar { height: 0 }
-  .cne-brand { font-weight: 700; font-size: 14px; color: var(--accent2);
-    margin-right: 8px; white-space: nowrap; letter-spacing: .5px; }
-  .cne-sep { width: 1px; height: 28px; background: var(--border); flex-shrink: 0; }
-  .cne-group { display: flex; gap: 2px; align-items: center; }
-  .cne-lbl { font-size: 10px; color: var(--text3); text-transform: uppercase;
-    letter-spacing: .8px; padding: 0 4px; white-space: nowrap; }
-  .cne-btn {
-    display: flex; align-items: center; gap: 4px; padding: 5px 9px;
-    border-radius: 7px; border: 1px solid transparent; background: transparent;
-    color: var(--text2); font-size: 11px; cursor: pointer; white-space: nowrap;
-    transition: all .15s; flex-shrink: 0;
-  }
-  .cne-btn:hover { background: var(--bg3); color: var(--text); border-color: var(--border); }
-  .cne-btn.active { background: var(--accentdim); color: var(--accent2); border-color: var(--accent); }
-  .cne-btn.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
-  .cne-btn.primary:hover { background: var(--accent2); }
-  .cne-btn.danger { color: var(--red); }
-  .cne-btn.danger:hover { background: rgba(239,68,68,0.15); border-color: var(--red); }
-  .cne-btn svg { width: 13px; height: 13px; flex-shrink: 0; }
-  .cne-main { display: flex; flex: 1; overflow: hidden; }
-  .cne-left {
-    width: 192px; background: var(--bg2); border-right: 1px solid var(--border);
-    display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto;
-  }
-  .cne-left::-webkit-scrollbar { width: 4px; }
-  .cne-left::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
-  .cne-section { padding: 10px; border-bottom: 1px solid var(--border); }
-  .cne-ptitle { font-size: 10px; color: var(--text3); text-transform: uppercase;
-    letter-spacing: .8px; margin-bottom: 8px; }
-  .cne-tool-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 4px; }
-  .cne-tool {
-    display: flex; flex-direction: column; align-items: center; gap: 3px;
-    padding: 8px 4px; border-radius: 8px; border: 1px solid var(--border);
-    background: var(--bg3); color: var(--text2); font-size: 10px;
-    cursor: pointer; transition: all .15s; text-align: center;
-  }
-  .cne-tool:hover { border-color: var(--border2); color: var(--text); }
-  .cne-tool.active { border-color: var(--accent); background: var(--accentdim); color: var(--accent2); }
-  .cne-tool svg { width: 17px; height: 17px; }
-  .cne-zone {
-    display: flex; align-items: center; gap: 7px; padding: 6px 8px;
-    border-radius: 7px; border: 1px solid var(--border); background: var(--bg3);
-    color: var(--text2); font-size: 11px; cursor: pointer; transition: all .15s;
-    width: 100%; margin-bottom: 3px;
-  }
-  .cne-zone:hover { border-color: var(--border2); color: var(--text); }
-  .cne-zone.active { border-color: var(--accent); background: var(--accentdim); color: var(--accent2); }
-  .cne-zdot { width: 9px; height: 9px; border-radius: 3px; flex-shrink: 0; }
-  .cne-floor {
-    display: flex; align-items: center; gap: 6px; padding: 6px 8px;
-    border-radius: 7px; cursor: pointer; font-size: 11px; color: var(--text2); transition: all .15s;
-  }
-  .cne-floor:hover { background: var(--bg3); color: var(--text); }
-  .cne-floor.active { background: var(--accentdim); color: var(--accent2); }
-  .cne-floor-badge {
-    width: 18px; height: 18px; border-radius: 4px; background: var(--bg4);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 9px; flex-shrink: 0;
-  }
-  .cne-floor-add {
-    display: flex; align-items: center; gap: 6px; padding: 6px 8px;
-    border-radius: 7px; cursor: pointer; font-size: 11px; color: var(--accent);
-    border: 1px dashed var(--border); margin-top: 4px; justify-content: center;
-    transition: all .15s;
-  }
-  .cne-floor-add:hover { background: var(--accentdim); }
-  .cne-stat { display: flex; justify-content: space-between; align-items: center;
-    padding: 4px 0; font-size: 11px; }
-  .cne-stat-lbl { color: var(--text3); }
-  .cne-stat-val { color: var(--text); font-weight: 500; }
-  .cne-canvas-wrap { flex: 1; position: relative; overflow: hidden; background: var(--bg); }
-  .cne-canvas-wrap canvas { position: absolute; top: 0; left: 0; }
-  .cne-info {
-    position: absolute; bottom: 12px; left: 12px; background: var(--bg2);
-    border: 1px solid var(--border); border-radius: 8px; padding: 5px 10px;
-    font-size: 11px; color: var(--text2); pointer-events: none; z-index: 10;
-  }
-  .cne-zoom { position: absolute; bottom: 12px; right: 12px; display: flex; gap: 4px; z-index: 10; }
-  .cne-zoom-btn {
-    width: 30px; height: 30px; border-radius: 7px; border: 1px solid var(--border);
-    background: var(--bg2); color: var(--text2); cursor: pointer;
-    display: flex; align-items: center; justify-content: center; font-size: 15px;
-    transition: all .15s;
-  }
-  .cne-zoom-btn:hover { background: var(--bg3); color: var(--text); }
-  .cne-right {
-    width: 216px; background: var(--bg2); border-left: 1px solid var(--border);
-    display: flex; flex-direction: column; flex-shrink: 0; overflow-y: auto;
-  }
-  .cne-right::-webkit-scrollbar { width: 4px; }
-  .cne-right::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 2px; }
-  .cne-empty {
-    display: flex; flex-direction: column; align-items: center; justify-content: center;
-    height: 180px; color: var(--text3); font-size: 12px; gap: 8px;
-  }
-  .cne-prop-row { padding: 8px 10px; border-bottom: 1px solid var(--border); }
-  .cne-prop-lbl { font-size: 10px; color: var(--text3); text-transform: uppercase;
-    letter-spacing: .7px; margin-bottom: 5px; }
-  .cne-input {
-    width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--bg3); color: var(--text); font-size: 12px; outline: none;
-    transition: border-color .15s;
-  }
-  .cne-input:focus { border-color: var(--accent); }
-  .cne-select {
-    width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--bg3); color: var(--text); font-size: 12px; outline: none;
-  }
-  .cne-textarea {
-    width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--bg3); color: var(--text); font-size: 12px; outline: none;
-    resize: vertical; min-height: 60px;
-  }
-  .cne-pbtn {
-    width: 100%; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--border);
-    background: var(--bg3); color: var(--text2); font-size: 11px; cursor: pointer;
-    transition: all .15s; margin-bottom: 4px;
-  }
-  .cne-pbtn:hover { background: var(--bg4); color: var(--text); }
-  .cne-pbtn.primary { border-color: var(--accent); color: var(--accent2); }
-  .cne-pbtn.danger { border-color: var(--red); color: var(--red); }
-  .cne-row2 { display: flex; gap: 6px; }
-  .cne-row2 .cne-input { width: 50%; }
-  .cne-hint { font-size: 11px; color: var(--text3); padding: 4px 0; }
-  .cne-toast {
-    position: fixed; bottom: 64px; left: 50%; transform: translateX(-50%);
-    background: var(--bg3); border: 1px solid var(--border2); border-radius: 10px;
-    padding: 8px 16px; font-size: 12px; color: var(--text); z-index: 200;
-    opacity: 0; transition: opacity .3s; pointer-events: none;
-  }
-  .cne-toast.show { opacity: 1; }
-`;
-
-// ─── Main Component ───────────────────────────────────────────────────────────
-export default function MapEditor({ onSave, buildingId, floorId }) {
-  const bgRef = useRef(null);
-  const mainRef = useRef(null);
-  const wrapRef = useRef(null);
-  const stateRef = useRef({
-    floors: [{ id: uid(), name: "Ground Floor", level: 0, elements: [], bgImage: null }],
-    currentFloor: 0,
-    tool: "select",
-    zoneType: "room",
-    zoom: 1, panX: 0, panY: 0,
-    selected: [],
-    drawing: false, drawStart: null, drawCurrent: null,
-    polyPoints: [], pathPoints: null,
-    dragging: false, dragStart: null, dragOriginals: [],
-    snapToGrid: true, showGrid: true,
-    pixelsPerMeter: null,
-    history: [], future: [],
-    measurePoints: [],
-    isPanning: false, panStart: null, panningCanvas: false,
-    spaceDown: false,
-    bgImages: {},
-  });
-  const S = stateRef.current;
-
-  const [, forceUpdate] = useState(0);
-  const refresh = useCallback(() => forceUpdate(n => n + 1), []);
-  const [toast, setToast] = useState({ msg: "", show: false });
-  const toastTimer = useRef(null);
-
-  const showToast = (msg) => {
-    clearTimeout(toastTimer.current);
-    setToast({ msg, show: true });
-    toastTimer.current = setTimeout(() => setToast(t => ({ ...t, show: false })), 2000);
-  };
-
-  const floor = () => S.floors[S.currentFloor];
-  const els = () => floor().elements;
-
-  // ── Canvas setup ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    const style = document.createElement("style");
-    style.textContent = css;
-    document.head.appendChild(style);
-    return () => document.head.removeChild(style);
-  }, []);
-
-  useEffect(() => {
-    const resize = () => {
-      const wrap = wrapRef.current;
-      if (!wrap) return;
-      const w = wrap.clientWidth, h = wrap.clientHeight;
-      [bgRef, mainRef].forEach(r => {
-        if (r.current) { r.current.width = w; r.current.height = h; }
-      });
-      S.panX = w / 2 - 400; S.panY = h / 2 - 300;
-      draw();
+function normalizeOverlayBounds(bounds) {
+  if (!bounds || typeof bounds !== "object") {
+    return {
+      north: "",
+      south: "",
+      east: "",
+      west: "",
     };
-    resize();
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
-  }, []);
+  }
 
-  // ── Draw ─────────────────────────────────────────────────────────────────
-  const draw = useCallback(() => {
-    const bgCanvas = bgRef.current, mainCanvas = mainRef.current;
-    if (!bgCanvas || !mainCanvas) return;
-    const bgCtx = bgCanvas.getContext("2d"), ctx = mainCanvas.getContext("2d");
-    const w = mainCanvas.width, h = mainCanvas.height;
-    bgCtx.clearRect(0, 0, w, h);
-    ctx.clearRect(0, 0, w, h);
+  return {
+    north: bounds.north ?? "",
+    south: bounds.south ?? "",
+    east: bounds.east ?? "",
+    west: bounds.west ?? "",
+  };
+}
 
-    // Grid
-    if (S.showGrid) {
-      bgCtx.strokeStyle = "rgba(42,52,80,0.5)"; bgCtx.lineWidth = 0.5;
-      const step = 20 * S.zoom;
-      const ox = ((S.panX % step) + step) % step, oy = ((S.panY % step) + step) % step;
-      for (let x = ox; x < w; x += step) { bgCtx.beginPath(); bgCtx.moveTo(x, 0); bgCtx.lineTo(x, h); bgCtx.stroke(); }
-      for (let y = oy; y < h; y += step) { bgCtx.beginPath(); bgCtx.moveTo(0, y); bgCtx.lineTo(w, y); bgCtx.stroke(); }
-      const step5 = step * 5, ox5 = ((S.panX % step5) + step5) % step5, oy5 = ((S.panY % step5) + step5) % step5;
-      bgCtx.strokeStyle = "rgba(58,74,106,0.7)"; bgCtx.lineWidth = 1;
-      for (let x = ox5; x < w; x += step5) { bgCtx.beginPath(); bgCtx.moveTo(x, 0); bgCtx.lineTo(x, h); bgCtx.stroke(); }
-      for (let y = oy5; y < h; y += step5) { bgCtx.beginPath(); bgCtx.moveTo(0, y); bgCtx.lineTo(w, y); bgCtx.stroke(); }
-    }
-
-    // BG Image
-    const f = floor();
-    const bgImg = S.bgImages[f.id];
-    if (bgImg) {
-      bgCtx.save(); bgCtx.globalAlpha = 0.35;
-      bgCtx.translate(S.panX, S.panY); bgCtx.scale(S.zoom, S.zoom);
-      bgCtx.drawImage(bgImg, 0, 0); bgCtx.restore();
-    }
-
-    // Elements
-    const elems = els();
-    elems.filter(e => e.type === "path").forEach(e => drawPath(ctx, e));
-    elems.filter(e => e.type !== "path" && e.type !== "waypoint").forEach(e => drawEl(ctx, e));
-    elems.filter(e => e.type === "waypoint").forEach(e => drawWaypoint(ctx, e));
-    S.selected.forEach(id => { const el = elems.find(e => e.id === id); if (el) drawSel(ctx, el); });
-
-    // Overlay
-    drawOverlay(ctx);
-  }, []);
-
-  const toCanvas = (wx, wy) => ({ x: wx * S.zoom + S.panX, y: wy * S.zoom + S.panY });
-  const toWorld = (cx, cy) => ({ x: (cx - S.panX) / S.zoom, y: (cy - S.panY) / S.zoom });
-  const wToC = (el) => {
-    const c = toCanvas(el.x, el.y);
-    return { x: c.x, y: c.y, w: el.w * S.zoom, h: el.h * S.zoom };
+function cleanOverlayBounds(bounds) {
+  const next = {
+    north: Number.parseFloat(bounds?.north),
+    south: Number.parseFloat(bounds?.south),
+    east: Number.parseFloat(bounds?.east),
+    west: Number.parseFloat(bounds?.west),
   };
 
-  const drawEl = (ctx, el) => {
-    ctx.save();
-    const sel = S.selected.includes(el.id);
-    if (el.type === "rect" || el.type === "zone") {
-      const { x, y, w, h } = wToC(el);
-      if (w === 0 || h === 0) { ctx.restore(); return; }
-      ctx.fillStyle = FILLS[el.zoneType] || FILLS.room;
-      ctx.strokeStyle = sel ? "#ffffff" : (COLORS[el.zoneType] || COLORS.room);
-      ctx.lineWidth = sel ? 2.5 : 1.5;
-      ctx.beginPath(); ctx.roundRect(x, y, w, h, Math.max(2, 4 * S.zoom)); ctx.fill(); ctx.stroke();
-      const fs = Math.max(10, Math.min(14, Math.abs(w) / 6));
-      ctx.fillStyle = "rgba(255,255,255,0.92)"; ctx.font = `500 ${fs}px -apple-system, system-ui`;
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(el.name || "Unnamed", x + w / 2, y + h / 2);
-      if (el.zoneType && el.zoneType !== "room") {
-        const bfs = Math.max(8, 9 * S.zoom), bh = bfs + 6, bw = bfs * 6;
-        ctx.fillStyle = (COLORS[el.zoneType] || "#fff") + "33";
-        ctx.strokeStyle = (COLORS[el.zoneType] || "#fff") + "99"; ctx.lineWidth = 0.5;
-        ctx.beginPath(); ctx.roundRect(x + w / 2 - bw / 2, y + 3 * S.zoom, bw, bh, 2 * S.zoom);
-        ctx.fill(); ctx.stroke();
-        ctx.fillStyle = COLORS[el.zoneType] || "#fff"; ctx.font = `${bfs}px -apple-system`;
-        ctx.fillText(el.zoneType.toUpperCase(), x + w / 2, y + 3 * S.zoom + bh / 2);
-      }
-    } else if (el.type === "polygon" && el.points?.length >= 3) {
-      ctx.fillStyle = FILLS[el.zoneType] || FILLS.room;
-      ctx.strokeStyle = sel ? "#fff" : (COLORS[el.zoneType] || COLORS.room);
-      ctx.lineWidth = sel ? 2.5 : 1.5;
-      ctx.beginPath();
-      const p0 = toCanvas(el.points[0].x, el.points[0].y); ctx.moveTo(p0.x, p0.y);
-      el.points.slice(1).forEach(p => { const c = toCanvas(p.x, p.y); ctx.lineTo(c.x, c.y); });
-      ctx.closePath(); ctx.fill(); ctx.stroke();
-      const cx2 = el.points.reduce((a, p) => a + p.x, 0) / el.points.length;
-      const cy2 = el.points.reduce((a, p) => a + p.y, 0) / el.points.length;
-      const cc = toCanvas(cx2, cy2);
-      ctx.fillStyle = "rgba(255,255,255,0.92)"; ctx.font = `500 12px system-ui`;
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(el.name || "Unnamed", cc.x, cc.y);
-    } else if (el.type === "door") {
-      const c = toCanvas(el.x, el.y);
-      ctx.fillStyle = "#fb923c"; ctx.strokeStyle = "#fff"; ctx.lineWidth = 1.5;
-      ctx.beginPath(); ctx.arc(c.x, c.y, 6 * S.zoom, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      ctx.fillStyle = "#fff"; ctx.font = `bold ${Math.max(8, 9 * S.zoom)}px system-ui`;
-      ctx.textAlign = "center"; ctx.textBaseline = "middle"; ctx.fillText("D", c.x, c.y);
-      if (el.name) {
-        ctx.fillStyle = "rgba(255,255,255,0.7)"; ctx.font = `${Math.max(8, 9 * S.zoom)}px system-ui`;
-        ctx.fillText(el.name, c.x, c.y + 13 * S.zoom);
-      }
-    } else if (el.type === "label") {
-      const c = toCanvas(el.x, el.y);
-      ctx.fillStyle = "rgba(255,255,255,0.92)"; ctx.font = `500 ${Math.max(10, 13 * S.zoom)}px system-ui`;
-      ctx.textAlign = "center"; ctx.textBaseline = "middle";
-      ctx.fillText(el.text || "Label", c.x, c.y);
-    }
-    ctx.restore();
-  };
-
-  const drawPath = (ctx, el) => {
-    if (!el.points || el.points.length < 2) return;
-    ctx.save();
-    const sel = S.selected.includes(el.id);
-    ctx.strokeStyle = sel ? "#fff" : "rgba(79,110,247,0.8)";
-    ctx.lineWidth = (sel ? 2.5 : 1.5);
-    ctx.setLineDash([6, 4]);
-    ctx.beginPath();
-    const p0 = toCanvas(el.points[0].x, el.points[0].y); ctx.moveTo(p0.x, p0.y);
-    el.points.slice(1).forEach(p => { const c = toCanvas(p.x, p.y); ctx.lineTo(c.x, c.y); });
-    ctx.stroke(); ctx.setLineDash([]);
-    if (S.pixelsPerMeter && el.points.length >= 2) {
-      let total = 0;
-      for (let i = 1; i < el.points.length; i++) {
-        const dx = el.points[i].x - el.points[i - 1].x, dy = el.points[i].y - el.points[i - 1].y;
-        total += Math.sqrt(dx * dx + dy * dy);
-      }
-      const meters = (total / S.pixelsPerMeter).toFixed(1);
-      const mid = toCanvas(
-        (el.points[0].x + el.points[el.points.length - 1].x) / 2,
-        (el.points[0].y + el.points[el.points.length - 1].y) / 2
-      );
-      ctx.fillStyle = "rgba(79,110,247,0.9)"; ctx.font = `10px system-ui`;
-      ctx.textAlign = "center"; ctx.fillText(`${meters}m`, mid.x, mid.y - 8);
-    }
-    ctx.restore();
-  };
-
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem("campusnav-editor");
-      if (!raw) return;
-      const saved = JSON.parse(raw);
-      if (saved?.floors?.length) {
-        S.floors = saved.floors;
-        S.currentFloor = 0;
-      }
-      if (typeof saved?.pixelsPerMeter === "number") {
-        S.pixelsPerMeter = saved.pixelsPerMeter;
-      }
-      refresh();
-      draw();
-    } catch {
-      // Ignore stale editor state in localStorage
-    }
-  }, [draw, refresh]);
-
-  const drawWaypoint = (ctx, el) => {
-    const c = toCanvas(el.x, el.y);
-    const sel = S.selected.includes(el.id);
-    ctx.save();
-    ctx.fillStyle = "rgba(79,110,247,0.9)";
-    ctx.strokeStyle = sel ? "#fff" : "rgba(79,110,247,0.4)";
-    ctx.lineWidth = 6 * S.zoom;
-    ctx.beginPath(); ctx.arc(c.x, c.y, 5 * S.zoom, 0, Math.PI * 2);
-    ctx.fill(); ctx.stroke();
-    if (el.linkedFloor) {
-      ctx.fillStyle = "#a78bfa"; ctx.font = `bold ${Math.max(8, 9 * S.zoom)}px system-ui`;
-      ctx.textAlign = "center"; ctx.fillText("↕", c.x, c.y - 10 * S.zoom);
-    }
-    ctx.restore();
-  };
-
-  const drawSel = (ctx, el) => {
-    ctx.save();
-    ctx.strokeStyle = "rgba(255,255,255,0.5)"; ctx.lineWidth = 1; ctx.setLineDash([4, 3]);
-    if (el.type === "rect" || el.type === "zone") {
-      const { x, y, w, h } = wToC(el);
-      const pad = 4 * S.zoom;
-      ctx.strokeRect(x - pad, y - pad, w + pad * 2, h + pad * 2);
-      const handles = [[x, y], [x + w / 2, y], [x + w, y], [x + w, y + h / 2],
-      [x + w, y + h], [x + w / 2, y + h], [x, y + h], [x, y + h / 2]];
-      ctx.fillStyle = "#fff"; ctx.setLineDash([]);
-      handles.forEach(([hx, hy]) => ctx.fillRect(hx - 3, hy - 3, 6, 6));
-    } else if (el.type === "polygon" && el.points) {
-      el.points.forEach(p => {
-        const c = toCanvas(p.x, p.y);
-        ctx.fillStyle = "#fff"; ctx.fillRect(c.x - 3, c.y - 3, 6, 6);
-      });
-    }
-    ctx.setLineDash([]);
-    ctx.restore();
-  };
-
-  const drawOverlay = (ctx) => {
-    if (!S.drawing) return;
-    ctx.save();
-    ctx.strokeStyle = "rgba(79,110,247,0.8)"; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
-    if (S.tool === "rect" && S.drawStart && S.drawCurrent) {
-      const s = toCanvas(S.drawStart.x, S.drawStart.y), e = toCanvas(S.drawCurrent.x, S.drawCurrent.y);
-      ctx.fillStyle = "rgba(79,110,247,0.08)"; ctx.fillRect(s.x, s.y, e.x - s.x, e.y - s.y);
-      ctx.strokeRect(s.x, s.y, e.x - s.x, e.y - s.y);
-    } else if (S.tool === "polygon" && S.polyPoints.length > 0) {
-      ctx.beginPath();
-      const p0 = toCanvas(S.polyPoints[0].x, S.polyPoints[0].y); ctx.moveTo(p0.x, p0.y);
-      S.polyPoints.slice(1).forEach(p => { const c = toCanvas(p.x, p.y); ctx.lineTo(c.x, c.y); });
-      if (S.drawCurrent) { const c = toCanvas(S.drawCurrent.x, S.drawCurrent.y); ctx.lineTo(c.x, c.y); }
-      ctx.stroke();
-      ctx.setLineDash([]);
-      S.polyPoints.forEach(p => {
-        const c = toCanvas(p.x, p.y);
-        ctx.fillStyle = "#4f6ef7"; ctx.beginPath(); ctx.arc(c.x, c.y, 4, 0, Math.PI * 2); ctx.fill();
-      });
-    } else if (S.tool === "path" && S.pathPoints?.length >= 1) {
-      ctx.beginPath();
-      const p0 = toCanvas(S.pathPoints[0].x, S.pathPoints[0].y); ctx.moveTo(p0.x, p0.y);
-      S.pathPoints.slice(1).forEach(p => { const c = toCanvas(p.x, p.y); ctx.lineTo(c.x, c.y); });
-      if (S.drawCurrent) { const c = toCanvas(S.drawCurrent.x, S.drawCurrent.y); ctx.lineTo(c.x, c.y); }
-      ctx.stroke();
-    } else if (S.tool === "measure" && S.measurePoints.length === 1 && S.drawCurrent) {
-      const s = toCanvas(S.measurePoints[0].x, S.measurePoints[0].y);
-      const e = toCanvas(S.drawCurrent.x, S.drawCurrent.y);
-      ctx.strokeStyle = "#f59e0b"; ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(s.x, s.y); ctx.lineTo(e.x, e.y); ctx.stroke();
-      const dx = S.drawCurrent.x - S.measurePoints[0].x, dy = S.drawCurrent.y - S.measurePoints[0].y;
-      const px = Math.round(Math.sqrt(dx * dx + dy * dy));
-      ctx.fillStyle = "#f59e0b"; ctx.font = "12px system-ui"; ctx.textAlign = "center";
-      const label = S.pixelsPerMeter ? `${px}px / ${(px / S.pixelsPerMeter).toFixed(1)}m` : `${px}px`;
-      ctx.fillText(label, (s.x + e.x) / 2, (s.y + e.y) / 2 - 8);
-    }
-    ctx.setLineDash([]);
-    ctx.restore();
-  };
-
-  // ── Hit test ─────────────────────────────────────────────────────────────
-  const hitTest = (wx, wy) => {
-    const elems = [...els()].reverse();
-    for (const el of elems) {
-      if (el.type === "rect" || el.type === "zone") {
-        if (wx >= el.x && wx <= el.x + el.w && wy >= el.y && wy <= el.y + el.h) return el;
-      } else if (el.type === "polygon" && el.points) {
-        if (pointInPoly(wx, wy, el.points)) return el;
-      } else if (["waypoint", "door", "label"].includes(el.type)) {
-        if (dist(wx, wy, el.x, el.y) < 12 / S.zoom) return el;
-      } else if (el.type === "path" && el.points) {
-        for (let i = 1; i < el.points.length; i++) {
-          if (distToSegment(wx, wy, el.points[i - 1], el.points[i]) < 8 / S.zoom) return el;
-        }
-      }
-    }
+  if (Object.values(next).some((value) => !Number.isFinite(value))) {
     return null;
-  };
+  }
 
-  // ── Mouse events ─────────────────────────────────────────────────────────
-  const getPos = (e) => {
-    const r = mainRef.current.getBoundingClientRect();
-    const cx = e.clientX - r.left, cy = e.clientY - r.top;
-    const w = toWorld(cx, cy);
-    return { cx, cy, wx: snap(w.x, S.snapToGrid), wy: snap(w.y, S.snapToGrid), wxRaw: w.x, wyRaw: w.y };
-  };
+  return next;
+}
 
-  const onMouseDown = (e) => {
-    if (e.button === 1 || (e.button === 0 && S.spaceDown)) {
-      S.isPanning = true; S.panStart = { x: e.clientX - S.panX, y: e.clientY - S.panY };
-      e.preventDefault(); return;
-    }
-    const p = getPos(e);
-    if (S.tool === "select") {
-      const hit = hitTest(p.wxRaw, p.wyRaw);
-      if (hit) {
-        if (!e.shiftKey) S.selected = [hit.id];
-        else if (!S.selected.includes(hit.id)) S.selected.push(hit.id);
-        else S.selected = S.selected.filter(id => id !== hit.id);
-        S.dragging = true; S.dragStart = { x: p.wxRaw, y: p.wyRaw };
-        S.dragOriginals = S.selected.map(id => {
-          const el = els().find(e => e.id === id); if (!el) return null;
-          return { id, x: el.x, y: el.y, points: el.points ? el.points.map(pp => ({ ...pp })) : null };
-        }).filter(Boolean);
-        renderPropPanel(hit);
-      } else {
-        if (!e.shiftKey) { S.selected = []; renderPropPanel(null); }
-        S.panningCanvas = true; S.panStart = { x: e.clientX - S.panX, y: e.clientY - S.panY };
-      }
-    } else if (S.tool === "rect") {
-      S.drawing = true; S.drawStart = { x: p.wx, y: p.wy }; S.drawCurrent = { x: p.wx, y: p.wy };
-    } else if (S.tool === "polygon") {
-      if (!S.drawing) { S.drawing = true; S.polyPoints = [{ x: p.wx, y: p.wy }]; }
-      else S.polyPoints.push({ x: p.wx, y: p.wy });
-    } else if (S.tool === "path") {
-      if (!S.pathPoints) { S.pathPoints = [{ x: p.wx, y: p.wy }]; S.drawing = true; }
-      else S.pathPoints.push({ x: p.wx, y: p.wy });
-    } else if (S.tool === "waypoint") {
-      pushHistory(); els().push({ id: uid(), type: "waypoint", x: p.wx, y: p.wy, name: "", linkedFloor: null });
-    } else if (S.tool === "door") {
-      pushHistory(); els().push({ id: uid(), type: "door", x: p.wx, y: p.wy, name: "Door" });
-    } else if (S.tool === "label") {
-      const txt = window.prompt("Label text:"); if (!txt) return;
-      pushHistory(); els().push({ id: uid(), type: "label", x: p.wx, y: p.wy, text: txt });
-    } else if (S.tool === "measure") {
-      S.measurePoints.push({ x: p.wxRaw, y: p.wyRaw });
-      if (S.measurePoints.length === 2) {
-        const dx = S.measurePoints[1].x - S.measurePoints[0].x;
-        const dy = S.measurePoints[1].y - S.measurePoints[0].y;
-        const px = Math.round(Math.sqrt(dx * dx + dy * dy));
-        let msg = `Distance: ${px} pixels`;
-        if (S.pixelsPerMeter) msg += ` = ${(px / S.pixelsPerMeter).toFixed(2)} meters`;
-        else msg += `\n\nUse Set Scale to convert to meters.`;
-        window.alert(msg); S.measurePoints = []; S.drawing = false;
-      } else S.drawing = true;
-    }
-    refresh(); draw();
-  };
+function elementTitle(element, industryId) {
+  if (!element) return "Selection";
+  if (element.kind === "room") return element.name || roomLabel(element, industryId);
+  if (element.kind === "door") return element.name || element.doorType || "Door";
+  if (element.kind === "waypoint") {
+    return element.name || formatRoomTypeLabel(element.waypointType || "waypoint");
+  }
+  return element.name || `Path ${element.points?.length || 0}`;
+}
 
-  const onMouseMove = (e) => {
-    if (S.isPanning || S.panningCanvas) {
-      S.panX = e.clientX - S.panStart.x; S.panY = e.clientY - S.panStart.y; draw(); return;
-    }
-    const p = getPos(e);
-    if (S.drawing) {
-      S.drawCurrent = S.tool === "measure" ? { x: p.wxRaw, y: p.wyRaw } : { x: p.wx, y: p.wy };
-    }
-    if (S.dragging && S.dragStart) {
-      const dx = p.wxRaw - S.dragStart.x, dy = p.wyRaw - S.dragStart.y;
-      S.dragOriginals.forEach(orig => {
-        const el = els().find(e => e.id === orig.id); if (!el) return;
-        if (el.x !== undefined) { el.x = snap(orig.x + dx, S.snapToGrid); el.y = snap(orig.y + dy, S.snapToGrid); }
-        if (el.points && orig.points) el.points = orig.points.map(pp => ({ x: snap(pp.x + dx, S.snapToGrid), y: snap(pp.y + dy, S.snapToGrid) }));
-      });
-    }
-    const hit = hitTest(p.wxRaw, p.wyRaw);
-    mainRef.current.style.cursor = S.tool === "select" ? (hit ? "move" : "default") : "crosshair";
-    draw();
-  };
+function iconForElement(element) {
+  if (element.kind === "room") return RectangleHorizontal;
+  if (element.kind === "door") return DoorOpen;
+  if (element.kind === "waypoint") return MapPin;
+  return Spline;
+}
 
-  const onMouseUp = (e) => {
-    if (S.isPanning) { S.isPanning = false; return; }
-    if (S.panningCanvas) { S.panningCanvas = false; return; }
-    const p = getPos(e);
-    if (S.tool === "rect" && S.drawing && S.drawStart) {
-      const x = Math.min(S.drawStart.x, p.wx), y = Math.min(S.drawStart.y, p.wy);
-      const w = Math.abs(p.wx - S.drawStart.x), h = Math.abs(p.wy - S.drawStart.y);
-      if (w > 10 && h > 10) {
-        pushHistory();
-        els().push({ id: uid(), type: "rect", zoneType: S.zoneType, x, y, w, h, name: "", description: "", doors: [] });
-      }
-      S.drawing = false; S.drawStart = null; S.drawCurrent = null;
-    }
-    if (S.dragging) { pushHistory(); S.dragging = false; S.dragStart = null; }
-    refresh(); draw();
-  };
-
-  const onDblClick = (e) => {
-    const p = getPos(e);
-    if (S.tool === "polygon" && S.drawing && S.polyPoints.length >= 3) {
-      pushHistory();
-      els().push({ id: uid(), type: "polygon", zoneType: S.zoneType, points: [...S.polyPoints], name: "", description: "" });
-      S.polyPoints = []; S.drawing = false; refresh(); draw(); return;
-    }
-    if (S.tool === "path" && S.pathPoints?.length >= 2) {
-      pushHistory();
-      els().push({ id: uid(), type: "path", points: [...S.pathPoints] });
-      S.pathPoints = null; S.drawing = false; refresh(); draw(); return;
-    }
-    if (S.tool === "select") {
-      const hit = hitTest(p.wxRaw, p.wyRaw);
-      if (hit) { S.selected = [hit.id]; renderPropPanel(hit); refresh(); draw(); }
-    }
-  };
-
-  const onWheel = (e) => {
-    e.preventDefault();
-    const r = mainRef.current.getBoundingClientRect();
-    const cx = e.clientX - r.left, cy = e.clientY - r.top;
-    const wx = (cx - S.panX) / S.zoom, wy = (cy - S.panY) / S.zoom;
-    S.zoom = Math.min(Math.max(S.zoom * (e.deltaY > 0 ? 0.9 : 1.1), 0.1), 8);
-    S.panX = cx - wx * S.zoom; S.panY = cy - wy * S.zoom;
-    draw();
-  };
-
-  useEffect(() => {
-    const canvas = mainRef.current;
-    if (!canvas) return undefined;
-
-    const handleWheel = (event) => onWheel(event);
-    canvas.addEventListener("wheel", handleWheel, { passive: false });
-    return () => canvas.removeEventListener("wheel", handleWheel);
-  }, []);
-
-  useEffect(() => {
-    const onKeyDown = (e) => {
-      if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA") return;
-      if (e.key === "Delete" || e.key === "Backspace") deleteSelected();
-      if ((e.ctrlKey || e.metaKey) && e.key === "z") { e.shiftKey ? redo() : undo(); e.preventDefault(); }
-      if ((e.ctrlKey || e.metaKey) && e.key === "y") { redo(); e.preventDefault(); }
-      if ((e.ctrlKey || e.metaKey) && e.key === "a") { S.selected = els().map(e => e.id); refresh(); draw(); e.preventDefault(); }
-      if ((e.ctrlKey || e.metaKey) && e.key === "d") { duplicateSelected(); e.preventDefault(); }
-      if ((e.ctrlKey || e.metaKey) && e.key === "s") { saveMap(); e.preventDefault(); }
-      if (e.code === "Space") { S.spaceDown = true; e.preventDefault(); }
-      if (e.key === "Escape") { S.drawing = false; S.polyPoints = []; S.pathPoints = null; S.measurePoints = []; setTool("select"); draw(); }
+function normalizeElement(element, industryId) {
+  const kind = element.kind || element.type;
+  if (kind === "rect" || kind === "polygon" || kind === "room") {
+    const shape = element.shape || (kind === "polygon" ? "polygon" : "rect");
+    const typeState = normalizeRoomType(
+      element.roomType || element.zoneType || element.typeId || null,
+      industryId,
+    );
+    const points = (element.points || element.polygon_points || []).map((point) => ({
+      x: point.x,
+      y: point.y,
+    }));
+    const box = shape === "polygon" && points.length ? boundsFromPoints(points) : null;
+    return {
+      id: element.id || uuidv4(),
+      kind: "room",
+      type: shape === "polygon" ? "polygon" : "rect",
+      shape,
+      x: box ? box.minX : element.x || 0,
+      y: box ? box.minY : element.y || 0,
+      width: box ? box.maxX - box.minX : element.width || element.w || 120,
+      height: box ? box.maxY - box.minY : element.height || element.h || 90,
+      points,
+      name: element.name || "",
+      roomType: typeState.roomType,
+      customLabel: element.customTypeLabel || typeState.customLabel || "",
+      customValue: element.customTypeValue || typeState.customValue || "",
+      description: element.description || "",
+      color: element.color || "",
+      wheelchairAccessible: Boolean(element.wheelchairAccessible),
+      publicAccess: element.publicAccess ?? true,
     };
-    const onKeyUp = (e) => { if (e.code === "Space") S.spaceDown = false; };
-    window.addEventListener("keydown", onKeyDown);
-    window.addEventListener("keyup", onKeyUp);
-    return () => { window.removeEventListener("keydown", onKeyDown); window.removeEventListener("keyup", onKeyUp); };
-  }, []);
+  }
+  if (kind === "door") {
+    return {
+      id: element.id || uuidv4(),
+      kind: "door",
+      type: "door",
+      x: element.x || 0,
+      y: element.y || 0,
+      name: element.name || "Door",
+      doorType: element.doorType || "main_entrance",
+      widthMeters: element.widthMeters || element.width_meters || "",
+      accessible: Boolean(element.accessible),
+      locked: Boolean(element.locked),
+    };
+  }
+  if (kind === "waypoint") {
+    return {
+      id: element.id || uuidv4(),
+      kind: "waypoint",
+      type: "waypoint",
+      x: element.x || 0,
+      y: element.y || 0,
+      name: element.name || "",
+      waypointType:
+        element.waypointType ||
+        (element.type === "entrance"
+          ? "entrance"
+          : element.type === "room_center"
+            ? "destination"
+            : "junction"),
+      transitionType:
+        element.transitionType ||
+        (element.navType === "staircase" ? "stairs" : element.navType) ||
+        (element.type === "stairs" || element.type === "elevator" ? element.type : "none"),
+      linkedFloorId:
+        element.linkedFloorId || element.linkedFloor || element.linked_floor_id || null,
+      description: element.description || "",
+      customWaypointLabel: element.customWaypointLabel || "",
+    };
+  }
+  if (kind === "path") {
+    return {
+      id: element.id || uuidv4(),
+      kind: "path",
+      type: "path",
+      points: (element.points || []).map((point) => ({ x: point.x, y: point.y })),
+      bidirectional: element.bidirectional ?? true,
+      accessible: Boolean(element.accessible),
+      name: element.name || "",
+      staffOnly: Boolean(element.staffOnly),
+    };
+  }
+  return null;
+}
 
-  // ── History ───────────────────────────────────────────────────────────────
-  const pushHistory = () => {
-    S.history.push(JSON.stringify(S.floors));
-    if (S.history.length > 60) S.history.shift();
-    S.future = [];
+function modelFromFloor(floorData, industryId) {
+  if (!floorData) {
+    return {
+      floor: { id: uuidv4(), name: "Floor", level: 0, width: 1200, height: 800, bg: null },
+      elements: [],
+      pixelsPerMeter: null,
+      showGrid: true,
+      showLabels: true,
+      snapToGrid: true,
+      overlayBounds: normalizeOverlayBounds(),
+    };
+  }
+  const entry = floorEntry(floorData.map_data, floorData);
+  const elements = entry?.elements?.length
+    ? entry.elements.map((item) => normalizeElement(item, industryId)).filter(Boolean)
+    : [
+        ...(floorData.rooms || []).map((room) =>
+          normalizeElement(
+            {
+              id: room.id,
+              type: room.polygon_points?.length ? "polygon" : "rect",
+              x: room.x,
+              y: room.y,
+              width: room.width,
+              height: room.height,
+              polygon_points: room.polygon_points,
+              name: room.name,
+              roomType: room.type,
+              description: room.description,
+              color: room.color,
+            },
+            industryId,
+          ),
+        ),
+        ...(floorData.waypoints || []).map((waypoint) =>
+          normalizeElement(
+            {
+              id: waypoint.id,
+              kind: "waypoint",
+              x: waypoint.x,
+              y: waypoint.y,
+              name: waypoint.name,
+              type: waypoint.type,
+              linked_floor_id: waypoint.linked_floor_id,
+            },
+            industryId,
+          ),
+        ),
+        ...((floorData.connections || []).map((connection) => {
+          const start = (floorData.waypoints || []).find((wp) => wp.id === connection.waypoint_a_id);
+          const end = (floorData.waypoints || []).find((wp) => wp.id === connection.waypoint_b_id);
+          if (!start || !end) return null;
+          return {
+            id: connection.id || uuidv4(),
+            kind: "path",
+            type: "path",
+            points: [
+              { x: start.x, y: start.y },
+              { x: end.x, y: end.y },
+            ],
+            bidirectional: true,
+            accessible: false,
+            name: "",
+          };
+        }).filter(Boolean)),
+      ];
+  return {
+    floor: {
+      id: floorData.id,
+      name: floorData.name,
+      level: floorData.level ?? 0,
+      width: entry?.width || floorData.floor_plan_width || 1200,
+      height: entry?.height || floorData.floor_plan_height || 800,
+      bg: entry?.backgroundDataUrl || entry?.bgImage || null,
+    },
+    elements,
+    pixelsPerMeter:
+      floorData.map_data?.pixelsPerMeter ?? floorData.scale_pixels_per_meter ?? null,
+    showGrid: floorData.map_data?.showGrid ?? true,
+    showLabels: floorData.map_data?.showLabels ?? true,
+    snapToGrid: floorData.map_data?.snapToGrid ?? true,
+    overlayBounds: normalizeOverlayBounds(entry?.overlayBounds),
   };
-  const undo = () => {
-    if (!S.history.length) return;
-    S.future.push(JSON.stringify(S.floors));
-    S.floors = JSON.parse(S.history.pop());
-    S.selected = []; refresh(); draw(); showToast("Undo");
-  };
-  const redo = () => {
-    if (!S.future.length) return;
-    S.history.push(JSON.stringify(S.floors));
-    S.floors = JSON.parse(S.future.pop());
-    S.selected = []; refresh(); draw(); showToast("Redo");
-  };
+}
 
-  // ── Actions ───────────────────────────────────────────────────────────────
-  const deleteSelected = () => {
-    if (!S.selected.length) return;
-    pushHistory();
-    S.floors[S.currentFloor].elements = els().filter(e => !S.selected.includes(e.id));
-    S.selected = []; setPropEl(null); refresh(); draw();
-  };
-  const duplicateSelected = () => {
-    if (!S.selected.length) return; pushHistory();
-    const newEls = S.selected.map(id => {
-      const el = els().find(e => e.id === id); if (!el) return null;
-      return { ...JSON.parse(JSON.stringify(el)), id: uid(), x: (el.x || 0) + 30, y: (el.y || 0) + 30 };
-    }).filter(Boolean);
-    newEls.forEach(e => els().push(e));
-    S.selected = newEls.map(e => e.id); refresh(); draw();
-  };
-  const setTool = (t) => {
-    S.tool = t; S.drawing = false; S.polyPoints = []; S.pathPoints = null; S.measurePoints = [];
-    refresh(); draw();
-  };
-  const setZone = (z) => { S.zoneType = z; refresh(); };
-  const fitAll = () => {
-    const elems = els(); if (!elems.length) return;
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    elems.forEach(el => {
-      if (el.x !== undefined) { minX = Math.min(minX, el.x); minY = Math.min(minY, el.y); maxX = Math.max(maxX, (el.x || 0) + (el.w || 0)); maxY = Math.max(maxY, (el.y || 0) + (el.h || 0)); }
-      el.points?.forEach(p => { minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y); });
-    });
-    const pad = 60, w = mainRef.current.width - pad * 2, h = mainRef.current.height - pad * 2;
-    const rw = maxX - minX, rh = maxY - minY;
-    if (rw <= 0 || rh <= 0) return;
-    S.zoom = Math.min(w / rw, h / rh, 4);
-    S.panX = pad - minX * S.zoom + (w - rw * S.zoom) / 2;
-    S.panY = pad - minY * S.zoom + (h - rh * S.zoom) / 2;
-    draw();
-  };
-  const autoNav = () => {
-    const roomElements = els().filter(e =>
-      e.type === "rect" &&
-      ["room", "corridor", "staircase", "elevator", "entrance"].includes(e.zoneType)
-    );
-    if (roomElements.length < 2) { showToast("Need at least 2 rooms"); return; }
-    pushHistory();
-    S.floors[S.currentFloor].elements =
-      els().filter(e => e.type !== "waypoint" && e.type !== "path");
-    const doorElements = els().filter(e => e.type === "door");
-    const wps = roomElements.map(r => {
-      const door = findDoorForRoom(r, doorElements);
-      return {
-        id: uid(),
-        type: "waypoint",
-        x: door?.x ?? r.x + r.w / 2,
-        y: door?.y ?? r.y + r.h / 2,
-        name: r.name,
-        navType: r.zoneType,
-        linkedFloor: null,
-        floor_id: null,
-      };
-    });
-    const transitWps = wps.filter((_, i) =>
-      ["corridor", "staircase", "elevator", "entrance"].includes(roomElements[i].zoneType),
-    );
-    const roomWps = wps.filter((_, i) => roomElements[i].zoneType === "room");
-    const paths = [];
+function editorBounds(model, bgImage) {
+  const boxes = model.elements.map(getBounds);
+  if (bgImage || model.floor.width || model.floor.height) {
+    return {
+      minX: 0,
+      minY: 0,
+      maxX: model.floor.width || bgImage?.naturalWidth || 1200,
+      maxY: model.floor.height || bgImage?.naturalHeight || 800,
+    };
+  }
+  if (!boxes.length) return { minX: 0, minY: 0, maxX: 1200, maxY: 800 };
+  return boxes.reduce(
+    (acc, box) => ({
+      minX: Math.min(acc.minX, box.x),
+      minY: Math.min(acc.minY, box.y),
+      maxX: Math.max(acc.maxX, box.x + box.width),
+      maxY: Math.max(acc.maxY, box.y + box.height),
+    }),
+    {
+      minX: boxes[0].x,
+      minY: boxes[0].y,
+      maxX: boxes[0].x + boxes[0].width,
+      maxY: boxes[0].y + boxes[0].height,
+    },
+  );
+}
 
-    if (transitWps.length >= 2) {
-      const sorted = [...transitWps].sort((a, b) => a.x - b.x);
-      paths.push({ id: uid(), type: "path", points: sorted.map(w => ({ x: w.x, y: w.y })) });
+function fit(bounds, viewport) {
+  const width = Math.max(1, bounds.maxX - bounds.minX);
+  const height = Math.max(1, bounds.maxY - bounds.minY);
+  const zoom = clamp(
+    Math.min((viewport.width - 112) / width, (viewport.height - 112) / height),
+    MIN_ZOOM,
+    MAX_ZOOM,
+  );
+  return {
+    zoom,
+    x: viewport.width / 2 - ((bounds.minX + bounds.maxX) / 2) * zoom,
+    y: viewport.height / 2 - ((bounds.minY + bounds.maxY) / 2) * zoom,
+  };
+}
+
+function nearestWaypoint(point, waypoints) {
+  let match = null;
+  let best = Infinity;
+  waypoints.forEach((waypoint) => {
+    const value = dist(point, waypoint);
+    if (value < best) {
+      best = value;
+      match = waypoint;
     }
+  });
+  return best <= LINK_DIST ? match : null;
+}
 
-    roomWps.forEach(rwp => {
-      const target = transitWps.length > 0
-        ? transitWps.reduce((best, cwp) =>
-            Math.hypot(rwp.x - cwp.x, rwp.y - cwp.y) <
-            Math.hypot(rwp.x - best.x, rwp.y - best.y) ? cwp : best)
-        : null;
-      if (target) {
-        paths.push({
-          id: uid(),
-          type: "path",
-          points: [{ x: rwp.x, y: rwp.y }, { x: target.x, y: target.y }],
+function containingRoom(point, rooms) {
+  return rooms.find((room) => hit(point, room)) || null;
+}
+
+function serialize(model, bgImage, industryId) {
+  const rooms = model.elements.filter((element) => element.kind === "room");
+  const waypoints = model.elements.filter((element) => element.kind === "waypoint");
+  const dbRooms = rooms.map((room) => ({
+    id: room.id,
+    name: room.name || "Unnamed",
+    type: resolvedRoomType(room),
+    x: Math.round(room.x),
+    y: Math.round(room.y),
+    width: Math.round(room.width),
+    height: Math.round(room.height),
+    color: room.color || null,
+    description: room.description || "",
+    polygon_points: room.shape === "polygon" ? room.points : null,
+  }));
+  const dbWaypoints = waypoints.map((waypoint) => {
+    const room = containingRoom(waypoint, rooms);
+    const roomMeta = room ? getRoomTypeMeta(industryId, resolvedRoomType(room)) : null;
+    const type =
+      waypoint.transitionType === "stairs" || waypoint.transitionType === "elevator"
+        ? waypoint.transitionType
+        : roomMeta?.navRole ||
+          (waypoint.waypointType === "entrance"
+            ? "entrance"
+            : waypoint.waypointType === "destination"
+              ? "room_center"
+              : "corridor");
+    return {
+      id: waypoint.id,
+      x: Math.round(waypoint.x),
+      y: Math.round(waypoint.y),
+      type,
+      room_id: waypoint.waypointType === "destination" ? room?.id || null : null,
+      name: waypoint.name || "",
+      linked_floor_id: waypoint.linkedFloorId || null,
+    };
+  });
+  const dbConnections = [];
+  const seen = new Set();
+  model.elements
+    .filter((element) => element.kind === "path")
+    .forEach((path) => {
+      path.points.forEach((point, index) => {
+        if (!index) return;
+        const a = nearestWaypoint(path.points[index - 1], waypoints);
+        const b = nearestWaypoint(point, waypoints);
+        if (!a || !b || a.id === b.id) return;
+        const key = [a.id, b.id].sort().join(":");
+        if (seen.has(key)) return;
+        seen.add(key);
+        dbConnections.push({
+          id: uuidv4(),
+          waypoint_a_id: a.id,
+          waypoint_b_id: b.id,
         });
-      }
+      });
     });
+  return {
+    rooms: dbRooms,
+    waypoints: dbWaypoints,
+    connections: dbConnections,
+    map_data: {
+      version: 2,
+      pixelsPerMeter: model.pixelsPerMeter || null,
+      showGrid: model.showGrid,
+      showLabels: model.showLabels,
+      snapToGrid: model.snapToGrid,
+      floors: [
+        {
+          id: model.floor.id,
+          name: model.floor.name,
+          level: model.floor.level,
+          width: model.floor.width || bgImage?.naturalWidth || 1200,
+          height: model.floor.height || bgImage?.naturalHeight || 800,
+          backgroundDataUrl: model.floor.bg || null,
+          bgImage: model.floor.bg || null,
+          overlayBounds: cleanOverlayBounds(model.overlayBounds),
+          elements: model.elements.map((element) => {
+            if (element.kind === "room") {
+              return {
+                id: element.id,
+                kind: "room",
+                type: element.shape === "polygon" ? "polygon" : "rect",
+                shape: element.shape,
+                x: element.x,
+                y: element.y,
+                width: element.width,
+                height: element.height,
+                w: element.width,
+                h: element.height,
+                points: element.points,
+                name: element.name,
+                roomType: element.roomType,
+                customTypeLabel: element.customLabel,
+                customTypeValue: element.customValue,
+                description: element.description,
+                color: element.color,
+                wheelchairAccessible: Boolean(element.wheelchairAccessible),
+                publicAccess: element.publicAccess ?? true,
+              };
+            }
+            if (element.kind === "door") {
+              return {
+                ...element,
+                widthMeters:
+                  element.widthMeters === "" ? "" : Number.parseFloat(element.widthMeters) || "",
+              };
+            }
+            if (element.kind === "waypoint") {
+              return {
+                id: element.id,
+                kind: "waypoint",
+                type: "waypoint",
+                x: element.x,
+                y: element.y,
+                name: element.name,
+                waypointType: element.waypointType,
+                transitionType: element.transitionType,
+                linkedFloorId: element.linkedFloorId,
+                customWaypointLabel: element.customWaypointLabel,
+              };
+            }
+            return element;
+          }),
+        },
+      ],
+    },
+    scale_pixels_per_meter: model.pixelsPerMeter || null,
+  };
+}
 
-    if (transitWps.length === 0 && wps.length >= 2) {
-      paths.push({ id: uid(), type: "path", points: wps.map(w => ({ x: w.x, y: w.y })) });
-    }
-
-    wps.forEach(w => els().push(w));
-    paths.forEach(p => els().push(p));
-    refresh(); draw();
-    showToast(`Generated ${wps.length} waypoints and ${paths.length} paths from room and door anchors`);
-  };
-  const validateMap = () => {
-    const issues = [];
-    const rooms = els().filter(e => e.type === "rect" && e.zoneType === "room");
-    const unnamed = rooms.filter(r => !r.name || r.name === "");
-    if (unnamed.length) issues.push(`${unnamed.length} unnamed room(s)`);
-    const wps = els().filter(e => e.type === "waypoint");
-    if (wps.length === 0 && rooms.length > 0) issues.push("No waypoints — run Auto Waypoints");
-    if (!S.pixelsPerMeter) issues.push("Scale not set");
-    if (issues.length) window.alert("Issues:\n\n• " + issues.join("\n• "));
-    else showToast("Map looks good!");
-  };
-  const exportJSON = () => {
-    const data = JSON.stringify({ floors: S.floors, pixelsPerMeter: S.pixelsPerMeter, version: "1.0" }, null, 2);
-    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([data], { type: "application/json" }));
-    a.download = "campusnav-map.json"; a.click(); showToast("Exported");
-  };
-  const importJSON = () => { document.getElementById("cne-json-input").click(); };
-  const loadJSON = (e) => {
-    const file = e.target.files[0]; if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (ev) => {
-      try {
-        const data = JSON.parse(ev.target.result);
-        if (data.floors) {
-          S.floors = normalizeImportedFloors(data.floors);
-          if (data.pixelsPerMeter) S.pixelsPerMeter = data.pixelsPerMeter;
-          S.currentFloor = 0;
-          S.selected = [];
-          refresh();
-          draw();
-          showToast("Imported");
-        }
-      } catch { showToast("Invalid JSON"); }
+function autoPack(elements, industryId) {
+  const rooms = elements.filter((element) => element.kind === "room");
+  const doors = elements.filter((element) => element.kind === "door");
+  const waypoints = rooms.map((room) => {
+    const box = getBounds(room);
+    const door =
+      doors.find(
+        (entry) =>
+          entry.x >= box.x - 12 &&
+          entry.x <= box.x + box.width + 12 &&
+          entry.y >= box.y - 12 &&
+          entry.y <= box.y + box.height + 12,
+      ) || null;
+    const meta = getRoomTypeMeta(industryId, resolvedRoomType(room));
+    const anchor = door || roomCenter(room);
+    return {
+      id: uuidv4(),
+      kind: "waypoint",
+      type: "waypoint",
+      x: anchor.x,
+      y: anchor.y,
+      name: room.name || roomLabel(room, industryId),
+      waypointType: meta?.navRole ? "junction" : "destination",
+      transitionType: meta?.navRole || "none",
+      linkedFloorId: null,
+      description: "",
     };
-    reader.readAsText(file);
-  };
-  const uploadBg = () => { document.getElementById("cne-bg-input").click(); };
-  const loadBgImage = (e) => {
-    const file = e.target.files[0]; if (!file) return;
+  });
+  const paths = [];
+  const visited = new Set([waypoints[0]?.id]);
+  while (visited.size && visited.size < waypoints.length) {
+    let edge = null;
+    waypoints.forEach((source) => {
+      if (!visited.has(source.id)) return;
+      waypoints.forEach((target) => {
+        if (visited.has(target.id) || source.id === target.id) return;
+        const value = dist(source, target);
+        if (!edge || value < edge.value) edge = { source, target, value };
+      });
+    });
+    if (!edge) break;
+    visited.add(edge.target.id);
+    paths.push({
+      id: uuidv4(),
+      kind: "path",
+      type: "path",
+      points: [
+        { x: edge.source.x, y: edge.source.y },
+        { x: edge.target.x, y: edge.target.y },
+      ],
+      bidirectional: true,
+      accessible: false,
+      name: "",
+    });
+  }
+  return { waypoints, paths };
+}
+
+const MapEditor = forwardRef(function MapEditor(
+  {
+    floorData,
+    floors = [],
+    buildingIndustry = DEFAULT_INDUSTRY,
+    onSave,
+    onStateChange,
+    previewMode = false,
+  },
+  ref,
+) {
+  const canvasRef = useRef(null);
+  const wrapRef = useRef(null);
+  const bgInputRef = useRef(null);
+  const jsonInputRef = useRef(null);
+  const actionRef = useRef(null);
+  const historyRef = useRef([]);
+  const futureRef = useRef([]);
+  const didFitRef = useRef(false);
+  const spaceDownRef = useRef(false);
+  const [model, setModel] = useState(() => modelFromFloor(floorData, buildingIndustry));
+  const modelRef = useRef(model);
+  const [tool, setTool] = useState("select");
+  const [shape, setShape] = useState("rect");
+  const [selectionId, setSelectionId] = useState(null);
+  const [draftType, setDraftType] = useState(defaultRoomType(buildingIndustry));
+  const [draftCustomLabel, setDraftCustomLabel] = useState("");
+  const [typeSearch, setTypeSearch] = useState("");
+  const [viewport, setViewport] = useState({ width: 0, height: 0 });
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [cursor, setCursor] = useState(null);
+  const [polyDraft, setPolyDraft] = useState([]);
+  const [pathDraft, setPathDraft] = useState([]);
+  const [measure, setMeasure] = useState(null);
+  const [bgImage, setBgImage] = useState(null);
+  const [dirty, setDirty] = useState(false);
+  const [undoCount, setUndoCount] = useState(0);
+  const [redoCount, setRedoCount] = useState(0);
+  const [showHelpPanel, setShowHelpPanel] = useState(false);
+  const [hiddenIds, setHiddenIds] = useState({});
+  const [sections, setSections] = useState({
+    draw: true,
+    edit: true,
+    view: true,
+    layers: true,
+    utilities: true,
+  });
+
+  const roomTypes = useMemo(() => {
+    return getRoomTypes(buildingIndustry).filter((entry) => {
+      const value = typeSearch.toLowerCase();
+      return !value || entry.label.toLowerCase().includes(value) || entry.id.includes(value);
+    });
+  }, [buildingIndustry, typeSearch]);
+
+  const visibleElements = useMemo(
+    () => model.elements.filter((element) => !hiddenIds[element.id]),
+    [hiddenIds, model.elements],
+  );
+
+  const selected = model.elements.find((element) => element.id === selectionId) || null;
+
+  useEffect(() => {
+    const next = modelFromFloor(floorData, buildingIndustry);
+    modelRef.current = next;
+    setModel(next);
+    setSelectionId(null);
+    setTool("select");
+    setShape("rect");
+    setDraftType(defaultRoomType(buildingIndustry));
+    setDraftCustomLabel("");
+    setTypeSearch("");
+    setPolyDraft([]);
+    setPathDraft([]);
+    setMeasure(null);
+    setDirty(false);
+    setShowHelpPanel(false);
+    setHiddenIds({});
+    historyRef.current = [];
+    futureRef.current = [];
+    setUndoCount(0);
+    setRedoCount(0);
+    didFitRef.current = false;
+  }, [buildingIndustry, floorData]);
+
+  useEffect(() => {
+    modelRef.current = model;
+  }, [model]);
+
+  useEffect(() => {
+    if (selectionId && hiddenIds[selectionId]) {
+      setSelectionId(null);
+    }
+  }, [hiddenIds, selectionId]);
+
+  useEffect(() => {
+    const source = model.floor.bg || floorData?.floor_plan_url || null;
+    if (!source) {
+      setBgImage(null);
+      return undefined;
+    }
+    let cancelled = false;
+    const image = new Image();
+    image.crossOrigin = "anonymous";
+    image.onload = () => !cancelled && setBgImage(image);
+    image.onerror = () => !cancelled && setBgImage(null);
+    image.src = source;
+    return () => {
+      cancelled = true;
+    };
+  }, [floorData?.floor_plan_url, model.floor.bg]);
+
+  useEffect(() => {
+    if (!wrapRef.current) return undefined;
+    const observer = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      setViewport({
+        width: entry.contentRect.width,
+        height: entry.contentRect.height,
+      });
+    });
+    observer.observe(wrapRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  function commit(next, track = true) {
+    if (track) {
+      historyRef.current = [...historyRef.current, clone(modelRef.current)].slice(-60);
+      futureRef.current = [];
+      setUndoCount(historyRef.current.length);
+      setRedoCount(0);
+    }
+    modelRef.current = next;
+    setModel(next);
+    setDirty(true);
+  }
+
+  function mutate(recipe, track = true) {
+    const next = clone(modelRef.current);
+    recipe(next);
+    commit(next, track);
+  }
+
+  function fitView() {
+    if (!viewport.width || !viewport.height) return;
+    const next = fit(editorBounds(modelRef.current, bgImage), viewport);
+    setZoom(next.zoom);
+    setPan({ x: next.x, y: next.y });
+  }
+
+  useEffect(() => {
+    if (!viewport.width || !viewport.height || didFitRef.current) return;
+    fitView();
+    didFitRef.current = true;
+  }, [bgImage, viewport]);
+
+  function undo() {
+    if (!historyRef.current.length) return;
+    const previous = historyRef.current[historyRef.current.length - 1];
+    historyRef.current = historyRef.current.slice(0, -1);
+    futureRef.current = [clone(modelRef.current), ...futureRef.current].slice(0, 60);
+    modelRef.current = previous;
+    setModel(previous);
+    setSelectionId(null);
+    setDirty(true);
+    setUndoCount(historyRef.current.length);
+    setRedoCount(futureRef.current.length);
+  }
+
+  function redo() {
+    if (!futureRef.current.length) return;
+    const [next, ...rest] = futureRef.current;
+    futureRef.current = rest;
+    historyRef.current = [...historyRef.current, clone(modelRef.current)].slice(-60);
+    modelRef.current = next;
+    setModel(next);
+    setSelectionId(null);
+    setDirty(true);
+    setUndoCount(historyRef.current.length);
+    setRedoCount(futureRef.current.length);
+  }
+
+  function activate(nextTool) {
+    if (previewMode && nextTool !== "select") {
+      setTool("select");
+      return;
+    }
+    setTool(nextTool);
+    setPolyDraft([]);
+    setPathDraft([]);
+    setCursor(null);
+    if (nextTool !== "measure") setMeasure(null);
+  }
+
+  function pointFromEvent(event) {
+    const box = canvasRef.current.getBoundingClientRect();
+    const x = event.clientX - box.left;
+    const y = event.clientY - box.top;
+    return {
+      canvasX: x,
+      canvasY: y,
+      worldX: (x - pan.x) / zoom,
+      worldY: (y - pan.y) / zoom,
+      x: snap((x - pan.x) / zoom, modelRef.current.snapToGrid),
+      y: snap((y - pan.y) / zoom, modelRef.current.snapToGrid),
+    };
+  }
+
+  function hitElement(point) {
+    return [...visibleElements].reverse().find((element) => hit(point, element)) || null;
+  }
+
+  function removeSelected(targetId = selectionId) {
+    if (!targetId) return;
+    mutate((next) => {
+      next.elements = next.elements.filter((element) => element.id !== targetId);
+    });
+    setSelectionId(null);
+  }
+
+  function addElement(element) {
+    mutate((next) => {
+      next.elements.push(element);
+    });
+    setSelectionId(element.id);
+    setShowHelpPanel(false);
+  }
+
+  function updateElement(id, recipe, track = false) {
+    if (previewMode) return;
+    const next = clone(modelRef.current);
+    const target = next.elements.find((element) => element.id === id);
+    if (!target) return;
+    recipe(target);
+    commit(next, track);
+  }
+
+  function updateOverlayBound(key, value) {
+    if (previewMode) return;
+    mutate((next) => {
+      if (!next.overlayBounds) {
+        next.overlayBounds = normalizeOverlayBounds();
+      }
+      next.overlayBounds[key] = value === "" ? "" : value;
+    }, false);
+  }
+
+  function toggleVisibility(id) {
+    setHiddenIds((current) => {
+      const next = { ...current };
+      if (next[id]) delete next[id];
+      else next[id] = true;
+      return next;
+    });
+  }
+
+  function toggleSection(id) {
+    setSections((current) => ({ ...current, [id]: !current[id] }));
+  }
+
+  function saveRoom(bounds, points = []) {
+    addElement({
+      id: uuidv4(),
+      kind: "room",
+      type: shape === "polygon" ? "polygon" : "rect",
+      shape,
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      points,
+      name: "",
+      roomType: draftType,
+      customLabel: draftType === "custom" ? draftCustomLabel.trim() : "",
+      customValue: draftType === "custom" ? slugify(draftCustomLabel) : "",
+      description: "",
+      color: "",
+      wheelchairAccessible: false,
+      publicAccess: true,
+    });
+  }
+
+  function zoomBy(factor, anchor) {
+    const nextZoom = clamp(zoom * factor, MIN_ZOOM, MAX_ZOOM);
+    if (!anchor) {
+      setZoom(nextZoom);
+      return;
+    }
+    const wx = (anchor.x - pan.x) / zoom;
+    const wy = (anchor.y - pan.y) / zoom;
+    setZoom(nextZoom);
+    setPan({ x: anchor.x - wx * nextZoom, y: anchor.y - wy * nextZoom });
+  }
+
+  function validate() {
+    const rooms = modelRef.current.elements.filter((element) => element.kind === "room");
+    const waypoints = modelRef.current.elements.filter((element) => element.kind === "waypoint");
+    const paths = modelRef.current.elements.filter((element) => element.kind === "path");
+    const issues = [];
+    if (rooms.some((room) => !room.name.trim())) issues.push("Some rooms still need names.");
+    if (rooms.some((room) => room.roomType === "custom" && !room.customLabel.trim())) {
+      issues.push("Some custom room types still need labels.");
+    }
+    if (rooms.length && !waypoints.length) issues.push("No waypoints yet.");
+    if (waypoints.length > 1 && !paths.length) issues.push("Waypoints are not connected by paths.");
+    if (!modelRef.current.pixelsPerMeter) issues.push("Scale is not set.");
+    if (issues.length) toast.error(issues.join(" "));
+    else toast.success("Map validation passed.");
+  }
+
+  function autoWaypoints() {
+    const rooms = modelRef.current.elements.filter((element) => element.kind === "room");
+    if (!rooms.length) {
+      toast.error("Add at least one room first.");
+      return;
+    }
+    const pack = autoPack(modelRef.current.elements, buildingIndustry);
+    mutate((next) => {
+      next.elements = next.elements.filter(
+        (element) => element.kind !== "waypoint" && element.kind !== "path",
+      );
+      next.elements.push(...pack.waypoints, ...pack.paths);
+    });
+    toast.success("Waypoints and paths generated.");
+  }
+
+  function uploadBackground(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => {
-      const f = floor(); f.bgImage = ev.target.result;
-      const img = new Image(); img.onload = () => { S.bgImages[f.id] = img; draw(); };
-      img.src = ev.target.result; showToast("Background loaded");
+    reader.onload = () => {
+      const src = String(reader.result || "");
+      const image = new Image();
+      image.onload = () => {
+        mutate((next) => {
+          next.floor.bg = src;
+          next.floor.width = image.naturalWidth;
+          next.floor.height = image.naturalHeight;
+        });
+        setBgImage(image);
+        didFitRef.current = false;
+      };
+      image.src = src;
     };
     reader.readAsDataURL(file);
-  };
-  const setScale = () => {
-    const px = window.prompt("How many pixels = 1 meter?\n\nTip: Use the Measure tool first on a known distance.");
-    if (px && !isNaN(px)) { S.pixelsPerMeter = parseFloat(px); refresh(); draw(); showToast("Scale set"); }
-  };
-  const addFloor = () => {
-    const name = window.prompt("Floor name:", `Floor ${S.floors.length}`); if (!name) return;
-    const level = parseInt(window.prompt("Floor level (0=ground, 1=first...):", "1") || "1");
-    S.floors.push({ id: uid(), name, level, elements: [], bgImage: null });
-    refresh(); draw();
-  };
-  const switchFloor = (i) => {
-    S.currentFloor = i;
-    const f = S.floors[i];
-    if (f.bgImage && !S.bgImages[f.id]) {
-      const img = new Image(); img.onload = () => { S.bgImages[f.id] = img; draw(); }; img.src = f.bgImage;
-    }
-    S.selected = []; setPropEl(null); refresh(); draw();
-  };
-  const saveMap = () => {
-    const currentFloorData = S.floors[S.currentFloor];
-    const elements = currentFloorData.elements;
-    const persistedIdMap = new Map();
+    event.target.value = "";
+  }
 
-    const getPersistedId = (id) => {
-      if (isUuid(id)) return id;
-      if (!persistedIdMap.has(id)) persistedIdMap.set(id, uid());
-      return persistedIdMap.get(id);
-    };
-
-    const zoneToType = {
-      room: "other",
-      corridor: "corridor",
-      staircase: "stairs",
-      elevator: "elevator",
-      outdoor: "other",
-      entrance: "entrance",
-      toilet: "toilet",
-      parking: "other",
-    };
-
-    const findRoomElement = (wx, wy) =>
-      elements.find(el =>
-        el.type === "rect" &&
-        wx >= el.x && wx <= el.x + el.w &&
-        wy >= el.y && wy <= el.y + el.h
-      );
-    const findRoomId = (wx, wy) => {
-      const room = findRoomElement(wx, wy);
-      return room ? getPersistedId(room.id) : null;
-    };
-
-    const inferWaypointType = (waypointElement, roomElement) => {
-      const zoneType = waypointElement.navType || roomElement?.zoneType || "room";
-      if (waypointElement.linkedFloor || zoneType === "staircase" || zoneType === "elevator") {
-        return zoneType === "elevator" ? "elevator" : "stairs";
+  function importJson(event) {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(String(reader.result || "{}"));
+        const next = modelFromFloor(
+          { ...floorData, map_data: parsed, rooms: [], waypoints: [], connections: [] },
+          buildingIndustry,
+        );
+        modelRef.current = next;
+        setModel(next);
+        setSelectionId(null);
+        setDirty(true);
+        historyRef.current = [];
+        futureRef.current = [];
+        setUndoCount(0);
+        setRedoCount(0);
+        didFitRef.current = false;
+        toast.success("Editor JSON imported.");
+      } catch {
+        toast.error("Invalid map JSON.");
       }
-
-      const typeMap = {
-        corridor: "corridor",
-        staircase: "stairs",
-        elevator: "elevator",
-        entrance: "entrance",
-        room: "room_center",
-      };
-
-      return typeMap[zoneType] || "manual";
     };
+    reader.readAsText(file);
+    event.target.value = "";
+  }
 
-    const rooms = elements
-      .filter(el => el.type === "rect" || el.type === "polygon")
-      .map(el => ({
-        id: getPersistedId(el.id),
-        name: el.name || "Unnamed",
-        type: zoneToType[el.zoneType] || "other",
-        x: Math.round(el.x || 0),
-        y: Math.round(el.y || 0),
-        width: Math.round(el.w || el.width || 100),
-        height: Math.round(el.h || el.height || 100),
-        color: null,
-        description: el.description || "",
-        polygon_points: el.type === "polygon" ? el.points : null,
-      }));
-
-    const waypointElements = elements.filter(el => el.type === "waypoint");
-
-    const waypoints = waypointElements.map(el => {
-      const roomElement = findRoomElement(el.x, el.y);
-      return {
-        id: getPersistedId(el.id),
-        x: Math.round(el.x),
-        y: Math.round(el.y),
-        type: inferWaypointType(el, roomElement),
-        room_id: roomElement?.zoneType === "corridor" ? null : findRoomId(el.x, el.y),
-        name: el.name || "",
-        linked_floor_id: isUuid(el.linkedFloor) ? el.linkedFloor : null,
-      };
+  function exportJson() {
+    const payload = serialize(modelRef.current, bgImage, buildingIndustry);
+    const blob = new Blob([JSON.stringify(payload.map_data, null, 2)], {
+      type: "application/json",
     });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${modelRef.current.floor.name || "floor"}-map.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  }
 
-    const connections = [];
-    const connectedPairs = new Set();
+  async function save() {
+    const payload = serialize(modelRef.current, bgImage, buildingIndustry);
+    if (onSave) await onSave(payload);
+    setDirty(false);
+    return payload;
+  }
 
-    elements.filter(el => el.type === "path").forEach(path => {
-      if (!path.points || path.points.length < 2) return;
-      for (let i = 0; i < path.points.length - 1; i++) {
-        const findNearestWp = (px, py) => {
-          let nearest = null, minDist = Infinity;
-          waypointElements.forEach(wp => {
-            const d = Math.hypot(wp.x - px, wp.y - py);
-            if (d < minDist) { minDist = d; nearest = wp; }
-          });
-          return nearest && minDist < 40 ? nearest : null;
-        };
-        const wpA = findNearestWp(path.points[i].x, path.points[i].y);
-        const wpB = findNearestWp(path.points[i + 1].x, path.points[i + 1].y);
-        if (wpA && wpB && wpA.id !== wpB.id) {
-          const key = [wpA.id, wpB.id].sort().join("_");
-          if (!connectedPairs.has(key)) {
-            connectedPairs.add(key);
-            connections.push({
-              id: uuidv4(),
-              waypoint_a_id: getPersistedId(wpA.id),
-              waypoint_b_id: getPersistedId(wpB.id),
-            });
+  useImperativeHandle(
+    ref,
+    () => ({
+      save,
+      undo,
+      redo,
+      zoomIn: () => zoomBy(1.15),
+      zoomOut: () => zoomBy(1 / 1.15),
+      setZoom: (value) => setZoom(clamp(value, MIN_ZOOM, MAX_ZOOM)),
+      fitToScreen: fitView,
+      setTool: activate,
+      deleteSelection: removeSelected,
+      toggleGrid: () => mutate((next) => { next.showGrid = !next.showGrid; }, false),
+      toggleSnap: () => mutate((next) => { next.snapToGrid = !next.snapToGrid; }, false),
+      toggleLabels: () => mutate((next) => { next.showLabels = !next.showLabels; }, false),
+      setRoomShape: setShape,
+      selectElement: (id) => {
+        setSelectionId(id || null);
+        setShowHelpPanel(false);
+        if (id) setTool("select");
+      },
+      getState: () => ({
+        tool,
+        zoom,
+        dirty,
+        canUndo: historyRef.current.length > 0,
+        canRedo: futureRef.current.length > 0,
+        selectedElement: selected,
+        showGrid: modelRef.current.showGrid,
+        showLabels: modelRef.current.showLabels,
+        snapToGrid: modelRef.current.snapToGrid,
+        cursor,
+        overlayBounds: modelRef.current.overlayBounds,
+      }),
+    }),
+    [cursor, dirty, selected, tool, zoom],
+  );
+
+  useEffect(() => {
+    if (!onStateChange) return;
+    onStateChange({
+      tool,
+      roomShape: shape,
+      zoom,
+      dirty,
+      canUndo: historyRef.current.length > 0,
+      canRedo: futureRef.current.length > 0,
+      showGrid: model.showGrid,
+      showLabels: model.showLabels,
+      snapToGrid: model.snapToGrid,
+      counts: {
+        rooms: model.elements.filter((element) => element.kind === "room").length,
+        waypoints: model.elements.filter((element) => element.kind === "waypoint").length,
+        paths: model.elements.filter((element) => element.kind === "path").length,
+        doors: model.elements.filter((element) => element.kind === "door").length,
+      },
+      selectedElement: selected
+        ? {
+            id: selected.id,
+            kind: selected.kind,
+            label: elementTitle(selected, buildingIndustry),
           }
-        }
+        : null,
+      saveStatus: dirty ? "Unsaved changes" : "All changes saved",
+      cursor,
+      overlayBounds: model.overlayBounds,
+    });
+  }, [buildingIndustry, cursor, dirty, model, onStateChange, selected, shape, tool, zoom]);
+
+  useEffect(() => {
+    function keyDown(event) {
+      if (
+        event.target instanceof HTMLElement &&
+        ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)
+      ) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (event.key === "Delete" || event.key === "Backspace") removeSelected();
+      if ((event.ctrlKey || event.metaKey) && key === "z") {
+        event.preventDefault();
+        event.shiftKey ? redo() : undo();
+      }
+      if ((event.ctrlKey || event.metaKey) && key === "y") {
+        event.preventDefault();
+        redo();
+      }
+      if ((event.ctrlKey || event.metaKey) && key === "s") {
+        event.preventDefault();
+        save();
+      }
+      if (event.key === " ") spaceDownRef.current = true;
+      if (!previewMode && key === "r") activate("room");
+      if (!previewMode && key === "d") activate("door");
+      if (!previewMode && key === "w") activate("waypoint");
+      if (!previewMode && key === "p") activate("path");
+      if (key === "s" && !event.ctrlKey && !event.metaKey) activate("select");
+      if (!previewMode && key === "m") activate("move");
+      if (!previewMode && key === "e") activate("resize");
+      if (key === "f") fitView();
+      if (key === "g") mutate((next) => { next.showGrid = !next.showGrid; }, false);
+      if (key === "l") mutate((next) => { next.showLabels = !next.showLabels; }, false);
+      if (event.key === "Escape") {
+        actionRef.current = null;
+        setPolyDraft([]);
+        setPathDraft([]);
+        setMeasure(null);
+        setSelectionId(null);
+        activate("select");
+      }
+    }
+    function keyUp(event) {
+      if (event.key === " ") spaceDownRef.current = false;
+    }
+    window.addEventListener("keydown", keyDown);
+    window.addEventListener("keyup", keyUp);
+    return () => {
+      window.removeEventListener("keydown", keyDown);
+      window.removeEventListener("keyup", keyUp);
+    };
+  }, [previewMode, tool, zoom]);
+
+  function down(event) {
+    canvasRef.current.setPointerCapture(event.pointerId);
+    const point = pointFromEvent(event);
+    const world = { x: point.worldX, y: point.worldY };
+    const snapped = { x: point.x, y: point.y };
+    const match = hitElement(world);
+    const handle =
+      selected?.kind === "room"
+        ? handlePoints(selected).find((entry) => dist(world, entry) <= 12 / zoom + 4)
+        : null;
+    if (event.button === 1 || spaceDownRef.current) {
+      actionRef.current = { kind: "pan", startX: point.canvasX, startY: point.canvasY, pan: { ...pan } };
+      return;
+    }
+    if (previewMode) {
+      setSelectionId(match?.id || null);
+      if (match) setShowHelpPanel(false);
+      return;
+    }
+    if (tool === "delete") {
+      if (match) {
+        setSelectionId(match.id);
+        removeSelected(match.id);
+      }
+      return;
+    }
+    if (tool === "door") {
+      if (previewMode) return;
+      addElement({
+        id: uuidv4(),
+        kind: "door",
+        type: "door",
+        x: snapped.x,
+        y: snapped.y,
+        name: "Door",
+        doorType: "main_entrance",
+        widthMeters: "",
+        accessible: false,
+        locked: false,
+      });
+      return;
+    }
+    if (tool === "waypoint") {
+      if (previewMode) return;
+      addElement({
+        id: uuidv4(),
+        kind: "waypoint",
+        type: "waypoint",
+        x: snapped.x,
+        y: snapped.y,
+        name: "",
+        waypointType: "junction",
+        transitionType: "none",
+        linkedFloorId: null,
+        description: "",
+        customWaypointLabel: "",
+      });
+      return;
+    }
+    if (tool === "measure") {
+      if (!measure?.start || measure.end) {
+        setMeasure({ start: world, end: null, pixels: 0, meters: null });
+      } else {
+        const pixels = dist(measure.start, world);
+        setMeasure({
+          start: measure.start,
+          end: world,
+          pixels,
+          meters: modelRef.current.pixelsPerMeter ? pixels / modelRef.current.pixelsPerMeter : null,
+        });
+        activate("select");
+      }
+      return;
+    }
+    if (tool === "room" && shape === "polygon") {
+      if (previewMode) return;
+      setSelectionId(null);
+      setPolyDraft((current) => [...current, snapped]);
+      setCursor(snapped);
+      return;
+    }
+    if (tool === "path") {
+      if (previewMode) return;
+      setSelectionId(null);
+      setPathDraft((current) => [...current, snapped]);
+      setCursor(snapped);
+      return;
+    }
+    if (tool === "room") {
+      if (previewMode) return;
+      setSelectionId(null);
+      actionRef.current = { kind: "rect", start: snapped };
+      setCursor(snapped);
+      return;
+    }
+    if (match) {
+      setSelectionId(match.id);
+      setShowHelpPanel(false);
+      if ((tool === "resize" || tool === "select") && handle) {
+        historyRef.current = [...historyRef.current, clone(modelRef.current)].slice(-60);
+        futureRef.current = [];
+        setUndoCount(historyRef.current.length);
+        setRedoCount(0);
+        actionRef.current = { kind: "resize", original: clone(selected), handle: handle.id };
+        return;
+      }
+      if (tool === "select" || tool === "move") {
+        historyRef.current = [...historyRef.current, clone(modelRef.current)].slice(-60);
+        futureRef.current = [];
+        setUndoCount(historyRef.current.length);
+        setRedoCount(0);
+        actionRef.current = { kind: "move", id: match.id, start: world, original: clone(match) };
+        return;
+      }
+    }
+    setSelectionId(null);
+  }
+
+  function move(event) {
+    const point = pointFromEvent(event);
+    const world = { x: point.worldX, y: point.worldY };
+    const snapped = { x: point.x, y: point.y };
+    const action = actionRef.current;
+    setCursor(snapped);
+    if (measure?.start && !measure.end && tool === "measure") {
+      const pixels = dist(measure.start, world);
+      setMeasure({
+        start: measure.start,
+        end: world,
+        pixels,
+        meters: modelRef.current.pixelsPerMeter ? pixels / modelRef.current.pixelsPerMeter : null,
+      });
+    }
+    if (!action) return;
+    if (action.kind === "pan") {
+      setPan({
+        x: action.pan.x + (point.canvasX - action.startX),
+        y: action.pan.y + (point.canvasY - action.startY),
+      });
+      return;
+    }
+    if (action.kind === "move") {
+      const dx = snapped.x - action.start.x;
+      const dy = snapped.y - action.start.y;
+      const next = clone(modelRef.current);
+      const target = next.elements.find((element) => element.id === action.id);
+      if (!target) return;
+      if (target.kind === "room" && target.shape === "polygon") {
+        target.points = action.original.points.map((entry) => ({ x: entry.x + dx, y: entry.y + dy }));
+      } else if (target.kind === "path") {
+        target.points = action.original.points.map((entry) => ({ x: entry.x + dx, y: entry.y + dy }));
+      }
+      if (target.x !== undefined) target.x = action.original.x + dx;
+      if (target.y !== undefined) target.y = action.original.y + dy;
+      modelRef.current = next;
+      setModel(next);
+      setDirty(true);
+      return;
+    }
+    if (action.kind === "resize") {
+      const start = getBounds(action.original);
+      const box = { x: start.x, y: start.y, width: start.width, height: start.height };
+      if (action.handle.includes("w")) {
+        box.x = Math.min(snapped.x, start.x + start.width - MIN_SIZE);
+        box.width = start.x + start.width - box.x;
+      }
+      if (action.handle.includes("e")) box.width = Math.max(MIN_SIZE, snapped.x - start.x);
+      if (action.handle.includes("n")) {
+        box.y = Math.min(snapped.y, start.y + start.height - MIN_SIZE);
+        box.height = start.y + start.height - box.y;
+      }
+      if (action.handle.includes("s")) box.height = Math.max(MIN_SIZE, snapped.y - start.y);
+      const next = clone(modelRef.current);
+      const target = next.elements.find((element) => element.id === action.original.id);
+      if (!target) return;
+      if (target.shape === "polygon") {
+        const sx = box.width / start.width;
+        const sy = box.height / start.height;
+        target.points = action.original.points.map((entry) => ({
+          x: box.x + (entry.x - start.x) * sx,
+          y: box.y + (entry.y - start.y) * sy,
+        }));
+      }
+      target.x = box.x;
+      target.y = box.y;
+      target.width = box.width;
+      target.height = box.height;
+      modelRef.current = next;
+      setModel(next);
+      setDirty(true);
+    }
+  }
+
+  function up(event) {
+    if (canvasRef.current?.hasPointerCapture(event.pointerId)) {
+      canvasRef.current.releasePointerCapture(event.pointerId);
+    }
+    const action = actionRef.current;
+    actionRef.current = null;
+    if (action?.kind === "rect" && cursor) {
+      const box = {
+        x: Math.min(action.start.x, cursor.x),
+        y: Math.min(action.start.y, cursor.y),
+        width: Math.abs(cursor.x - action.start.x),
+        height: Math.abs(cursor.y - action.start.y),
+      };
+      if (box.width >= MIN_SIZE && box.height >= MIN_SIZE) saveRoom(box);
+    }
+  }
+
+  function dbl() {
+    if (previewMode) return;
+    if (tool === "room" && shape === "polygon" && polyDraft.length >= 3) {
+      const box = boundsFromPoints(polyDraft);
+      saveRoom(
+        {
+          x: box.minX,
+          y: box.minY,
+          width: box.maxX - box.minX,
+          height: box.maxY - box.minY,
+        },
+        polyDraft,
+      );
+      setPolyDraft([]);
+      setCursor(null);
+    }
+    if (tool === "path" && pathDraft.length >= 2) {
+      addElement({
+        id: uuidv4(),
+        kind: "path",
+        type: "path",
+        points: pathDraft,
+        bidirectional: true,
+        accessible: false,
+        name: "",
+        staffOnly: false,
+      });
+      setPathDraft([]);
+      setCursor(null);
+    }
+  }
+
+  useEffect(() => {
+    if (!canvasRef.current || !viewport.width || !viewport.height) return;
+    const root = getComputedStyle(document.documentElement);
+    const isDark = document.documentElement.dataset.theme === "dark";
+    const canvas = canvasRef.current;
+    const ratio = window.devicePixelRatio || 1;
+    canvas.width = viewport.width * ratio;
+    canvas.height = viewport.height * ratio;
+    canvas.style.width = `${viewport.width}px`;
+    canvas.style.height = `${viewport.height}px`;
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    ctx.clearRect(0, 0, viewport.width, viewport.height);
+    ctx.fillStyle = root.getPropertyValue("--color-bg").trim() || "#f8f9fa";
+    ctx.fillRect(0, 0, viewport.width, viewport.height);
+    ctx.save();
+    ctx.translate(pan.x, pan.y);
+    ctx.scale(zoom, zoom);
+    if (bgImage) {
+      ctx.globalAlpha = isDark ? 0.35 : 0.58;
+      ctx.drawImage(
+        bgImage,
+        0,
+        0,
+        model.floor.width || bgImage.naturalWidth,
+        model.floor.height || bgImage.naturalHeight,
+      );
+      ctx.globalAlpha = 1;
+    }
+    const accent = root.getPropertyValue("--color-accent").trim() || "#2563eb";
+    const accentLight = root.getPropertyValue("--color-accent-light").trim() || "#eff6ff";
+    const text = root.getPropertyValue("--color-text-primary").trim() || "#0f172a";
+    const warn = root.getPropertyValue("--color-warning").trim() || "#d97706";
+    const success = root.getPropertyValue("--color-success").trim() || "#16a34a";
+    visibleElements.filter((element) => element.kind === "path").forEach((path) => {
+      if (!path.points.length) return;
+      ctx.beginPath();
+      ctx.moveTo(path.points[0].x, path.points[0].y);
+      path.points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
+      ctx.strokeStyle = path.accessible ? success : accent;
+      ctx.lineWidth = selectionId === path.id ? 3 : previewMode ? 3 : 2;
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+      if (!path.bidirectional) ctx.setLineDash([10, 6]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      path.points.forEach((point) => {
+        ctx.beginPath();
+        ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
+        ctx.fillStyle = accent;
+        ctx.fill();
+      });
+    });
+    visibleElements.filter((element) => element.kind === "room").forEach((room) => {
+      ctx.beginPath();
+      if (room.shape === "polygon" && room.points.length >= 3) {
+        ctx.moveTo(room.points[0].x, room.points[0].y);
+        room.points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
+        ctx.closePath();
+      } else {
+        ctx.roundRect(room.x, room.y, room.width, room.height, 14);
+      }
+      ctx.fillStyle = previewMode
+        ? room.color || (isDark ? "rgba(30, 58, 95, 0.76)" : "rgba(255, 255, 255, 0.78)")
+        : room.color || accentLight;
+      ctx.fill();
+      ctx.strokeStyle = room.color || accent;
+      ctx.lineWidth = selectionId === room.id ? 2.5 : 1.5;
+      ctx.stroke();
+      const center = roomCenter(room);
+      if (model.showLabels) {
+        ctx.fillStyle = text;
+        ctx.font = previewMode ? "600 12px Inter, sans-serif" : "600 11px Inter, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText(room.name || roomLabel(room, buildingIndustry), center.x, center.y);
       }
     });
-
-    if (persistedIdMap.size > 0) {
-      currentFloorData.elements.forEach((element) => {
-        if (persistedIdMap.has(element.id)) {
-          element.id = persistedIdMap.get(element.id);
-        }
-        if (element.linkedFloor && !isUuid(element.linkedFloor)) {
-          element.linkedFloor = null;
-        }
-      });
-      S.selected = S.selected.map((id) => persistedIdMap.get(id) || id);
-    }
-
-    const fullEditorState = {
-      floors: S.floors,
-      pixelsPerMeter: S.pixelsPerMeter,
-    };
-
-    if (onSave) {
-      onSave({
-        rooms,
-        waypoints,
-        connections,
-        map_data: fullEditorState,
-        scale_pixels_per_meter: S.pixelsPerMeter || null,
-      });
-    }
-
-    try {
-      localStorage.setItem("campusnav-editor", JSON.stringify(fullEditorState));
-    } catch {}
-
-    showToast("Map saved");
-  };
-  const genQRCodes = () => {
-    const rooms = els().filter(e => e.type === "rect");
-    if (!rooms.length) { showToast("No rooms on this floor"); return; }
-    const f = floor();
-    const data = rooms.map(r => ({
-      roomId: r.id,
-      name: r.name || "Unnamed",
-      floorId: f.id,
-      floorName: f.name,
-      url: `${window.location.origin}/navigate/${buildingId || "BUILDING_ID"}?from=${r.id}`,
-    }));
-    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: "application/json" }));
-    a.download = "qr-data.json"; a.click(); showToast(`QR data for ${rooms.length} rooms exported`);
-  };
-
-  // ── Property panel state ──────────────────────────────────────────────────
-  const [propEl, setPropEl] = useState(null);
-  const renderPropPanel = (el) => setPropEl(el ? { ...el } : null);
-
-  const updateProp = (key, value) => {
-    S.selected.forEach(id => {
-      const el = els().find(e => e.id === id); if (!el) return;
-      if (key === "name") { el.name = value; el.text = value; }
-      else el[key] = value;
+    visibleElements.filter((element) => element.kind === "door").forEach((door) => {
+      ctx.beginPath();
+      ctx.arc(door.x, door.y, 6, 0, Math.PI * 2);
+      ctx.fillStyle = warn;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
     });
-    const updated = els().find(e => e.id === (propEl?.id));
-    if (updated) setPropEl({ ...updated });
-    draw();
-  };
+    visibleElements.filter((element) => element.kind === "waypoint").forEach((waypoint) => {
+      ctx.beginPath();
+      ctx.arc(waypoint.x, waypoint.y, 8, 0, Math.PI * 2);
+      ctx.fillStyle = accent;
+      ctx.fill();
+      ctx.lineWidth = selectionId === waypoint.id ? 2.5 : 2;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+    });
+    if (selected) {
+      const box = getBounds(selected);
+      ctx.strokeStyle = accent;
+      ctx.lineWidth = 2;
+      ctx.strokeRect(box.x - 6, box.y - 6, box.width + 12, box.height + 12);
+      if (selected.kind === "room" && !previewMode) {
+        handlePoints(selected).forEach((entry) => {
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(entry.x - 2, entry.y - 2, 4, 4);
+          ctx.strokeStyle = accent;
+          ctx.strokeRect(entry.x - 2, entry.y - 2, 4, 4);
+        });
+      }
+    }
+    if (!previewMode && actionRef.current?.kind === "rect" && cursor) {
+      const x = Math.min(actionRef.current.start.x, cursor.x);
+      const y = Math.min(actionRef.current.start.y, cursor.y);
+      const width = Math.abs(cursor.x - actionRef.current.start.x);
+      const height = Math.abs(cursor.y - actionRef.current.start.y);
+      ctx.beginPath();
+      ctx.roundRect(x, y, width, height, 12);
+      ctx.fillStyle = accentLight;
+      ctx.globalAlpha = 0.7;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.strokeStyle = accent;
+      ctx.stroke();
+    }
+    if (!previewMode && polyDraft.length) {
+      ctx.beginPath();
+      ctx.moveTo(polyDraft[0].x, polyDraft[0].y);
+      polyDraft.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
+      if (cursor) ctx.lineTo(cursor.x, cursor.y);
+      ctx.strokeStyle = accent;
+      ctx.setLineDash([8, 5]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    if (!previewMode && pathDraft.length) {
+      ctx.beginPath();
+      ctx.moveTo(pathDraft[0].x, pathDraft[0].y);
+      pathDraft.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
+      if (cursor) ctx.lineTo(cursor.x, cursor.y);
+      ctx.strokeStyle = accent;
+      ctx.setLineDash([8, 5]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+    if (measure?.start && measure.end) {
+      ctx.beginPath();
+      ctx.moveTo(measure.start.x, measure.start.y);
+      ctx.lineTo(measure.end.x, measure.end.y);
+      ctx.strokeStyle = warn;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+    ctx.restore();
+  }, [bgImage, buildingIndustry, cursor, measure, model, pan, pathDraft, polyDraft, previewMode, selectionId, selected, viewport, visibleElements, zoom]);
 
-  // ── Stats ─────────────────────────────────────────────────────────────────
-  const stats = {
-    rooms: els().filter(e => e.type === "rect" || e.type === "polygon").length,
-    waypoints: els().filter(e => e.type === "waypoint").length,
-    paths: els().filter(e => e.type === "path").length,
-    doors: els().filter(e => e.type === "door").length,
-  };
+  const drawTools = TOOLS.filter((entry) => entry.group === "Draw");
+  const editTools = TOOLS.filter(
+    (entry) => entry.group === "Edit" && entry.id !== "resize",
+  );
+  const showHelp = !selected || showHelpPanel;
+  const roomColorPresets = [
+    "#2563EB",
+    "#16A34A",
+    "#D97706",
+    "#DC2626",
+    "#7C3AED",
+    "#0F766E",
+  ];
+  const orderedElements = [...model.elements].reverse();
 
-  const toolHints = {
-    select: "Click to select • Drag to move • Drag canvas to pan • Double-click to edit",
-    rect: `Drawing ${S.zoneType} — click and drag to draw`,
-    polygon: "Click to add points • Double-click to finish polygon",
-    path: "Click to add path points • Double-click to end pathway",
-    waypoint: "Click to place navigation waypoint",
-    door: "Click to place door or entry point",
-    label: "Click to place a text label",
-    measure: "Click two points to measure distance",
-  };
-
-  // ─── Render ───────────────────────────────────────────────────────────────
   return (
-    <div className="cne-root">
-      {/* TOPBAR */}
-      <div className="cne-topbar">
-        <span className="cne-brand">⬡ CampusNav Editor</span>
-        <div className="cne-sep" />
-        <div className="cne-group">
-          <span className="cne-lbl">File</span>
-          <button className="cne-btn" onClick={uploadBg}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
-            Upload Plan
+    <div className="map-editor">
+      <aside className="map-editor__rail">
+        <section className="map-editor__panel">
+          <button
+            type="button"
+            onClick={() => toggleSection("draw")}
+            className="map-editor__section-toggle"
+          >
+            <span>Draw Tools</span>
+            <ChevronDown
+              className={`h-4 w-4 transition-transform ${sections.draw ? "" : "-rotate-90"}`}
+            />
           </button>
-          <button className="cne-btn" onClick={() => { S.floors[S.currentFloor].bgImage = null; delete S.bgImages[floor().id]; draw(); showToast("BG cleared"); }}>Clear BG</button>
-          <button className="cne-btn" onClick={exportJSON}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>
-            Export JSON
-          </button>
-          <button className="cne-btn" onClick={importJSON}>Import JSON</button>
-        </div>
-        <div className="cne-sep" />
-        <div className="cne-group">
-          <span className="cne-lbl">Edit</span>
-          <button className="cne-btn" onClick={undo}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="9 14 4 9 9 4" /><path d="M20 20v-7a4 4 0 00-4-4H4" /></svg>Undo
-          </button>
-          <button className="cne-btn" onClick={redo}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 14 20 9 15 4" /><path d="M4 20v-7a4 4 0 014-4h12" /></svg>Redo
-          </button>
-          <button className="cne-btn danger" onClick={deleteSelected}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6" /></svg>Delete
-          </button>
-          <button className="cne-btn" onClick={() => { S.selected = els().map(e => e.id); refresh(); draw(); }}>Select All</button>
-          <button className="cne-btn" onClick={duplicateSelected}>Duplicate</button>
-        </div>
-        <div className="cne-sep" />
-        <div className="cne-group">
-          <span className="cne-lbl">Map</span>
-          <button className="cne-btn" onClick={autoNav}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3" /><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" /></svg>
-            Auto Waypoints
-          </button>
-          <button className="cne-btn" onClick={setScale}>Set Scale</button>
-          <button className="cne-btn" onClick={validateMap}>
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12" /></svg>Validate
-          </button>
-          <button className="cne-btn" onClick={genQRCodes}>Gen QR Data</button>
-          <button className="cne-btn" onClick={() => { S.showGrid = !S.showGrid; draw(); showToast(S.showGrid ? "Grid on" : "Grid off"); }}>Toggle Grid</button>
-          <button className="cne-btn" onClick={() => { S.snapToGrid = !S.snapToGrid; refresh(); showToast(S.snapToGrid ? "Snap on" : "Snap off"); }}>
-            Snap: {S.snapToGrid ? "ON" : "OFF"}
-          </button>
-        </div>
-        <div className="cne-sep" />
-        <button className="cne-btn primary" onClick={saveMap}>
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z" /><polyline points="17 21 17 13 7 13 7 21" /><polyline points="7 3 7 8 15 8" /></svg>
-          Save Map
-        </button>
-      </div>
+          {sections.draw && (
+            <div className="map-editor__section-body">
+              <div className="map-editor__tool-list">
+                {drawTools.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      disabled={previewMode}
+                      onClick={() => activate(item.id)}
+                      className={`map-editor__tool ${tool === item.id ? "is-active" : ""}`}
+                    >
+                      <span className="map-editor__tool-label">
+                        <Icon className="h-4 w-4" />
+                        <span>{item.label}</span>
+                      </span>
+                      <span className="map-editor__tool-key">{item.key}</span>
+                    </button>
+                  );
+                })}
+              </div>
 
-      <div className="cne-main">
-        {/* LEFT PANEL */}
-        <div className="cne-left">
-          <div className="cne-section">
-            <div className="cne-ptitle">Tools</div>
-            <div className="cne-tool-grid">
-              {[
-                { id: "select", icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 3l14 9-7 1-3 7z" /></svg>, label: "Select" },
-                { id: "rect", icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /></svg>, label: "Rectangle" },
-                { id: "polygon", icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="12 2 22 8.5 22 15.5 12 22 2 15.5 2 8.5" /></svg>, label: "Polygon" },
-                { id: "path", icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12h18M3 6l9 6 9-6" /></svg>, label: "Pathway" },
-                { id: "waypoint", icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="4" /><circle cx="12" cy="12" r="9" /></svg>, label: "Waypoint" },
-                { id: "door", icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 21h18M9 21V3l12 2v16" /></svg>, label: "Door/Entry" },
-                { id: "label", icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 7 4 4 20 4 20 7" /><line x1="12" y1="4" x2="12" y2="20" /><line x1="9" y1="20" x2="15" y2="20" /></svg>, label: "Label" },
-                { id: "measure", icon: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M2 12h20M2 12l4-4M2 12l4 4M22 12l-4-4M22 12l-4 4" /></svg>, label: "Measure" },
-              ].map(t => (
-                <button key={t.id} className={`cne-tool${S.tool === t.id ? " active" : ""}`} onClick={() => setTool(t.id)}>
-                  {t.icon}{t.label}
+              <div className="map-editor__divider" />
+
+              <div className="section-label">Room Shape</div>
+              <div className="map-editor__shape-switch">
+                <button
+                  type="button"
+                  disabled={previewMode}
+                  onClick={() => setShape("rect")}
+                  className={`map-editor__toggle ${shape === "rect" ? "is-active" : ""}`}
+                >
+                  <RectangleHorizontal className="h-4 w-4" />
+                  Rectangle
                 </button>
-              ))}
+                <button
+                  type="button"
+                  disabled={previewMode}
+                  onClick={() => setShape("polygon")}
+                  className={`map-editor__toggle ${shape === "polygon" ? "is-active" : ""}`}
+                >
+                  <LayoutGrid className="h-4 w-4" />
+                  Polygon
+                </button>
+              </div>
+
+              <div className="section-label">Room Type</div>
+              <div className="map-editor__search">
+                <Search className="h-4 w-4 text-muted" />
+                <input
+                  value={typeSearch}
+                  onChange={(event) => setTypeSearch(event.target.value)}
+                  placeholder="Search room types"
+                />
+              </div>
+              <div className="map-editor__type-grid">
+                {roomTypes.map((entry) => {
+                  const Icon = resolvePoiIcon(entry.icon);
+                  return (
+                    <button
+                      key={entry.id}
+                      type="button"
+                      disabled={previewMode}
+                      onClick={() => setDraftType(entry.id)}
+                      className={`map-editor__type-button ${draftType === entry.id ? "is-active" : ""}`}
+                    >
+                      <Icon className="h-4 w-4" />
+                      {entry.label}
+                    </button>
+                  );
+                })}
+              </div>
+              {draftType === "custom" && (
+                <div>
+                  <label className="field-label">Custom Label</label>
+                  <input
+                    className="input"
+                    value={draftCustomLabel}
+                    disabled={previewMode}
+                    onChange={(event) => setDraftCustomLabel(event.target.value)}
+                    placeholder="Quiet Room"
+                  />
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
+        <section className="map-editor__panel">
+          <button
+            type="button"
+            onClick={() => toggleSection("edit")}
+            className="map-editor__section-toggle"
+          >
+            <span>Edit Tools</span>
+            <ChevronDown
+              className={`h-4 w-4 transition-transform ${sections.edit ? "" : "-rotate-90"}`}
+            />
+          </button>
+          {sections.edit && (
+            <div className="map-editor__section-body">
+              <div className="map-editor__tool-list">
+                {editTools.map((item) => {
+                  const Icon = item.icon;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      disabled={previewMode && item.id !== "select"}
+                      onClick={() => activate(item.id)}
+                      className={`map-editor__tool ${tool === item.id ? "is-active" : ""}`}
+                    >
+                      <span className="map-editor__tool-label">
+                        <Icon className="h-4 w-4" />
+                        <span>{item.label}</span>
+                      </span>
+                      <span className="map-editor__tool-key">
+                        {item.id === "select" ? "S / Esc" : item.key}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </section>
+
+        <section className="map-editor__panel">
+          <button
+            type="button"
+            onClick={() => toggleSection("view")}
+            className="map-editor__section-toggle"
+          >
+            <span>View Tools</span>
+            <ChevronDown
+              className={`h-4 w-4 transition-transform ${sections.view ? "" : "-rotate-90"}`}
+            />
+          </button>
+          {sections.view && (
+            <div className="map-editor__section-body">
+              <div className="map-editor__tool-list">
+                <button type="button" onClick={fitView} className="map-editor__tool">
+                  <span className="map-editor__tool-label">
+                    <SearchCheck className="h-4 w-4" />
+                    <span>Fit to Screen</span>
+                  </span>
+                  <span className="map-editor__tool-key">F</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => mutate((next) => { next.showLabels = !next.showLabels; }, false)}
+                  className={`map-editor__tool ${model.showLabels ? "is-active" : ""}`}
+                >
+                  <span className="map-editor__tool-label">
+                    <Layers className="h-4 w-4" />
+                    <span>Toggle Labels</span>
+                  </span>
+                  <span className="map-editor__tool-key">L</span>
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+
+        <section className="map-editor__panel">
+          <button
+            type="button"
+            onClick={() => toggleSection("layers")}
+            className="map-editor__section-toggle"
+          >
+            <span>Layers / Elements</span>
+            <ChevronDown
+              className={`h-4 w-4 transition-transform ${sections.layers ? "" : "-rotate-90"}`}
+            />
+          </button>
+          {sections.layers && (
+            <div className="map-editor__section-body">
+              {orderedElements.length === 0 ? (
+                <p className="text-sm subtle-text">No elements yet. Start drawing.</p>
+              ) : (
+                <div className="map-editor__layer-list">
+                  {orderedElements.map((element) => {
+                    const Icon = iconForElement(element);
+                    const hidden = Boolean(hiddenIds[element.id]);
+
+                    return (
+                      <div
+                        key={element.id}
+                        className={`map-editor__layer-item group ${selectionId === element.id ? "is-active" : ""}`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectionId(element.id);
+                            setShowHelpPanel(false);
+                            setTool("select");
+                          }}
+                          className="min-w-0 flex flex-1 items-center gap-2 truncate text-left"
+                        >
+                          <Icon className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate">{elementTitle(element, buildingIndustry)}</span>
+                        </button>
+                        <button
+                          type="button"
+                          title={hidden ? "Show element" : "Hide element"}
+                          aria-label={hidden ? "Show element" : "Hide element"}
+                          onClick={() => toggleVisibility(element.id)}
+                          className="map-editor__layer-visibility"
+                        >
+                          {hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </section>
+
+        <section className="map-editor__panel">
+          <button
+            type="button"
+            onClick={() => toggleSection("utilities")}
+            className="map-editor__section-toggle"
+          >
+            <span>Utilities</span>
+            <ChevronDown
+              className={`h-4 w-4 transition-transform ${sections.utilities ? "" : "-rotate-90"}`}
+            />
+          </button>
+          {sections.utilities && (
+            <div className="map-editor__section-body">
+              <div className="map-editor__utility-row">
+                <button
+                  type="button"
+                  disabled={previewMode}
+                  onClick={() => bgInputRef.current?.click()}
+                  className="map-editor__mini-button"
+                >
+                  <ImagePlus className="h-4 w-4" />
+                  Background
+                </button>
+                <button
+                  type="button"
+                  disabled={previewMode}
+                  onClick={() => jsonInputRef.current?.click()}
+                  className="map-editor__mini-button"
+                >
+                  <Import className="h-4 w-4" />
+                  Import
+                </button>
+              </div>
+              <div className="map-editor__utility-row">
+                <button type="button" onClick={exportJson} className="map-editor__mini-button">
+                  <Download className="h-4 w-4" />
+                  Export
+                </button>
+                <button
+                  type="button"
+                  disabled={previewMode}
+                  onClick={() => activate("measure")}
+                  className="map-editor__mini-button"
+                >
+                  <PencilRuler className="h-4 w-4" />
+                  Measure
+                </button>
+              </div>
+              <div className="map-editor__utility-row">
+                <button
+                  type="button"
+                  disabled={previewMode}
+                  onClick={autoWaypoints}
+                  className="map-editor__mini-button"
+                >
+                  <Sparkles className="h-4 w-4" />
+                  Auto Waypoints
+                </button>
+                <button type="button" onClick={validate} className="map-editor__mini-button">
+                  <Check className="h-4 w-4" />
+                  Validate
+                </button>
+              </div>
+              <div>
+                <label className="field-label">Scale (pixels / meter)</label>
+                <input
+                  className="input"
+                  type="number"
+                  step="0.1"
+                  disabled={previewMode}
+                  value={model.pixelsPerMeter || ""}
+                  onChange={(event) => mutate((next) => {
+                    const value = Number.parseFloat(event.target.value);
+                    next.pixelsPerMeter = Number.isFinite(value) && value > 0 ? value : null;
+                  }, false)}
+                  placeholder="50"
+                />
+              </div>
+            </div>
+          )}
+        </section>
+      </aside>
+
+      <section className="map-editor__canvas">
+        <div
+          ref={wrapRef}
+          className="map-editor__canvas-inner"
+          style={{
+            backgroundImage: model.showGrid
+              ? "linear-gradient(0deg, color-mix(in srgb, var(--color-border) 28%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in srgb, var(--color-border) 28%, transparent) 1px, transparent 1px)"
+              : "none",
+            backgroundSize: `${GRID * zoom}px ${GRID * zoom}px`,
+            cursor:
+              previewMode
+                ? "default"
+                : tool === "delete"
+                ? "not-allowed"
+                : tool === "move"
+                  ? "grab"
+                  : tool === "resize"
+                    ? "nwse-resize"
+                    : tool === "select"
+                      ? "default"
+                      : "crosshair",
+          }}
+        >
+          <canvas ref={canvasRef} onPointerDown={down} onPointerMove={move} onPointerUp={up} onDoubleClick={dbl} onWheel={(event) => {
+            event.preventDefault();
+            zoomBy(event.deltaY > 0 ? 0.9 : 1.1, { x: event.nativeEvent.offsetX, y: event.nativeEvent.offsetY });
+          }} />
+          {previewMode && (
+            <div className="pointer-events-none absolute left-3 top-3 z-10">
+              <span className="badge-neutral">
+                <Eye className="h-3.5 w-3.5" />
+                Preview mode
+              </span>
+            </div>
+          )}
+          {!previewMode && (
+            <div className="pointer-events-none absolute left-3 top-3 z-10">
+              <span className="badge-neutral">
+                <MousePointer2 className="h-3.5 w-3.5" />
+                {tool === "room" && shape === "polygon"
+                  ? "Click to add corners. Double-click to finish."
+                  : tool === "path"
+                    ? "Click waypoints to draw a path."
+                    : tool === "measure"
+                      ? "Click two points to measure."
+                      : "Select or draw on the canvas."}
+              </span>
+            </div>
+          )}
+          {measure && (
+            <div className="pointer-events-none absolute right-3 top-3 z-10">
+              <span className="badge-neutral">
+                <PencilRuler className="h-3.5 w-3.5" />
+                {measure.pixels?.toFixed(0) || 0} px
+                {measure.meters ? ` | ${measure.meters.toFixed(1)} m` : ""}
+              </span>
             </div>
           </div>
-
-          <div className="cne-section">
-            <div className="cne-ptitle">Zone Type</div>
-            {ZONE_TYPES.map(z => (
-              <button key={z} className={`cne-zone${S.zoneType === z ? " active" : ""}`} onClick={() => setZone(z)}>
-                <span className="cne-zdot" style={{ background: COLORS[z] }} />
-                {z.charAt(0).toUpperCase() + z.slice(1)}
-              </button>
-            ))}
-          </div>
-
-          <div className="cne-section">
-            <div className="cne-ptitle">Floors</div>
-            {S.floors.map((f, i) => (
-              <div key={f.id} className={`cne-floor${i === S.currentFloor ? " active" : ""}`} onClick={() => switchFloor(i)}>
-                <span className="cne-floor-badge">{f.level}</span>
-                <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.name}</span>
-              </div>
-            ))}
-            <div className="cne-floor-add" onClick={addFloor}>+ Add Floor</div>
-          </div>
-
-          <div className="cne-section">
-            <div className="cne-ptitle">Stats</div>
-            {[["Rooms/Zones", stats.rooms], ["Waypoints", stats.waypoints], ["Paths", stats.paths], ["Doors", stats.doors]].map(([l, v]) => (
-              <div key={l} className="cne-stat"><span className="cne-stat-lbl">{l}</span><span className="cne-stat-val">{v}</span></div>
-            ))}
-          </div>
         </div>
+      </section>
 
-        {/* CANVAS */}
-        <div className="cne-canvas-wrap" ref={wrapRef}>
-          <canvas ref={bgRef} style={{ zIndex: 0 }} />
-          <canvas ref={mainRef} style={{ zIndex: 1 }}
-            onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp}
-            onDoubleClick={onDblClick} />
-          <div className="cne-info">{toolHints[S.tool] || ""}</div>
-          <div className="cne-zoom">
-            <button className="cne-zoom-btn" onClick={() => { S.zoom = Math.min(S.zoom * 1.2, 8); draw(); }}>+</button>
-            <button className="cne-zoom-btn" onClick={fitAll}>⊙</button>
-            <button className="cne-zoom-btn" onClick={() => { S.zoom = Math.max(S.zoom / 1.2, 0.1); draw(); }}>−</button>
+      <aside className="map-editor__aside">
+        <section className="map-editor__panel">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <h2 className="map-editor__panel-title">
+                {showHelp ? "How To Use The Editor" : `${selected?.kind || "Selection"} Properties`}
+              </h2>
+              <p className="map-editor__property-text">
+                {showHelp
+                  ? "Shortcuts, guidance, and map overlay alignment."
+                  : "Update the selected element details."}
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              {selected && !showHelp && (
+                <button type="button" onClick={() => setSelectionId(null)} className="btn-ghost px-3">
+                  <X className="h-4 w-4" />
+                </button>
+              )}
+              {selected && (
+                <button
+                  type="button"
+                  title="Show help"
+                  aria-label="Show help"
+                  onClick={() => setShowHelpPanel((current) => !current)}
+                  className="btn-ghost px-3"
+                >
+                  <HelpCircle className="h-4 w-4" />
+                </button>
+              )}
+            </div>
           </div>
-        </div>
-
-        {/* RIGHT PANEL */}
-        <div className="cne-right">
-          <div className="cne-section">
-            <div className="cne-ptitle">Properties</div>
-            {!propEl ? (
-              <div className="cne-empty">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><rect x="3" y="3" width="18" height="18" rx="2" /><path d="M9 9h6M9 12h6M9 15h4" /></svg>
-                <span>Select an element</span>
-              </div>
-            ) : (
-              <>
-                <div className="cne-prop-row">
-                  <div className="cne-prop-lbl">Name</div>
-                  <input className="cne-input" value={propEl.name || propEl.text || ""} onChange={e => { updateProp("name", e.target.value); setPropEl(p => ({ ...p, name: e.target.value })); }} />
+          {showHelp ? (
+            <div className="map-editor__property-grid mt-4">
+              <div>
+                <div className="section-label">Drawing</div>
+                <div className="map-editor__help-list mt-3">
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">R</span><span>Room — Click and drag to draw a room</span></div>
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">D</span><span>Door — Click on a wall to place a door</span></div>
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">W</span><span>Waypoint — Click to place a navigation point</span></div>
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">P</span><span>Path — Click waypoints to connect them</span></div>
                 </div>
-                {(propEl.type === "rect" || propEl.type === "polygon") && (
-                  <>
-                    <div className="cne-prop-row">
-                      <div className="cne-prop-lbl">Zone Type</div>
-                      <select className="cne-select" value={propEl.zoneType || "room"} onChange={e => { updateProp("zoneType", e.target.value); setPropEl(p => ({ ...p, zoneType: e.target.value })); }}>
-                        {ZONE_TYPES.map(z => <option key={z} value={z}>{z}</option>)}
-                      </select>
+              </div>
+
+              <div className="map-editor__divider" />
+
+              <div>
+                <div className="section-label">Editing</div>
+                <div className="map-editor__help-list mt-3">
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">S</span><span>Select — Click any element to select</span></div>
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">M</span><span>Move — Drag selected elements</span></div>
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">Del</span><span>Delete — Remove selected element</span></div>
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">Ctrl+Z</span><span>Undo / Ctrl+Y redo</span></div>
+                </div>
+              </div>
+
+              <div className="map-editor__divider" />
+
+              <div>
+                <div className="section-label">Canvas</div>
+                <div className="map-editor__help-list mt-3">
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">Scroll</span><span>Zoom in / out</span></div>
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">Middle</span><span>Drag to pan canvas</span></div>
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">F</span><span>Fit all elements to screen</span></div>
+                  <div className="map-editor__help-row"><span className="map-editor__key-pill">L</span><span>Toggle room labels</span></div>
+                </div>
+              </div>
+
+              <div className="map-editor__divider" />
+
+              <div>
+                <div className="section-label">Tips</div>
+                <ul className="map-editor__tips mt-3">
+                  <li>Draw rooms first, then place doors on walls.</li>
+                  <li>Connect waypoints with paths for navigation routing.</li>
+                  <li>Every room needs at least one waypoint inside it for routing to work.</li>
+                  <li>Use Fit to Screen if you lose your place.</li>
+                </ul>
+              </div>
+
+              <div className="map-editor__divider" />
+
+              <div>
+                <div className="section-label">Overlay Alignment</div>
+                <p className="mt-2 text-xs subtle-text">
+                  Add north, south, east, and west bounds to anchor this floor on the live map.
+                </p>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  {["north", "south", "west", "east"].map((key) => (
+                    <div key={key}>
+                      <label className="field-label capitalize">{key}</label>
+                      <input
+                        className="input"
+                        type="number"
+                        step="any"
+                        disabled={previewMode}
+                        value={model.overlayBounds?.[key] ?? ""}
+                        onChange={(event) => updateOverlayBound(key, event.target.value)}
+                        placeholder={key === "north" || key === "south" ? "23.02887" : "72.55078"}
+                      />
                     </div>
-                    <div className="cne-prop-row">
-                      <div className="cne-prop-lbl">Description</div>
-                      <textarea className="cne-textarea" value={propEl.description || ""} onChange={e => { updateProp("description", e.target.value); setPropEl(p => ({ ...p, description: e.target.value })); }} />
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="map-editor__property-grid mt-6">
+              {selected.kind !== "path" && (
+                <div>
+                  <label className="field-label">Name</label>
+                  <input className="input" disabled={previewMode} value={selected.name || ""} onChange={(event) => updateElement(selected.id, (element) => { element.name = event.target.value; })} placeholder="Main Lobby" />
+                </div>
+              )}
+              {selected.kind === "room" && (
+                <>
+                  <div>
+                    <label className="field-label">Type</label>
+                    <div className="map-editor__type-grid">
+                      {getRoomTypes(buildingIndustry).map((entry) => {
+                        const Icon = resolvePoiIcon(entry.icon);
+                        return (
+                          <button key={entry.id} type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => {
+                            element.roomType = entry.id;
+                            if (entry.id !== "custom") {
+                              element.customLabel = "";
+                              element.customValue = "";
+                            }
+                          })} className={`map-editor__type-button ${selected.roomType === entry.id ? "is-active" : ""}`}>
+                            <Icon className="h-4 w-4" />{entry.label}
+                          </button>
+                        );
+                      })}
                     </div>
-                  </>
-                )}
-                {propEl.type === "rect" && (
-                  <>
-                    <div className="cne-prop-row">
-                      <div className="cne-prop-lbl">Width × Height (px)</div>
-                      <div className="cne-row2">
-                        <input className="cne-input" type="number" value={Math.round(propEl.w || 0)} onChange={e => { updateProp("w", +e.target.value); setPropEl(p => ({ ...p, w: +e.target.value })); }} />
-                        <input className="cne-input" type="number" value={Math.round(propEl.h || 0)} onChange={e => { updateProp("h", +e.target.value); setPropEl(p => ({ ...p, h: +e.target.value })); }} />
-                      </div>
+                  </div>
+                  {selected.roomType === "custom" && (
+                    <div>
+                      <label className="field-label">Custom Label</label>
+                      <input className="input" disabled={previewMode} value={selected.customLabel || ""} onChange={(event) => updateElement(selected.id, (element) => {
+                        element.customLabel = event.target.value;
+                        element.customValue = slugify(event.target.value);
+                      })} placeholder="Quiet Room" />
                     </div>
-                    <div className="cne-prop-row">
-                      <div className="cne-prop-lbl">Position X, Y</div>
-                      <div className="cne-row2">
-                        <input className="cne-input" type="number" value={Math.round(propEl.x || 0)} onChange={e => { updateProp("x", +e.target.value); setPropEl(p => ({ ...p, x: +e.target.value })); }} />
-                        <input className="cne-input" type="number" value={Math.round(propEl.y || 0)} onChange={e => { updateProp("y", +e.target.value); setPropEl(p => ({ ...p, y: +e.target.value })); }} />
-                      </div>
+                  )}
+                  <div>
+                    <label className="field-label">Description</label>
+                    <textarea className="textarea" rows={2} disabled={previewMode} value={selected.description || ""} onChange={(event) => updateElement(selected.id, (element) => { element.description = event.target.value; })} placeholder="Helpful notes for destination search." />
+                  </div>
+                  <div>
+                    <label className="field-label">Color</label>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {roomColorPresets.map((color) => (
+                        <button
+                          key={color}
+                          type="button"
+                          disabled={previewMode}
+                          onClick={() => updateElement(selected.id, (element) => { element.color = color; })}
+                          className={`map-editor__color-swatch ${(selected.color || "#2563EB").toLowerCase() === color.toLowerCase() ? "is-active" : ""}`}
+                          style={{ background: color }}
+                        />
+                      ))}
+                      <input type="color" disabled={previewMode} className="map-editor__color-input" value={selected.color || "#2563eb"} onChange={(event) => updateElement(selected.id, (element) => { element.color = event.target.value; })} />
+                      <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.color = ""; })} className="map-editor__mini-button">
+                        Reset
+                      </button>
                     </div>
-                    {S.pixelsPerMeter && (
-                      <div className="cne-prop-row">
-                        <div className="cne-prop-lbl">Real Size</div>
-                        <div className="cne-hint">{(propEl.w / S.pixelsPerMeter).toFixed(1)}m × {(propEl.h / S.pixelsPerMeter).toFixed(1)}m &nbsp;({((propEl.w * propEl.h) / (S.pixelsPerMeter * S.pixelsPerMeter)).toFixed(1)} m²)</div>
-                      </div>
-                    )}
-                  </>
-                )}
-                {propEl.type === "waypoint" && (
-                  <div className="cne-prop-row">
-                    <div className="cne-prop-lbl">Link to Floor (staircase/elevator)</div>
-                    <select className="cne-select" value={propEl.linkedFloor || ""} onChange={e => { updateProp("linkedFloor", e.target.value || null); setPropEl(p => ({ ...p, linkedFloor: e.target.value || null })); }}>
-                      <option value="">None</option>
-                      {S.floors.map(f => <option key={f.id} value={f.id}>{f.name}</option>)}
+                  </div>
+                  <div className="map-editor__divider" />
+                  <div className="grid gap-2">
+                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.wheelchairAccessible = !element.wheelchairAccessible; })} className={`map-editor__toggle ${selected.wheelchairAccessible ? "is-active" : ""}`}><Accessibility className="h-4 w-4" />Wheelchair accessible</button>
+                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.publicAccess = !element.publicAccess; })} className={`map-editor__toggle ${selected.publicAccess ? "is-active" : ""}`}><Check className="h-4 w-4" />Public access</button>
+                  </div>
+                </>
+              )}
+              {selected.kind === "door" && (
+                <>
+                  <div>
+                    <label className="field-label">Type</label>
+                    <select className="select" disabled={previewMode} value={selected.doorType || "main_entrance"} onChange={(event) => updateElement(selected.id, (element) => { element.doorType = event.target.value; })}>
+                      <option value="main_entrance">Main Entrance</option>
+                      <option value="emergency_exit">Emergency Exit</option>
+                      <option value="staff_only">Staff Only</option>
+                      <option value="fire_door">Fire Door</option>
+                      <option value="custom">Custom</option>
                     </select>
                   </div>
+                  <div>
+                    <label className="field-label">Width (m)</label>
+                    <input className="input" type="number" step="0.1" disabled={previewMode} value={selected.widthMeters ?? ""} onChange={(event) => updateElement(selected.id, (element) => { element.widthMeters = event.target.value; })} placeholder="1.2" />
+                  </div>
+                  <div className="map-editor__divider" />
+                  <div className="grid gap-2">
+                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.accessible = !element.accessible; })} className={`map-editor__toggle ${selected.accessible ? "is-active" : ""}`}><Accessibility className="h-4 w-4" />Accessible</button>
+                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.locked = !element.locked; })} className={`map-editor__toggle ${selected.locked ? "is-active" : ""}`}><Check className="h-4 w-4" />Locked by default</button>
+                  </div>
+                </>
+              )}
+              {selected.kind === "waypoint" && (
+                <>
+                  <div>
+                    <label className="field-label">Type</label>
+                    <select className="select" disabled={previewMode} value={selected.transitionType === "elevator" || selected.transitionType === "stairs" ? selected.transitionType : selected.waypointType || "junction"} onChange={(event) => updateElement(selected.id, (element) => {
+                      const value = event.target.value;
+                      if (value === "elevator" || value === "stairs") {
+                        element.transitionType = value;
+                        element.waypointType = "junction";
+                      } else {
+                        element.transitionType = "none";
+                        element.waypointType = value;
+                      }
+                    })}>
+                      <option value="entrance">Entrance</option>
+                      <option value="junction">Junction</option>
+                      <option value="destination">Destination</option>
+                      <option value="elevator">Elevator</option>
+                      <option value="stairs">Stairs</option>
+                      <option value="custom">Custom</option>
+                    </select>
+                  </div>
+                  {selected.waypointType === "custom" && (
+                    <div>
+                      <label className="field-label">Custom Label</label>
+                      <input className="input" disabled={previewMode} value={selected.customWaypointLabel || ""} onChange={(event) => updateElement(selected.id, (element) => { element.customWaypointLabel = event.target.value; })} placeholder="Transfer Point" />
+                    </div>
+                  )}
+                  <div>
+                    <label className="field-label">Floor Connection</label>
+                    <select className="select" disabled={previewMode} value={selected.linkedFloorId || ""} onChange={(event) => updateElement(selected.id, (element) => { element.linkedFloorId = event.target.value || null; })}>
+                      <option value="">No linked floor</option>
+                      {floors.filter((floor) => floor.id !== floorData?.id).map((floor) => <option key={floor.id} value={floor.id}>{floor.name}</option>)}
+                    </select>
+                  </div>
+                </>
+              )}
+              {selected.kind === "path" && (
+                <>
+                  <div>
+                    <label className="field-label">Label</label>
+                    <input className="input" disabled={previewMode} value={selected.name || ""} onChange={(event) => updateElement(selected.id, (element) => { element.name = event.target.value; })} placeholder="Optional" />
+                  </div>
+                  <div className="grid gap-2">
+                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.bidirectional = true; })} className={`map-editor__toggle ${selected.bidirectional ? "is-active" : ""}`}><GitBranch className="h-4 w-4" />Bidirectional</button>
+                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.bidirectional = false; })} className={`map-editor__toggle ${!selected.bidirectional ? "is-active" : ""}`}><Spline className="h-4 w-4" />One-way</button>
+                  </div>
+                  <div className="grid gap-2">
+                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.accessible = !element.accessible; })} className={`map-editor__toggle ${selected.accessible ? "is-active" : ""}`}><Accessibility className="h-4 w-4" />Accessible route</button>
+                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.staffOnly = !element.staffOnly; })} className={`map-editor__toggle ${selected.staffOnly ? "is-active" : ""}`}><Check className="h-4 w-4" />Staff only</button>
+                  </div>
+                </>
+              )}
+              <div className="map-editor__divider" />
+              <div className="map-editor__utility-row">
+                {selected.kind !== "path" && (
+                  <button
+                    type="button"
+                    disabled={previewMode}
+                    onClick={() => {
+                      const source = clone(selected);
+                      const duplicate = {
+                        ...source,
+                        id: uuidv4(),
+                        x: source.x !== undefined ? source.x + 24 : source.x,
+                        y: source.y !== undefined ? source.y + 24 : source.y,
+                        points: source.points?.map((point) => ({ x: point.x + 24, y: point.y + 24 })),
+                      };
+                      addElement(duplicate);
+                    }}
+                    className="map-editor__mini-button"
+                  >
+                    Duplicate
+                  </button>
                 )}
-                <div className="cne-prop-row">
-                  <button className="cne-pbtn primary" onClick={() => {
-                    const f = floor();
-                    const url = `${window.location.origin}/navigate/${buildingId || "BUILDING_ID"}?from=${propEl.id}`;
-                    window.alert(`QR URL:\n${url}\n\nRoom: ${propEl.name || "Unnamed"}\nFloor: ${f.name}`);
-                  }}>Generate QR Code</button>
-                  <button className="cne-pbtn" onClick={duplicateSelected}>Duplicate</button>
-                  <button className="cne-pbtn danger" onClick={deleteSelected}>Delete</button>
-                </div>
-              </>
+                <button type="button" disabled={previewMode} onClick={removeSelected} className="map-editor__mini-button is-danger"><Trash2 className="h-4 w-4" />Delete</button>
+              </div>
+            </div>
+          )}
+        </section>
+        {false && (
+        <section className="map-editor__panel">
+          <h2 className="map-editor__panel-title">Live Summary</h2>
+          <div className="map-editor__meta-list">
+            <div className="rounded-lg border border-default bg-surface-alt px-3 py-3 text-sm text-secondary">
+              <div className="flex items-center justify-between"><span>Rooms / POIs</span><span>{model.elements.filter((element) => element.kind === "room").length}</span></div>
+              <div className="mt-2 flex items-center justify-between"><span>Waypoints</span><span>{model.elements.filter((element) => element.kind === "waypoint").length}</span></div>
+              <div className="mt-2 flex items-center justify-between"><span>Paths</span><span>{model.elements.filter((element) => element.kind === "path").length}</span></div>
+              <div className="mt-2 flex items-center justify-between"><span>Doors</span><span>{model.elements.filter((element) => element.kind === "door").length}</span></div>
+            </div>
+            {measure && (
+              <div className="rounded-lg border border-default bg-surface-alt px-3 py-3 text-sm text-secondary">
+                <div className="font-medium text-primary">Latest Measurement</div>
+                <div className="mt-2">{measure.pixels?.toFixed(0) || 0} px{measure.meters ? ` · ${measure.meters.toFixed(1)} m` : ""}</div>
+              </div>
             )}
+            <div className="rounded-lg border border-default bg-surface-alt px-3 py-3 text-sm text-secondary">
+              <div className="font-medium text-primary">{dirty ? "Unsaved changes" : "Saved state"}</div>
+              <div className="mt-2">Undo: {undoCount} · Redo: {redoCount}</div>
+            </div>
           </div>
-          <div className="cne-section">
-            <div className="cne-ptitle">Quick Actions</div>
-            <button className="cne-pbtn" onClick={fitAll}>Fit All in View</button>
-            <button className="cne-pbtn" onClick={() => { S.panX = mainRef.current.width / 2; S.panY = mainRef.current.height / 2; draw(); }}>Center View</button>
-            <button className="cne-pbtn" onClick={() => { if (window.confirm("Clear this floor?")) { pushHistory(); S.floors[S.currentFloor].elements = []; S.selected = []; setPropEl(null); refresh(); draw(); } }}>Clear Floor</button>
-            <button className="cne-pbtn danger" onClick={() => { if (window.confirm("Clear ALL floors?")) { pushHistory(); S.floors.forEach(f => f.elements = []); S.selected = []; setPropEl(null); refresh(); draw(); } }}>Clear Everything</button>
-          </div>
-          <div className="cne-section">
-            <div className="cne-ptitle">Scale</div>
-            <div className="cne-hint">{S.pixelsPerMeter ? `1 meter = ${S.pixelsPerMeter.toFixed(1)} pixels` : "Not set — click Set Scale"}</div>
-          </div>
-        </div>
-      </div>
+        </section>
+        )}
+      </aside>
 
-      {/* Hidden inputs */}
-      <input type="file" id="cne-bg-input" accept="image/*" style={{ display: "none" }} onChange={loadBgImage} />
-      <input type="file" id="cne-json-input" accept=".json" style={{ display: "none" }} onChange={loadJSON} />
-
-      {/* Toast */}
-      <div className={`cne-toast${toast.show ? " show" : ""}`}>{toast.msg}</div>
+      <input ref={bgInputRef} type="file" accept="image/*" className="hidden" onChange={uploadBackground} />
+      <input ref={jsonInputRef} type="file" accept=".json,application/json" className="hidden" onChange={importJson} />
     </div>
   );
-}
+});
+
+export default MapEditor;

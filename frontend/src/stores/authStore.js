@@ -32,7 +32,6 @@ export const useAuthStore = create((set, get) => ({
 
   setUser: async (user) => {
     try {
-      // Uses GET /api/v1/auth/me — requires admin role
       await api.auth.me();
       set({ user, isAdmin: true });
     } catch {

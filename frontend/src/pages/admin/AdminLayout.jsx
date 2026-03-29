@@ -1,181 +1,216 @@
+// CampusNav redesign — AdminLayout.jsx — updated
+import { useMemo, useState } from "react";
 import { NavLink, Outlet, useLocation, useNavigate } from "react-router-dom";
 import {
   Building2,
   Compass,
   LayoutDashboard,
   LogOut,
+  Menu,
   Moon,
+  PanelLeftClose,
   Settings2,
   Sun,
 } from "lucide-react";
 import toast from "react-hot-toast";
-import { useAuthStore } from "../../stores/authStore.js";
 import { useTheme } from "../../context/themeContext.jsx";
+import { useAuthStore } from "../../stores/authStore.js";
 
-const navItems = [
+const navGroups = [
   {
-    to: "/admin",
-    icon: LayoutDashboard,
-    label: "Overview",
-    description: "Platform status and quick actions",
-    end: true,
+    title: "Dashboard",
+    items: [
+      {
+        to: "/admin",
+        label: "Overview",
+        icon: LayoutDashboard,
+        end: true,
+      },
+    ],
   },
   {
-    to: "/admin/buildings",
-    icon: Building2,
-    label: "Buildings",
-    description: "Manage campuses, floors, and maps",
+    title: "Buildings",
+    items: [
+      {
+        to: "/admin/buildings",
+        label: "Buildings & Floors",
+        icon: Building2,
+      },
+    ],
   },
 ];
 
-export default function AdminLayout() {
-  const { pathname } = useLocation();
-  const navigate = useNavigate();
-  const { user, signOut } = useAuthStore();
-  const { isDark, toggleTheme } = useTheme();
-
-  const currentSection =
-    navItems.find((item) =>
-      item.end ? pathname === item.to : pathname.startsWith(item.to),
-    ) || navItems[0];
-
-  const handleSignOut = async () => {
-    await signOut();
-    toast.success("Signed out");
-    navigate("/admin/login");
-  };
-
+function Sidebar({ user, isDark, onToggleTheme, onSignOut, onNavigate }) {
   return (
-    <div className="page-shell page-grid min-h-screen p-3 sm:p-4">
-      <div className="mx-auto flex min-h-[calc(100dvh-1.5rem)] w-full max-w-7xl gap-4 lg:min-h-[calc(100dvh-2rem)]">
-        <aside className="glass hidden w-[300px] flex-col rounded-[32px] p-4 lg:flex">
-          <div className="flex items-center gap-3 rounded-[26px] border border-[var(--border)] bg-[var(--surface-strong)] px-4 py-4">
-            <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-500 via-sky-500 to-cyan-400 text-white">
-              <Compass className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="font-display text-lg font-bold">CampusNav</div>
-              <div className="text-sm subtle-text">Protected admin workspace</div>
-            </div>
+    <div className="flex h-full flex-col bg-surface">
+      <div className="border-b border-default px-5 py-6">
+        <div className="app-logo">
+          <span className="app-logo-mark">
+            <Compass className="h-5 w-5" />
+          </span>
+          <div>
+            <div className="text-base font-semibold">CampusNav</div>
+            <div className="text-xs text-muted">Admin workspace</div>
           </div>
+        </div>
+      </div>
 
-          <div className="mt-6 rounded-[26px] border border-[var(--border)] bg-[var(--surface-muted)] p-4">
-            <div className="text-xs font-bold uppercase tracking-[0.18em] text-[var(--text-soft)]">
-              Current focus
-            </div>
-            <div className="mt-2 font-display text-2xl font-bold">{currentSection.label}</div>
-            <p className="mt-2 text-sm leading-7 subtle-text">{currentSection.description}</p>
-          </div>
-
-          <nav className="mt-6 space-y-2">
-            {navItems.map(({ to, icon: Icon, label, description, end }) => (
-              <NavLink
-                key={to}
-                to={to}
-                end={end}
-                className={({ isActive }) =>
-                  `flex rounded-[24px] border px-4 py-4 transition-all ${
-                    isActive
-                      ? "border-brand-400/30 bg-brand-500/10"
-                      : "border-transparent bg-transparent hover:border-[var(--border)] hover:bg-[var(--surface-muted)]"
-                  }`
-                }
-              >
-                {({ isActive }) => (
-                  <>
-                    <div
-                      className={`mt-0.5 flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-2xl ${
-                        isActive ? "bg-brand-500 text-white" : "bg-[var(--surface-strong)] text-[var(--text-muted)]"
-                      }`}
-                    >
-                      <Icon className="h-4.5 w-4.5" />
-                    </div>
-                    <div className="ml-3">
-                      <div className="font-semibold">{label}</div>
-                      <div className="mt-1 text-sm subtle-text">{description}</div>
-                    </div>
-                  </>
-                )}
-              </NavLink>
-            ))}
-          </nav>
-
-          <div className="mt-auto space-y-3">
-            <button onClick={toggleTheme} className="btn-secondary w-full justify-between rounded-[22px]">
-              <span className="flex items-center gap-3">
-                {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-                {isDark ? "Switch to light mode" : "Switch to dark mode"}
-              </span>
-              <Settings2 className="h-4 w-4" />
-            </button>
-
-            <div className="rounded-[26px] border border-[var(--border)] bg-[var(--surface-strong)] p-4">
-              <div className="text-xs font-bold uppercase tracking-[0.18em] text-[var(--text-soft)]">
-                Authenticated as
-              </div>
-              <div className="mt-3 flex items-center gap-3">
-                <div className="flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-500/10 font-display text-sm font-bold text-brand-500">
-                  {(user?.email || "A").slice(0, 1).toUpperCase()}
-                </div>
-                <div className="min-w-0">
-                  <div className="truncate font-semibold">{user?.user_metadata?.full_name || user?.email}</div>
-                  <div className="truncate text-sm subtle-text">Admin access verified</div>
-                </div>
-              </div>
-              <button onClick={handleSignOut} className="btn-danger mt-4 w-full justify-center rounded-[20px]">
-                <LogOut className="h-4 w-4" />
-                Sign out
-              </button>
-            </div>
-          </div>
-        </aside>
-
-        <main className="flex min-w-0 flex-1 flex-col rounded-[32px] border border-[var(--border)] bg-[var(--surface)] shadow-card">
-          <header className="flex flex-col gap-4 border-b border-[var(--border)] px-4 py-4 sm:px-6 lg:hidden">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-500 via-sky-500 to-cyan-400 text-white">
-                  <Compass className="h-5 w-5" />
-                </div>
-                <div>
-                  <div className="font-display text-lg font-bold">CampusNav</div>
-                  <div className="text-xs subtle-text">{currentSection.label}</div>
-                </div>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <button onClick={toggleTheme} className="btn-secondary h-11 w-11 rounded-full p-0">
-                  {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-                </button>
-                <button onClick={handleSignOut} className="btn-danger h-11 w-11 rounded-full p-0">
-                  <LogOut className="h-4 w-4" />
-                </button>
-              </div>
-            </div>
-
-            <div className="grid gap-2 sm:grid-cols-2">
-              {navItems.map(({ to, label, end }) => (
+      <div className="flex-1 overflow-y-auto px-4 py-6">
+        {navGroups.map((group) => (
+          <div key={group.title} className="mb-8">
+            <div className="section-label">{group.title}</div>
+            <div className="mt-3 space-y-1.5">
+              {group.items.map(({ to, label, icon: Icon, end }) => (
                 <NavLink
                   key={to}
                   to={to}
                   end={end}
+                  onClick={onNavigate}
                   className={({ isActive }) =>
-                    `rounded-2xl px-4 py-3 text-sm font-semibold transition-all ${
+                    `group relative flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
                       isActive
-                        ? "bg-brand-500 text-white"
-                        : "border border-[var(--border)] bg-[var(--surface-strong)]"
+                        ? "bg-accent-light text-accent"
+                        : "text-secondary hover:bg-surface-alt hover:text-primary"
                     }`
                   }
                 >
-                  {label}
+                  {({ isActive }) => (
+                    <>
+                      <span
+                        className={`absolute inset-y-2 left-0 w-[3px] rounded-r-full ${
+                          isActive ? "bg-accent" : "bg-transparent"
+                        }`}
+                      />
+                      <Icon className="h-5 w-5" />
+                      <span>{label}</span>
+                    </>
+                  )}
                 </NavLink>
               ))}
             </div>
-          </header>
+          </div>
+        ))}
 
-          <Outlet />
-        </main>
+        <div>
+          <div className="section-label">Settings</div>
+          <div className="mt-3 space-y-2">
+            <button onClick={onToggleTheme} className="btn-secondary w-full justify-start px-3">
+              {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              {isDark ? "Switch to light mode" : "Switch to dark mode"}
+            </button>
+            <button onClick={onSignOut} className="btn-ghost w-full justify-start px-3">
+              <LogOut className="h-4 w-4" />
+              Sign out
+            </button>
+          </div>
+        </div>
       </div>
+
+      <div className="border-t border-default px-4 py-4">
+        <div className="flex items-center gap-3 rounded-xl bg-surface-alt px-3 py-3">
+          <div className="flex h-10 w-10 items-center justify-center rounded-full bg-accent-light font-semibold text-accent">
+            {(user?.email || "A").slice(0, 1).toUpperCase()}
+          </div>
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold text-primary">
+              {user?.user_metadata?.full_name || user?.email || "Admin user"}
+            </div>
+            <div className="truncate text-xs text-muted">{user?.email}</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+export default function AdminLayout() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const { user, signOut } = useAuthStore();
+  const { isDark, toggleTheme } = useTheme();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  const currentLabel = useMemo(() => {
+    for (const group of navGroups) {
+      const match = group.items.find((item) =>
+        item.end ? location.pathname === item.to : location.pathname.startsWith(item.to),
+      );
+      if (match) return match.label;
+    }
+    return "Admin";
+  }, [location.pathname]);
+
+  const handleSignOut = async () => {
+    await signOut();
+    toast.success("Signed out");
+    navigate("/admin/login", { replace: true });
+  };
+
+  return (
+    <div className="min-h-screen bg-bg">
+      <aside className="fixed inset-y-0 left-0 z-30 hidden w-[240px] border-r border-default lg:block">
+        <Sidebar
+          user={user}
+          isDark={isDark}
+          onToggleTheme={toggleTheme}
+          onSignOut={handleSignOut}
+        />
+      </aside>
+
+      <header className="sticky top-0 z-20 border-b border-default bg-[color:var(--color-map-overlay)] px-4 py-4 backdrop-blur-md lg:hidden">
+        <div className="flex items-center justify-between">
+          <button
+            onClick={() => setDrawerOpen(true)}
+            className="btn-secondary px-3"
+            aria-label="Open admin menu"
+          >
+            <Menu className="h-4 w-4" />
+          </button>
+          <div className="app-logo">
+            <span className="app-logo-mark">
+              <Compass className="h-4 w-4" />
+            </span>
+            <div>
+              <div className="text-sm font-semibold">CampusNav</div>
+              <div className="text-[11px] text-muted">{currentLabel}</div>
+            </div>
+          </div>
+          <button onClick={toggleTheme} className="btn-ghost px-3">
+            {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+          </button>
+        </div>
+      </header>
+
+      {drawerOpen && (
+        <div className="fixed inset-0 z-40 bg-slate-950/35 lg:hidden">
+          <div className="h-full w-[280px] max-w-[85vw] border-r border-default bg-surface shadow-xl">
+            <div className="flex items-center justify-between border-b border-default px-4 py-4">
+              <div className="app-logo">
+                <span className="app-logo-mark">
+                  <Compass className="h-4 w-4" />
+                </span>
+                <span className="text-sm font-semibold">CampusNav</span>
+              </div>
+              <button onClick={() => setDrawerOpen(false)} className="btn-ghost px-3">
+                <PanelLeftClose className="h-4 w-4" />
+              </button>
+            </div>
+            <Sidebar
+              user={user}
+              isDark={isDark}
+              onToggleTheme={toggleTheme}
+              onSignOut={handleSignOut}
+              onNavigate={() => setDrawerOpen(false)}
+            />
+          </div>
+        </div>
+      )}
+
+      <main className="min-h-screen lg:pl-[240px]">
+        <div className="px-4 py-5 sm:px-6 lg:px-8 lg:py-6">
+          <Outlet />
+        </div>
+      </main>
     </div>
   );
 }

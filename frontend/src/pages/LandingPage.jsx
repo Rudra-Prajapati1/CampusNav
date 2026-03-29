@@ -1,311 +1,534 @@
-import { Link } from "react-router-dom";
+// CampusNav redesign — LandingPage.jsx — updated
+import { useState } from "react";
 import {
   ArrowRight,
-  Building2,
+  CalendarClock,
   Compass,
-  Layers,
+  Mail,
+  Map,
+  Menu,
   Moon,
-  Navigation,
-  QrCode,
-  ShieldCheck,
-  Sparkles,
+  Phone,
+  Send,
   Sun,
 } from "lucide-react";
+import { INDUSTRY_TYPES, resolvePoiIcon } from "../config/poiTypes.js";
 import { useTheme } from "../context/themeContext.jsx";
 
-const platformCards = [
+const featureCards = [
   {
-    icon: QrCode,
-    title: "Scan to start",
-    text: "Visitors can enter navigation instantly from a QR checkpoint without installing an app.",
+    title: "Outdoor + Indoor Navigation",
+    description:
+      "Guide visitors from the road approach to the exact room, across entrances, floors, and wayfinding decision points.",
+    icon: Map,
   },
   {
-    icon: Navigation,
-    title: "Door-to-door routing",
-    text: "Routes are designed to feel intentional, from the entrance to the exact destination touchpoint.",
+    title: "Custom Map Editor",
+    description:
+      "Create and maintain floor plans, doors, waypoints, and paths with a workspace built for real operations teams.",
+    icon: Compass,
   },
   {
-    icon: Layers,
-    title: "Multi-floor wayfinding",
-    text: "Stairs, elevators, and level changes stay readable across complex academic and healthcare buildings.",
-  },
-  {
-    icon: ShieldCheck,
-    title: "Admin-controlled maps",
-    text: "Operations teams can manage floor data, entrances, rooms, and navigation updates from one workspace.",
+    title: "Admin Dashboard & Analytics",
+    description:
+      "Track mapped spaces, review building readiness, and keep navigation data current across every active venue.",
+    icon: CalendarClock,
   },
 ];
 
 const workflow = [
-  "Add a building and upload floor plans in the admin workspace.",
-  "Model rooms, doors, corridors, stairs, and elevators in the editor.",
-  "Generate QR entry points and share a navigation link with visitors.",
-  "Guide users through outdoor approach, indoor routing, and floor changes.",
+  "Add your building and define the entrance.",
+  "Draw your floor plan, rooms, and routes.",
+  "Publish and start navigating visitors in real time.",
 ];
 
-const outcomes = [
-  { value: "01", label: "single navigation flow", text: "Outdoor arrival, indoor orientation, and turn-by-turn guidance in one experience." },
-  { value: "02", label: "clear operational control", text: "Dedicated admin routes keep editing, floor data, and map management separate from the public UX." },
-  { value: "03", label: "professional visual language", text: "A calmer, map-first interface gives campus navigation a more trustworthy product feel." },
+const industryDescriptions = {
+  education: "Universities, schools, research campuses",
+  healthcare: "Hospitals, clinics, medical centers",
+  corporate: "Office parks, HQs, co-working spaces",
+  mall: "Shopping centers, outlet malls",
+  events: "Conference halls, stadiums, expo centers",
+  hospitality: "Hotels, resorts, convention centers",
+};
+
+const trustedBy = [
+  "Universities",
+  "Hospitals",
+  "Corporate HQs",
+  "Shopping Centers",
+  "Event Venues",
 ];
 
 export default function LandingPage() {
   const { isDark, toggleTheme } = useTheme();
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [contactForm, setContactForm] = useState({
+    name: "",
+    email: "",
+    organization: "",
+    message: "",
+  });
+
+  const contactEmail = import.meta.env.VITE_CONTACT_EMAIL || "hello@campusnav.com";
+
+  const handleContactSubmit = (event) => {
+    event.preventDefault();
+
+    const subject = encodeURIComponent(
+      `CampusNav demo request from ${contactForm.organization || contactForm.name}`,
+    );
+    const body = encodeURIComponent(
+      [
+        `Name: ${contactForm.name}`,
+        `Email: ${contactForm.email}`,
+        `Organization: ${contactForm.organization}`,
+        "",
+        contactForm.message,
+      ].join("\n"),
+    );
+
+    window.location.href = `mailto:${contactEmail}?subject=${subject}&body=${body}`;
+  };
+
+  const industries = [
+    "education",
+    "healthcare",
+    "corporate",
+    "mall",
+    "events",
+    "hospitality",
+  ].map((industryId) => {
+    const industry = INDUSTRY_TYPES[industryId];
+    const Icon = resolvePoiIcon(industry.icon);
+    return {
+      ...industry,
+      description: industryDescriptions[industryId],
+      Icon,
+    };
+  });
 
   return (
-    <div className="page-shell page-grid overflow-x-hidden">
-      <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col px-5 pb-10 pt-6 sm:px-8 lg:px-10">
-        <nav className="glass-light flex items-center justify-between rounded-full px-4 py-3 sm:px-5">
-          <Link to="/" className="flex items-center gap-3">
-            <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-brand-500 via-sky-500 to-cyan-400 text-white shadow-soft">
+    <div className="page-shell">
+      <header className="sticky top-0 z-40 border-b border-default bg-[color:var(--color-map-overlay)] backdrop-blur-md">
+        <div className="page-container flex min-h-[72px] items-center justify-between gap-4">
+          <a href="#hero" className="app-logo">
+            <span className="app-logo-mark">
               <Compass className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="font-display text-base font-bold">CampusNav</div>
-              <div className="text-xs subtle-text">Indoor navigation platform</div>
-            </div>
-          </Link>
+            </span>
+            <span className="text-lg font-semibold">CampusNav</span>
+          </a>
 
-          <div className="flex items-center gap-2 sm:gap-3">
+          <nav className="hidden items-center gap-8 text-sm font-medium text-secondary lg:flex">
+            <a href="#features" className="transition-colors hover:text-primary">
+              Features
+            </a>
+            <a href="#industries" className="transition-colors hover:text-primary">
+              Industries
+            </a>
+            <a href="#pricing" className="transition-colors hover:text-primary">
+              Pricing
+            </a>
+            <a href="#contact" className="transition-colors hover:text-primary">
+              Contact
+            </a>
+          </nav>
+
+          <div className="hidden items-center gap-3 lg:flex">
             <button
               onClick={toggleTheme}
-              className="btn-ghost h-11 w-11 rounded-full p-0"
+              className="btn-ghost px-3"
               aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
             >
               {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
             </button>
-            <Link to="/admin/login" className="btn-secondary hidden sm:inline-flex">
-              Admin login
-            </Link>
-            <Link to="/admin" className="btn-primary">
-              Open workspace
-              <ArrowRight className="h-4 w-4" />
-            </Link>
+            <a href="#contact" className="btn-primary">
+              Request a Demo
+            </a>
           </div>
-        </nav>
 
-        <section className="grid flex-1 items-center gap-10 py-10 lg:grid-cols-[1.1fr_0.9fr] lg:py-16">
-          <div className="max-w-2xl">
-            <div className="badge mb-5">
-              <Sparkles className="h-3.5 w-3.5 text-brand-500" />
-              Inspired by premium map-led product landing pages
-            </div>
-            <h1 className="font-display text-5xl font-bold tracking-tight sm:text-6xl lg:text-7xl">
-              Indoor wayfinding for campuses that should feel{" "}
-              <span className="text-gradient">clear, calm, and credible</span>.
-            </h1>
-            <p className="mt-6 max-w-xl text-lg leading-8 subtle-text sm:text-xl">
-              CampusNav helps students, staff, patients, and visitors move from the campus approach to the exact room entrance with a modern, app-free navigation experience.
-            </p>
+          <div className="flex items-center gap-2 lg:hidden">
+            <button
+              onClick={toggleTheme}
+              className="btn-ghost px-3"
+              aria-label={isDark ? "Switch to light mode" : "Switch to dark mode"}
+            >
+              {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            </button>
+            <button
+              onClick={() => setMobileNavOpen((value) => !value)}
+              className="btn-secondary px-3"
+              aria-label="Toggle navigation menu"
+            >
+              <Menu className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
 
-            <div className="mt-8 flex flex-col gap-3 sm:flex-row">
-              <Link to="/admin" className="btn-primary">
-                Launch admin workspace
-                <ArrowRight className="h-4 w-4" />
-              </Link>
-              <a href="#platform" className="btn-secondary">
-                Explore the platform
+        {mobileNavOpen && (
+          <div className="border-t border-default bg-surface lg:hidden">
+            <div className="page-container flex flex-col gap-3 py-4 text-sm font-medium text-secondary">
+              <a href="#features" onClick={() => setMobileNavOpen(false)}>
+                Features
+              </a>
+              <a href="#industries" onClick={() => setMobileNavOpen(false)}>
+                Industries
+              </a>
+              <a href="#pricing" onClick={() => setMobileNavOpen(false)}>
+                Pricing
+              </a>
+              <a href="#contact" onClick={() => setMobileNavOpen(false)}>
+                Contact
+              </a>
+              <a href="#contact" className="btn-primary mt-2" onClick={() => setMobileNavOpen(false)}>
+                Request a Demo
               </a>
             </div>
-
-            <div className="mt-10 grid gap-4 sm:grid-cols-3">
-              <div className="metric-card">
-                <div className="metric-label">Experience</div>
-                <div className="metric-value">Door to door</div>
-              </div>
-              <div className="metric-card">
-                <div className="metric-label">Access</div>
-                <div className="metric-value">QR first</div>
-              </div>
-              <div className="metric-card">
-                <div className="metric-label">Coverage</div>
-                <div className="metric-value">Multi-floor</div>
-              </div>
-            </div>
           </div>
+        )}
+      </header>
 
-          <div className="relative">
-            <div className="card relative overflow-hidden p-4 sm:p-5">
-              <div className="absolute inset-x-8 top-0 h-36 rounded-full bg-brand-500/10 blur-3xl" />
-              <div className="relative rounded-[28px] border border-[var(--border)] bg-[var(--surface-strong)] p-4 shadow-soft">
-                <div className="mb-4 flex items-center justify-between gap-3">
-                  <div>
-                    <div className="font-display text-xl font-bold">Navigation overview</div>
-                    <div className="text-sm subtle-text">A map-led experience inspired by clean enterprise wayfinding products</div>
-                  </div>
-                  <div className="badge">
-                    <Building2 className="h-3.5 w-3.5 text-brand-500" />
-                    Campus mode
-                  </div>
-                </div>
-
-                <div className="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
-                  <div className="rounded-[24px] border border-[var(--border)] bg-[var(--surface)] p-4">
-                    <div className="mb-3 flex items-center justify-between">
-                      <div>
-                        <div className="text-sm font-semibold">Route planner</div>
-                        <div className="text-xs subtle-text">Entry to destination</div>
-                      </div>
-                      <div className="rounded-full bg-brand-500/10 px-3 py-1 text-xs font-semibold text-brand-500">
-                        Live
-                      </div>
-                    </div>
-
-                    <div className="space-y-3">
-                      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] px-4 py-3">
-                        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--text-soft)]">
-                          Start
-                        </div>
-                        <div className="mt-1 text-sm font-semibold">Main gate checkpoint</div>
-                      </div>
-                      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] px-4 py-3">
-                        <div className="text-xs font-semibold uppercase tracking-[0.18em] text-[var(--text-soft)]">
-                          Destination
-                        </div>
-                        <div className="mt-1 text-sm font-semibold">AI Lab 2.14</div>
-                      </div>
-                      <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] p-4">
-                        <div className="flex items-center justify-between text-sm font-semibold">
-                          <span>Estimated route</span>
-                          <span className="text-brand-500">4 min</span>
-                        </div>
-                        <div className="mt-3 space-y-2 text-sm subtle-text">
-                          <div className="flex items-center justify-between">
-                            <span>Outdoor approach</span>
-                            <span>120 m</span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span>Indoor guidance</span>
-                            <span>2 floors</span>
-                          </div>
-                          <div className="flex items-center justify-between">
-                            <span>Arrival precision</span>
-                            <span>Door anchor</span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="overflow-hidden rounded-[24px] border border-[var(--border)] bg-[linear-gradient(180deg,rgba(16,67,126,0.10),rgba(4,22,39,0.04))] p-4">
-                    <div className="mb-3 flex items-center justify-between">
-                      <div>
-                        <div className="text-sm font-semibold">Map viewport</div>
-                        <div className="text-xs subtle-text">Professional, minimal, and route-first</div>
-                      </div>
-                      <div className="flex gap-2">
-                        <span className="h-2.5 w-2.5 rounded-full bg-emerald-400" />
-                        <span className="h-2.5 w-2.5 rounded-full bg-brand-400" />
-                      </div>
-                    </div>
-
-                    <div className="relative h-[320px] overflow-hidden rounded-[22px] border border-[var(--border)] bg-[radial-gradient(circle_at_top_left,rgba(14,110,252,0.22),transparent_32%),linear-gradient(180deg,rgba(246,250,255,0.65),rgba(232,240,249,0.55))] dark:bg-[radial-gradient(circle_at_top_left,rgba(93,162,255,0.16),transparent_32%),linear-gradient(180deg,rgba(9,23,38,0.88),rgba(8,18,32,0.96))]">
-                      <div className="absolute inset-0 opacity-60" style={{ backgroundImage: "linear-gradient(var(--grid-line) 1px, transparent 1px), linear-gradient(90deg, var(--grid-line) 1px, transparent 1px)", backgroundSize: "36px 36px" }} />
-                      <div className="absolute left-[16%] top-[18%] h-[60%] w-[68%] rounded-[28px] border border-white/40 bg-white/30 dark:border-white/10 dark:bg-white/5" />
-                      <div className="absolute left-[28%] top-[24%] h-[14%] w-[42%] rounded-[18px] border border-sky-300/60 bg-sky-200/60 dark:border-sky-400/20 dark:bg-sky-400/10" />
-                      <div className="absolute left-[28%] top-[46%] h-[12%] w-[16%] rounded-[16px] border border-brand-300/60 bg-brand-200/60 dark:border-brand-400/20 dark:bg-brand-400/10" />
-                      <div className="absolute left-[54%] top-[46%] h-[12%] w-[16%] rounded-[16px] border border-emerald-300/60 bg-emerald-200/60 dark:border-emerald-400/20 dark:bg-emerald-400/10" />
-                      <div className="absolute left-[28%] top-[64%] h-[10%] w-[42%] rounded-[14px] border border-slate-300/60 bg-slate-200/60 dark:border-slate-500/20 dark:bg-slate-400/10" />
-                      <div className="absolute left-[31%] top-[70%] h-2.5 w-2.5 rounded-full bg-brand-500 shadow-[0_0_0_6px_rgba(15,110,253,0.15)]" />
-                      <div className="absolute left-[42%] top-[70%] h-2.5 w-2.5 rounded-full bg-brand-500 shadow-[0_0_0_6px_rgba(15,110,253,0.15)]" />
-                      <div className="absolute left-[55%] top-[70%] h-2.5 w-2.5 rounded-full bg-brand-500 shadow-[0_0_0_6px_rgba(15,110,253,0.15)]" />
-                      <svg className="absolute inset-0 h-full w-full" viewBox="0 0 100 100" preserveAspectRatio="none">
-                        <path
-                          d="M30 70 C38 70, 40 70, 43 70 C46 70, 50 70, 55 70 C60 70, 63 62, 66 52 C68 46, 70 40, 70 30"
-                          fill="none"
-                          stroke="url(#routeGradient)"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                          strokeWidth="2.6"
-                          strokeDasharray="7 5"
-                        />
-                        <defs>
-                          <linearGradient id="routeGradient" x1="30%" y1="100%" x2="70%" y2="0%">
-                            <stop offset="0%" stopColor="#0f6efd" />
-                            <stop offset="100%" stopColor="#18c5b1" />
-                          </linearGradient>
-                        </defs>
-                      </svg>
-                      <div className="absolute left-[27%] top-[67%] flex h-8 w-8 items-center justify-center rounded-full bg-white text-xs font-bold text-brand-600 shadow-soft dark:bg-slate-900 dark:text-brand-300">
-                        A
-                      </div>
-                      <div className="absolute left-[66%] top-[22%] flex h-8 w-8 items-center justify-center rounded-full bg-white text-xs font-bold text-emerald-600 shadow-soft dark:bg-slate-900 dark:text-emerald-300">
-                        B
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+      <main>
+        <section id="hero" className="page-container grid gap-14 py-16 lg:grid-cols-[1fr_520px] lg:py-24">
+          <div className="max-w-2xl">
+            <span className="section-label">Map-First Indoor Navigation</span>
+            <h1 className="mt-6 text-balance text-5xl font-bold tracking-[-0.02em] sm:text-6xl">
+              Navigate Any Space, Instantly
+            </h1>
+            <p className="mt-6 text-lg subtle-text">
+              CampusNav helps universities, hospitals, offices, malls, and venues
+              guide people from the building entrance to the exact destination with
+              a clean, enterprise-ready wayfinding experience.
+            </p>
+            <div className="mt-8 flex flex-col gap-3 sm:flex-row">
+              <a href="#contact" className="btn-primary">
+                Request a Demo
+              </a>
+              <a href="#features" className="btn-secondary">
+                See How It Works
+              </a>
             </div>
-          </div>
-        </section>
-
-        <section id="platform" className="grid gap-5 py-8 md:grid-cols-2 xl:grid-cols-4">
-          {platformCards.map(({ icon: Icon, title, text }) => (
-            <article key={title} className="card flex h-full flex-col">
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-brand-500/10 text-brand-500">
-                <Icon className="h-5 w-5" />
-              </div>
-              <h2 className="font-display text-xl font-bold">{title}</h2>
-              <p className="mt-3 text-sm leading-7 subtle-text">{text}</p>
-            </article>
-          ))}
-        </section>
-
-        <section className="grid gap-6 py-8 lg:grid-cols-[0.9fr_1.1fr]">
-          <div className="card">
-            <div className="badge mb-4">
-              <Navigation className="h-3.5 w-3.5 text-brand-500" />
-              Platform workflow
-            </div>
-            <h2 className="font-display text-3xl font-bold">Built for real navigation operations, not only mockups.</h2>
-            <div className="mt-5 space-y-4">
-              {workflow.map((item, index) => (
-                <div key={item} className="flex gap-4 rounded-2xl border border-[var(--border)] bg-[var(--surface-muted)] px-4 py-4">
-                  <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl bg-brand-500/10 font-display text-sm font-bold text-brand-500">
-                    {index + 1}
-                  </div>
-                  <p className="text-sm leading-7 subtle-text">{item}</p>
-                </div>
+            <div className="mt-10 flex flex-wrap items-center gap-3 text-sm text-secondary">
+              <span className="font-semibold text-primary">
+                Trusted by universities, hospitals, and enterprises
+              </span>
+              {trustedBy.map((item) => (
+                <span key={item} className="badge-neutral">
+                  {item}
+                </span>
               ))}
             </div>
           </div>
 
-          <div className="card">
-            <div className="grid gap-4 sm:grid-cols-3">
-              {outcomes.map((item) => (
-                <div key={item.value} className="rounded-[24px] border border-[var(--border)] bg-[var(--surface-muted)] p-5">
-                  <div className="font-display text-3xl font-bold text-gradient">{item.value}</div>
-                  <div className="mt-3 text-sm font-semibold uppercase tracking-[0.18em] text-[var(--text-soft)]">
-                    {item.label}
-                  </div>
-                  <p className="mt-4 text-sm leading-7 subtle-text">{item.text}</p>
-                </div>
-              ))}
-            </div>
-
-            <div className="mt-5 rounded-[28px] border border-[var(--border)] bg-[var(--surface-strong)] p-6">
-              <div className="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+          <div className="card relative overflow-hidden p-6">
+            <div className="absolute inset-x-0 top-0 h-32 bg-[radial-gradient(circle_at_top,rgba(37,99,235,0.12),transparent_70%)]" />
+            <div className="relative rounded-xl border border-default bg-surface-alt p-4">
+              <div className="flex items-start justify-between gap-4">
                 <div>
-                  <div className="font-display text-2xl font-bold">Ready to modernize the public journey and the admin workspace?</div>
-                  <p className="mt-2 max-w-2xl text-sm leading-7 subtle-text">
-                    The updated platform design is structured so the public navigation flow stays focused, while admin tooling remains isolated under the protected `/admin` route.
-                  </p>
+                  <p className="section-label">Live Route Preview</p>
+                  <h2 className="mt-3 text-2xl font-bold tracking-[-0.02em]">
+                    Clear wayfinding for complex buildings
+                  </h2>
                 </div>
-                <Link to="/admin" className="btn-primary">
-                  Go to /admin
-                  <ArrowRight className="h-4 w-4" />
-                </Link>
+                <span className="badge-success">Map Ready</span>
+              </div>
+              <div className="mt-6 grid gap-4 md:grid-cols-[220px_1fr]">
+                <div className="space-y-3">
+                  <div className="rounded-xl border border-default bg-surface p-4">
+                    <p className="text-sm font-semibold text-primary">From</p>
+                    <p className="mt-2 text-sm text-secondary">Main Entrance</p>
+                  </div>
+                  <div className="rounded-xl border border-default bg-surface p-4">
+                    <p className="text-sm font-semibold text-primary">To</p>
+                    <p className="mt-2 text-sm text-secondary">Radiology Desk</p>
+                  </div>
+                  <div className="rounded-xl border border-default bg-surface p-4">
+                    <p className="text-sm font-semibold text-primary">Route Summary</p>
+                    <div className="mt-3 grid gap-2 text-sm text-secondary">
+                      <div className="flex items-center justify-between">
+                        <span>Distance</span>
+                        <span>184 m</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span>Time</span>
+                        <span>4 min</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span>Floors</span>
+                        <span>2</span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div
+                  className="relative min-h-[340px] overflow-hidden rounded-xl border border-default"
+                  style={{
+                    background:
+                      "linear-gradient(180deg, color-mix(in srgb, var(--color-surface) 84%, transparent), color-mix(in srgb, var(--color-surface-alt) 92%, transparent))",
+                  }}
+                >
+                  <div
+                    className="absolute inset-0 opacity-70"
+                    style={{
+                      backgroundImage:
+                        "linear-gradient(var(--color-border) 1px, transparent 1px), linear-gradient(90deg, var(--color-border) 1px, transparent 1px)",
+                      backgroundSize: "36px 36px",
+                    }}
+                  />
+                  <div
+                    className="absolute left-[10%] top-[14%] h-[70%] w-[80%] rounded-[24px] border border-default"
+                    style={{ background: "color-mix(in srgb, var(--color-surface) 70%, transparent)" }}
+                  />
+                  <div
+                    className="absolute left-[18%] top-[22%] h-[18%] w-[22%] rounded-[18px] bg-accent-light"
+                    style={{ border: "1px solid color-mix(in srgb, var(--color-accent) 40%, var(--color-border))" }}
+                  />
+                  <div className="absolute left-[44%] top-[22%] h-[12%] w-[24%] rounded-[18px] border border-default bg-surface-alt" />
+                  <div className="absolute left-[18%] top-[48%] h-[14%] w-[30%] rounded-[18px] border border-default bg-surface-alt" />
+                  <div
+                    className="absolute left-[56%] top-[44%] h-[18%] w-[18%] rounded-[18px] bg-accent-light"
+                    style={{ border: "1px solid color-mix(in srgb, var(--color-accent) 40%, var(--color-border))" }}
+                  />
+                  <div className="absolute left-[20%] top-[72%] h-[8%] w-[54%] rounded-full bg-surface-alt" />
+                  <svg
+                    className="absolute inset-0 h-full w-full"
+                    viewBox="0 0 100 100"
+                    preserveAspectRatio="none"
+                  >
+                    <path
+                      d="M24 76 C35 76, 45 76, 53 76 C62 76, 66 60, 69 48 C72 36, 77 31, 83 30"
+                      fill="none"
+                      stroke="var(--color-accent)"
+                      strokeWidth="3"
+                      strokeLinecap="round"
+                      strokeDasharray="8 6"
+                    />
+                  </svg>
+                  <div className="absolute left-[20%] top-[72%] flex h-8 w-8 items-center justify-center rounded-full bg-accent text-xs font-semibold text-white">
+                    A
+                  </div>
+                  <div className="absolute left-[78%] top-[26%] flex h-8 w-8 items-center justify-center rounded-full bg-surface text-xs font-semibold text-accent shadow-card">
+                    B
+                  </div>
+                </div>
               </div>
             </div>
           </div>
         </section>
 
-        <footer className="mt-6 flex flex-col gap-3 border-t border-[var(--border)] py-6 text-sm subtle-text sm:flex-row sm:items-center sm:justify-between">
-          <div>CampusNav is designed for smart campuses, hospitals, offices, and event venues.</div>
-          <div className="font-medium">Professional, minimal, and navigation-first.</div>
-        </footer>
-      </div>
+        <section id="industries" className="page-container py-16">
+          <div className="page-header">
+            <span className="section-label">Built For Your Industry</span>
+            <h2>One Platform, Every Venue</h2>
+            <p>
+              Configure the same navigation platform for campuses, healthcare,
+              offices, retail environments, events, and hospitality spaces.
+            </p>
+          </div>
+          <div className="mt-10 grid gap-5 md:grid-cols-2 xl:grid-cols-3">
+            {industries.map(({ id, label, description, Icon }) => (
+              <article
+                key={id}
+                className="card-sm transition-transform duration-150 hover:-translate-y-1"
+              >
+                <div className="icon-chip">
+                  <Icon className="h-5 w-5" />
+                </div>
+                <h3 className="mt-4 text-xl font-semibold tracking-[-0.02em]">
+                  {label}
+                </h3>
+                <p className="mt-2 text-sm subtle-text">{description}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section id="features" className="page-container py-16">
+          <div className="page-header">
+            <span className="section-label">How It Works</span>
+            <h2>Built for operational clarity</h2>
+            <p>
+              CampusNav keeps maps, routing, and admin workflows aligned so teams
+              can publish navigation confidently across every building.
+            </p>
+          </div>
+          <div className="mt-10 grid gap-5 lg:grid-cols-3">
+            {featureCards.map(({ title, description, icon: Icon }) => (
+              <article key={title} className="card-sm">
+                <div className="icon-chip">
+                  <Icon className="h-5 w-5" />
+                </div>
+                <h3 className="mt-4 text-xl font-semibold tracking-[-0.02em]">
+                  {title}
+                </h3>
+                <p className="mt-3 text-sm subtle-text">{description}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="page-container py-16">
+          <div className="card">
+            <div className="page-header">
+              <span className="section-label">Deployment Steps</span>
+              <h2>Publish your venue in three steps</h2>
+            </div>
+            <div className="mt-10 grid gap-5 lg:grid-cols-3">
+              {workflow.map((step, index) => (
+                <div key={step} className="rounded-xl border border-default bg-surface-alt p-5">
+                  <div className="text-3xl font-bold tracking-[-0.02em] text-accent">
+                    0{index + 1}
+                  </div>
+                  <p className="mt-4 text-sm subtle-text">{step}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </section>
+
+        <section id="pricing" className="page-container py-16">
+          <div className="card text-center">
+            <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-xl bg-accent-light text-accent">
+              <CalendarClock className="h-6 w-6" />
+            </div>
+            <h2 className="mt-6 text-4xl font-bold tracking-[-0.02em]">
+              See CampusNav in Action
+            </h2>
+            <p className="mx-auto mt-4 max-w-2xl text-base subtle-text">
+              Book a 30-minute walkthrough to see how CampusNav handles public
+              navigation, map editing, and operational rollout for your venue type.
+            </p>
+            <a href="#contact" className="btn-primary mt-8">
+              Request a Demo
+              <ArrowRight className="h-4 w-4" />
+            </a>
+          </div>
+        </section>
+
+        <section id="contact" className="page-container py-16">
+          <div className="grid gap-6 lg:grid-cols-[0.92fr_1.08fr]">
+            <div className="card">
+              <div className="page-header">
+                <span className="section-label">Contact</span>
+                <h2>Talk to the CampusNav team</h2>
+                <p>
+                  Share your venue type, rollout goals, and the kind of navigation
+                  experience you need. We will take it from there.
+                </p>
+              </div>
+              <div className="mt-8 grid gap-4 text-sm">
+                <div className="rounded-xl border border-default bg-surface-alt p-4">
+                  <div className="flex items-center gap-3">
+                    <Mail className="h-4 w-4 text-accent" />
+                    <span className="font-medium text-primary">Email</span>
+                  </div>
+                  <p className="mt-2 subtle-text">{contactEmail}</p>
+                </div>
+                <div className="rounded-xl border border-default bg-surface-alt p-4">
+                  <div className="flex items-center gap-3">
+                    <Phone className="h-4 w-4 text-accent" />
+                    <span className="font-medium text-primary">Response Window</span>
+                  </div>
+                  <p className="mt-2 subtle-text">Typically within one business day</p>
+                </div>
+              </div>
+            </div>
+
+            <form className="card" onSubmit={handleContactSubmit}>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <label className="field-label">Name</label>
+                  <input
+                    className="input"
+                    value={contactForm.name}
+                    onChange={(event) =>
+                      setContactForm((current) => ({
+                        ...current,
+                        name: event.target.value,
+                      }))
+                    }
+                    placeholder="Your name"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="field-label">Email</label>
+                  <input
+                    type="email"
+                    className="input"
+                    value={contactForm.email}
+                    onChange={(event) =>
+                      setContactForm((current) => ({
+                        ...current,
+                        email: event.target.value,
+                      }))
+                    }
+                    placeholder="you@organization.com"
+                    required
+                  />
+                </div>
+              </div>
+              <div className="mt-4">
+                <label className="field-label">Organization</label>
+                <input
+                  className="input"
+                  value={contactForm.organization}
+                  onChange={(event) =>
+                    setContactForm((current) => ({
+                      ...current,
+                      organization: event.target.value,
+                    }))
+                  }
+                  placeholder="Organization or venue"
+                  required
+                />
+              </div>
+              <div className="mt-4">
+                <label className="field-label">Message</label>
+                <textarea
+                  className="textarea"
+                  value={contactForm.message}
+                  onChange={(event) =>
+                    setContactForm((current) => ({
+                      ...current,
+                      message: event.target.value,
+                    }))
+                  }
+                  placeholder="Tell us about your venue, scale, and rollout goals."
+                  required
+                />
+              </div>
+              <button type="submit" className="btn-primary mt-6">
+                <Send className="h-4 w-4" />
+                Send Request
+              </button>
+            </form>
+          </div>
+        </section>
+      </main>
+
+      <footer className="border-t border-default py-8">
+        <div className="page-container flex flex-col gap-4 text-sm text-secondary md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="app-logo">
+              <span className="app-logo-mark">
+                <Compass className="h-4 w-4" />
+              </span>
+              <span>CampusNav</span>
+            </div>
+            <p className="mt-3">
+              Enterprise indoor navigation for campuses, hospitals, offices,
+              retail spaces, and venues.
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-4">
+            <a href="#features">Features</a>
+            <a href="#industries">Industries</a>
+            <a href="#contact">Contact</a>
+            <a href="#privacy">Privacy Policy</a>
+          </div>
+        </div>
+      </footer>
     </div>
   );
 }
