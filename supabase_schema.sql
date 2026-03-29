@@ -28,6 +28,7 @@ CREATE POLICY "Admins can view admin list" ON admins
 CREATE TABLE IF NOT EXISTS buildings (
   id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
   name TEXT NOT NULL,
+  industry TEXT NOT NULL DEFAULT 'education',
   description TEXT,
   address TEXT,
   logo_url TEXT,
@@ -215,7 +216,8 @@ ALTER TABLE floors
 
 ALTER TABLE buildings
   ADD COLUMN IF NOT EXISTS entrance_lat numeric,
-  ADD COLUMN IF NOT EXISTS entrance_lng numeric;
+  ADD COLUMN IF NOT EXISTS entrance_lng numeric,
+  ADD COLUMN IF NOT EXISTS industry text NOT NULL DEFAULT 'education';
 
 ALTER TABLE waypoints
   ADD COLUMN IF NOT EXISTS name text,

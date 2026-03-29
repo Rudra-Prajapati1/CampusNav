@@ -1,0 +1,35 @@
+# CampusNav Follow-up: Dashboard Fix, Standalone Editor, Geo-Anchored Indoor Overlay
+
+## Summary
+- Apply only the three requested follow-up changes: fix the dashboard’s Recent Buildings styling, move the floor editor into a standalone full-viewport workspace, and overlay indoor plans on the live Leaflet map without unmounting the map.
+- Keep existing routes, API URLs, auth flow, state shape, `save-map` behavior, keyboard shortcuts, and drawing logic intact.
+- Use the chosen anchor model for indoor overlay: store per-floor geographic bounds inside `map_data`, authored through numeric bounds inputs in the editor.
+
+## Implementation Changes
+- `frontend/src/App.jsx`: keep `/admin/login` and all admin protection as-is, but move `/admin/buildings/:buildingId/floors/:floorId/editor` out of the nested `AdminLayout` route so it renders as a standalone protected page; all other `/admin` routes stay inside `AdminLayout`.
+- `frontend/src/pages/admin/AdminDashboard.jsx`: replace the current table-shell block with a card-based Recent Buildings list using flex rows, a header with “Recent Buildings” + “View All”, industry-colored badges, hover states, a proper empty state, and a mobile layout that hides last-updated and stacks floor count under the building name.
+- `frontend/src/pages/admin/AdminFloorEditor.jsx`: turn the page into a full-viewport tool shell with a fixed 48px top bar, 220px left panel, flexible canvas center, 260px right panel, and 28px status bar; own the top bar state for save spinner/check, preview toggle, theme toggle, unsaved-changes back confirmation, and ref-driven undo/redo/zoom/grid/snap actions.
+- `frontend/src/components/MapEditor.jsx`: keep all current canvas/edit logic, ref methods, and save wiring, but refactor the chrome into a dense Blender-style workspace using the existing `.map-editor` namespace in `frontend/src/index.css`; add collapsible Draw/Edit/View sections, a Layers/Elements list with selection + local visibility toggles, contextual properties for room/door/waypoint/path, a Help panel when nothing is selected, a `showLabels` view toggle, cursor coordinate reporting, and a read-only preview mode that disables editing interactions and renders with navigation-style visuals.
+- `frontend/src/pages/user/NavigatePage.jsx`: always keep `MapContainer` mounted once building coordinates exist; outdoor mode shows the current outdoor UI on top of Leaflet, while indoor mode reuses the same Leaflet instance, flies to the entrance, fades in `IndoorCanvas` as an absolute overlay, and keeps the floor selector + route summary floating above it; when per-floor overlay bounds are missing, fall back to the current plain indoor canvas behavior and show the subtle admin hint banner.
+- `frontend/src/components/navigation/IndoorCanvas.jsx`: extend the component to support two render modes without breaking current props: normal fitted-canvas mode and geo-overlay mode; in geo-overlay mode, accept the Leaflet map instance and per-floor overlay bounds, project the bounds with `latLngToContainerPoint`, resize/reposition the canvas on map move/zoom, render rooms semi-transparently over tiles, keep route strokes vivid, and expose optional room hit-testing only while the parent is actively picking a From/To room.
+- `frontend/src/pages/admin/AdminBuildings.jsx`: keep the current create/update payloads and existing lat/lng fields, but add the helper text explaining those values are used to anchor indoor overlays on the real-world map; skip the embedded map picker in this batch.
+
+## Interfaces / Data
+- Keep all API endpoint URLs and existing request signatures unchanged.
+- Add optional per-floor overlay metadata inside `floorData.map_data.floors[n].overlayBounds` with the exact shape `{ north, south, east, west }`; this is saved through the existing `api.floors.update(floorId, { map_data })` flow and does not alter the normalized `save-map` payload.
+- Add optional `previewMode` to `MapEditor` and extend its `onStateChange` payload to include `showLabels`, `cursor`, and any overlay-bounds edits needed by the standalone editor UI; preserve all existing props and imperative ref methods.
+- Add optional `mapInstance`, `overlayBounds`, `interactive`, and `onRoomPick` props to `IndoorCanvas` while preserving the current prop names and default behavior.
+
+## Test Plan
+- Route test: `/admin/buildings/:buildingId/floors/:floorId/editor` renders without the admin sidebar, while `/admin` dashboard/buildings still render inside `AdminLayout`.
+- Dashboard test: Recent Buildings rows align correctly on desktop and mobile, industry badges show the requested colors, empty state appears when there are no buildings, and the edit action stays right-aligned.
+- Editor test: top bar controls drive the existing ref methods, unsaved back confirmation works, preview mode is read-only, accordion tool sections open by default, the Layers list selects elements, the Help panel appears with no selection, and the status bar updates tool/count/save/cursor values.
+- Save/load test: existing maps still load, edits still save through `save-map` plus `map_data` update, and `overlayBounds` round-trips without affecting rooms, waypoints, or connections.
+- Indoor navigation test: switching between outdoor and indoor does not destroy the Leaflet map, indoor overlay follows map pan/zoom, floor switching fades between overlays, fallback plain-canvas mode still works when bounds are absent, and outdoor routing remains unchanged.
+
+## Assumptions
+- Per-floor bounds are authored numerically in the editor properties/help area, not through a visual drag-to-align workflow.
+- The building form keeps only entrance latitude/longitude in this batch; no new building-schema footprint fields are introduced.
+- Preview mode in the editor is a read-only navigation-style rendering of the current floor, not a live route simulator.
+- Layer visibility toggles are local editor-session state only and are not persisted to backend data.
+- Room picking from the indoor overlay is enabled only while the user is actively choosing a From/To destination; otherwise the overlay stays non-blocking so Leaflet pan/zoom remains primary.
