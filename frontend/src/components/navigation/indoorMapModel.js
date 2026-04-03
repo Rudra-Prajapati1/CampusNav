@@ -47,12 +47,19 @@ function normalizeFloorDescriptor(entry = {}, fallback = {}) {
 function normalizeRoom(room = {}) {
   return {
     ...room,
+    kind: "room",
     x: toFiniteNumber(room.x) ?? 0,
     y: toFiniteNumber(room.y) ?? 0,
     width: toFiniteNumber(room.width) ?? 0,
     height: toFiniteNumber(room.height) ?? 0,
+    shape: room.shape || room.type || "rect",
+    shapePreset: room.shapePreset || "rectangle",
+    iconPreset: room.iconPreset || "auto",
+    layerIndex: toFiniteNumber(room.layerIndex) ?? 100,
     polygon_points: Array.isArray(room.polygon_points)
       ? room.polygon_points.map(normalizePoint)
+      : Array.isArray(room.points)
+        ? room.points.map(normalizePoint)
       : [],
   };
 }
@@ -78,9 +85,17 @@ function normalizeElement(element = {}) {
     polygon_points: Array.isArray(element.polygon_points)
       ? element.polygon_points.map(normalizePoint)
       : [],
+    shapePreset: element.shapePreset || "rectangle",
+    iconPreset: element.iconPreset || "auto",
+    layerIndex: toFiniteNumber(element.layerIndex) ?? 0,
     radiusMeters: toFiniteNumber(element.radiusMeters ?? element.radius_meters) ?? null,
     txPower: toFiniteNumber(element.txPower ?? element.tx_power) ?? null,
     floorId: element.floorId || element.floor_id || null,
+    roomId: element.roomId || element.room_id || null,
+    edge: element.edge || "right",
+    offset: toFiniteNumber(element.offset) ?? 0.5,
+    linkedRoomId: element.linkedRoomId || element.linked_room_id || null,
+    linkedDoorId: element.linkedDoorId || element.linked_door_id || null,
   };
 }
 
@@ -102,13 +117,27 @@ export function buildCanonicalIndoorMap(floorData) {
   const elements = Array.isArray(floorEntry?.elements)
     ? floorEntry.elements.map(normalizeElement)
     : [];
-
-  const rooms = Array.isArray(floorData?.rooms)
-    ? floorData.rooms.map(normalizeRoom)
-    : [];
-  const waypoints = Array.isArray(floorData?.waypoints)
-    ? floorData.waypoints.map(normalizeElement)
-    : [];
+  const elementRooms = elements
+    .filter((element) => element.kind === "room")
+    .map((element) =>
+      normalizeRoom({
+        ...element,
+        polygon_points: element.polygon_points?.length ? element.polygon_points : element.points,
+      }),
+    );
+  const rooms = elementRooms.length
+    ? elementRooms
+    : Array.isArray(floorData?.rooms)
+      ? floorData.rooms.map(normalizeRoom)
+      : [];
+  const elementWaypoints = elements
+    .filter((element) => element.kind === "waypoint")
+    .map(normalizeElement);
+  const waypoints = elementWaypoints.length
+    ? elementWaypoints
+    : Array.isArray(floorData?.waypoints)
+      ? floorData.waypoints.map(normalizeElement)
+      : [];
   const paths = elements
     .filter((element) => element.kind === "path")
     .map(normalizePath);

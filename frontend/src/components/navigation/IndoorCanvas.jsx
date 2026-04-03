@@ -71,12 +71,57 @@ function getRoomPolygon(room) {
     return room.polygon_points;
   }
 
+  if (room?.shapePreset === "diamond") {
+    return [
+      { x: room.x + room.width / 2, y: room.y },
+      { x: room.x + room.width, y: room.y + room.height / 2 },
+      { x: room.x + room.width / 2, y: room.y + room.height },
+      { x: room.x, y: room.y + room.height / 2 },
+    ];
+  }
+
+  if (room?.shapePreset === "hex") {
+    const inset = room.width * 0.16;
+    return [
+      { x: room.x + inset, y: room.y },
+      { x: room.x + room.width - inset, y: room.y },
+      { x: room.x + room.width, y: room.y + room.height / 2 },
+      { x: room.x + room.width - inset, y: room.y + room.height },
+      { x: room.x + inset, y: room.y + room.height },
+      { x: room.x, y: room.y + room.height / 2 },
+    ];
+  }
+
   return [
     { x: room.x, y: room.y },
     { x: room.x + room.width, y: room.y },
     { x: room.x + room.width, y: room.y + room.height },
     { x: room.x, y: room.y + room.height },
   ];
+}
+
+function roomIconSymbol(room) {
+  const iconPreset = room.iconPreset || "auto";
+  const symbolMap = {
+    stairs: "⇅",
+    elevator: "⇳",
+    restroom: "WC",
+    food: "☕",
+    parking: "P",
+    exit: "EXIT",
+    office: "OF",
+    info: "i",
+  };
+
+  if (symbolMap[iconPreset]) return symbolMap[iconPreset];
+  return room.name
+    ? room.name
+        .split(/\s+/)
+        .slice(0, 2)
+        .map((part) => part[0])
+        .join("")
+        .toUpperCase()
+    : "";
 }
 
 function drawPolygonPath(ctx, points = []) {
@@ -119,7 +164,7 @@ function mergeBounds(current, next) {
   };
 }
 
-function getFloorBounds(floorData) {
+function getFloorBounds(floorData, rooms = []) {
   let bounds = null;
 
   if (floorData?.floor_plan_width && floorData?.floor_plan_height) {
@@ -131,7 +176,7 @@ function getFloorBounds(floorData) {
     };
   }
 
-  (floorData?.rooms || []).forEach((room) => {
+  rooms.forEach((room) => {
     bounds = mergeBounds(bounds, getRoomBounds(room));
   });
 
@@ -192,12 +237,7 @@ function drawRoom(ctx, room, colors, routeState, showLabels = true) {
   const labelX = roomBounds.minX + width / 2;
   const labelY = roomBounds.minY + height / 2;
 
-  if (Array.isArray(room.polygon_points) && room.polygon_points.length > 0) {
-    drawPolygonPath(ctx, room.polygon_points);
-  } else {
-    ctx.beginPath();
-    ctx.roundRect(room.x, room.y, room.width, room.height, 14);
-  }
+  drawPolygonPath(ctx, getRoomPolygon(room));
 
   const fill = routeState ? colors.roomSelectedFill : room.color || colors.roomFill;
   const stroke = routeState ? colors.roomSelectedStroke : colors.roomStroke;
@@ -210,10 +250,14 @@ function drawRoom(ctx, room, colors, routeState, showLabels = true) {
 
   if (showLabels && width > 64 && height > 28) {
     ctx.fillStyle = colors.label;
+    ctx.font = "700 12px Inter, sans-serif";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(roomIconSymbol(room), labelX, labelY - 10);
     ctx.font = "600 12px Inter, sans-serif";
     ctx.textAlign = "center";
     ctx.textBaseline = "middle";
-    ctx.fillText(room.name, labelX, labelY);
+    ctx.fillText(room.name, labelX, labelY + 12);
   }
 }
 
@@ -258,13 +302,21 @@ function drawRoom3D(ctx, room, colors, routeState, showLabels = true, extrusion 
 
     if (width > 64 && height > 28) {
       ctx.fillStyle = colors.label;
+      ctx.font = "700 12px Inter, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(
+        roomIconSymbol(room),
+        roomBounds.minX + width / 2 + extrusion * 0.5,
+        roomBounds.minY + height / 2 - extrusion * 0.5 - 10,
+      );
       ctx.font = "600 12px Inter, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.fillText(
         room.name,
         roomBounds.minX + width / 2 + extrusion * 0.5,
-        roomBounds.minY + height / 2 - extrusion * 0.5,
+        roomBounds.minY + height / 2 - extrusion * 0.5 + 12,
       );
     }
   }
@@ -349,7 +401,7 @@ export default function IndoorCanvas({
   const [geoFrame, setGeoFrame] = useState({ left: 0, top: 0, width: 0, height: 0 });
 
   const indoorMap = useMemo(() => buildCanonicalIndoorMap(floorData), [floorData]);
-  const floorBounds = useMemo(() => getFloorBounds(floorData), [floorData]);
+  const floorBounds = useMemo(() => getFloorBounds(floorData, indoorMap.rooms), [floorData, indoorMap.rooms]);
   const resolvedOverlayBounds = overlayBounds || getIndoorOverlayBounds(floorData);
   const mapElements = indoorMap.raw.elements;
   const projectionBridge = useMemo(() => {

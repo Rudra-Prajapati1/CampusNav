@@ -5,6 +5,7 @@ import {
   Building2,
   ChevronDown,
   Edit3,
+  ImagePlus,
   Layers,
   MapPin,
   Plus,
@@ -15,6 +16,60 @@ import {
 import toast from "react-hot-toast";
 import { getIndustry, INDUSTRY_TYPES, resolvePoiIcon } from "../../config/poiTypes.js";
 import { api } from "../../utils/api.js";
+import { uploadFile } from "../../utils/supabase.js";
+
+const FLOOR_PLAN_BUCKET =
+  import.meta.env.VITE_SUPABASE_FLOOR_PLAN_BUCKET || "floor-plans";
+
+async function getImageDimensions(file) {
+  if (!file?.type?.startsWith("image/")) {
+    return { width: null, height: null };
+  }
+
+  const objectUrl = URL.createObjectURL(file);
+
+  try {
+    const dimensions = await new Promise((resolve, reject) => {
+      const image = new Image();
+      image.onload = () =>
+        resolve({
+          width: image.naturalWidth,
+          height: image.naturalHeight,
+        });
+      image.onerror = reject;
+      image.src = objectUrl;
+    });
+
+    return dimensions;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+function buildFloorPlanPath(buildingId, file, index = 0) {
+  const extension = file.name.includes(".")
+    ? file.name.slice(file.name.lastIndexOf("."))
+    : ".png";
+  const safeName = file.name
+    .replace(/\.[^.]+$/, "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+
+  return `buildings/${buildingId}/floor-plans/${Date.now()}-${index}-${safeName || "floor"}${extension}`;
+}
+
+function floorNameFromFile(file, fallbackLevel = 0) {
+  const base = file?.name?.replace(/\.[^.]+$/, "")?.trim();
+  if (base) {
+    return base
+      .replace(/[_-]+/g, " ")
+      .replace(/\b\w/g, (char) => char.toUpperCase());
+  }
+
+  return fallbackLevel === 0 ? "Ground Floor" : `Floor ${fallbackLevel}`;
+}
 
 function formatDate(dateValue) {
   if (!dateValue) return "Not available";
@@ -187,11 +242,12 @@ function BuildingModal({ building, onClose, onSave }) {
   );
 }
 
-function FloorModal({ floor, buildingId, onClose, onSave }) {
+function FloorModal({ floor, buildingId, bulk = false, onClose, onSave }) {
   const [form, setForm] = useState({
     name: floor?.name || "",
     level: floor?.level ?? 0,
   });
+  const [files, setFiles] = useState([]);
   const [saving, setSaving] = useState(false);
 
   const handleSubmit = async (event) => {
@@ -201,11 +257,63 @@ function FloorModal({ floor, buildingId, onClose, onSave }) {
     setSaving(true);
     try {
       if (floor) {
-        await api.floors.update(floor.id, form);
+        let payload = { ...form };
+
+        if (files.length > 0) {
+          const file = files[0];
+          const path = buildFloorPlanPath(buildingId, file);
+          const url = await uploadFile(FLOOR_PLAN_BUCKET, path, file);
+          const dimensions = await getImageDimensions(file);
+          payload = {
+            ...payload,
+            floor_plan_url: url,
+            floor_plan_width: dimensions.width,
+            floor_plan_height: dimensions.height,
+          };
+        }
+
+        await api.floors.update(floor.id, payload);
         toast.success("Floor updated");
       } else {
-        await api.floors.create({ ...form, building_id: buildingId });
-        toast.success("Floor created");
+        if (files.length > 1 || bulk) {
+          if (files.length === 0) {
+            throw new Error("Select one or more floor plans to import.");
+          }
+
+          await Promise.all(
+            files.map(async (file, index) => {
+              const path = buildFloorPlanPath(buildingId, file, index);
+              const url = await uploadFile(FLOOR_PLAN_BUCKET, path, file, true);
+              const dimensions = await getImageDimensions(file);
+              await api.floors.create({
+                building_id: buildingId,
+                name: floorNameFromFile(file, form.level + index),
+                level: form.level + index,
+                floor_plan_url: url,
+                floor_plan_width: dimensions.width,
+                floor_plan_height: dimensions.height,
+              });
+            }),
+          );
+          toast.success(`${files.length} floor plans imported`);
+        } else {
+          let payload = { ...form, building_id: buildingId };
+          if (files.length === 1) {
+            const file = files[0];
+            const path = buildFloorPlanPath(buildingId, file);
+            const url = await uploadFile(FLOOR_PLAN_BUCKET, path, file);
+            const dimensions = await getImageDimensions(file);
+            payload = {
+              ...payload,
+              floor_plan_url: url,
+              floor_plan_width: dimensions.width,
+              floor_plan_height: dimensions.height,
+            };
+          }
+
+          await api.floors.create(payload);
+          toast.success("Floor created");
+        }
       }
       onSave();
     } catch (error) {
@@ -216,22 +324,36 @@ function FloorModal({ floor, buildingId, onClose, onSave }) {
   };
 
   return (
-    <ModalShell title={floor ? "Edit Floor" : "Add Floor"} onClose={onClose} width="max-w-lg">
+    <ModalShell
+      title={
+        floor
+          ? "Edit Floor"
+          : bulk
+            ? "Import Floor Plans"
+            : "Add Floor"
+      }
+      onClose={onClose}
+      width="max-w-xl"
+    >
       <form onSubmit={handleSubmit}>
-        <div>
-          <label className="field-label">Floor Name</label>
-          <input
-            className="input"
-            value={form.name}
-            onChange={(event) =>
-              setForm((current) => ({ ...current, name: event.target.value }))
-            }
-            placeholder="Ground Floor"
-            required
-          />
-        </div>
+        {!bulk && (
+          <div>
+            <label className="field-label">Floor Name</label>
+            <input
+              className="input"
+              value={form.name}
+              onChange={(event) =>
+                setForm((current) => ({ ...current, name: event.target.value }))
+              }
+              placeholder="Ground Floor"
+              required
+            />
+          </div>
+        )}
         <div className="mt-4">
-          <label className="field-label">Level</label>
+          <label className="field-label">
+            {bulk ? "Starting Level" : "Level"}
+          </label>
           <input
             className="input"
             type="number"
@@ -244,16 +366,63 @@ function FloorModal({ floor, buildingId, onClose, onSave }) {
             }
           />
           <p className="mt-2 text-sm subtle-text">
-            Use `0` for ground level, `1` for first floor, and negative values
-            for basements.
+            {bulk
+              ? "Imported floor plans will be created in sequence starting from this level."
+              : "Use `0` for ground level, `1` for first floor, and negative values for basements."}
           </p>
+        </div>
+        <div className="mt-4">
+          <label className="field-label">
+            {floor ? "Replace Floor Plan" : bulk ? "Floor Plans" : "Floor Plan"}
+          </label>
+          <input
+            className="input"
+            type="file"
+            accept="image/*"
+            multiple={!floor}
+            onChange={(event) => setFiles(Array.from(event.target.files || []))}
+          />
+          <p className="mt-2 text-sm subtle-text">
+            {bulk
+              ? "Select multiple images to create several floors in one pass. Each file becomes a draft floor."
+              : "Upload the floor map now so it is ready for alignment and editing in the map editor."}
+          </p>
+          {files.length > 0 && (
+            <div className="mt-3 rounded-xl border border-default bg-surface-alt px-4 py-3 text-sm text-secondary">
+              {files.length === 1 ? (
+                <span>{files[0].name}</span>
+              ) : (
+                <div className="space-y-1">
+                  <div className="font-medium text-primary">
+                    {files.length} floor plans selected
+                  </div>
+                  <div className="max-h-32 overflow-y-auto">
+                    {files.map((file) => (
+                      <div key={file.name}>{file.name}</div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+          {floor?.floor_plan_url && files.length === 0 && (
+            <div className="mt-3 rounded-xl border border-default bg-surface-alt px-4 py-3 text-sm text-secondary">
+              Existing floor plan is attached and will remain unchanged unless you upload a replacement.
+            </div>
+          )}
         </div>
         <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
           <button type="button" onClick={onClose} className="btn-secondary">
             Cancel
           </button>
           <button type="submit" disabled={saving} className="btn-primary">
-            {saving ? "Saving..." : floor ? "Save Floor" : "Create Floor"}
+            {saving
+              ? "Saving..."
+              : floor
+                ? "Save Floor"
+                : bulk
+                  ? "Import Floors"
+                  : "Create Floor"}
           </button>
         </div>
       </form>
@@ -540,6 +709,15 @@ export default function AdminBuildings() {
                       <Plus className="h-4 w-4" />
                       Add Floor
                     </button>
+                    <button
+                      onClick={() =>
+                        setModal({ type: "floor", buildingId: building.id, bulk: true })
+                      }
+                      className="btn-secondary"
+                    >
+                      <ImagePlus className="h-4 w-4" />
+                      Import Floor Plans
+                    </button>
                   </div>
 
                   {floors.length === 0 ? (
@@ -630,6 +808,7 @@ export default function AdminBuildings() {
         <FloorModal
           floor={modal.floor || null}
           buildingId={modal.buildingId}
+          bulk={Boolean(modal.bulk)}
           onClose={closeModal}
           onSave={async () => {
             const buildingId = modal.buildingId;

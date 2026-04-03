@@ -201,8 +201,12 @@ export default function MapLibreNavigationMap({
   const userMarkerRef = useRef(null);
   const [mapReady, setMapReady] = useState(false);
   const [mapBridge, setMapBridge] = useState(null);
+  const [mapZoom, setMapZoom] = useState(17);
 
   const shouldUseMapOverlay = Boolean(hasGeoAnchor);
+  const autoIndoorReveal = shouldUseMapOverlay && mapZoom >= 18.15;
+  const indoorVisible =
+    mode === "indoor" || autoIndoorReveal || (!entranceCenter && floorData);
   const floorImageUrl =
     floorData?.floor_plan_url ||
     floorData?.map_data?.floors?.find((entry) => entry.id === floorData?.id)?.backgroundDataUrl ||
@@ -228,12 +232,17 @@ export default function MapLibreNavigationMap({
     map.on("load", () => {
       setMapReady(true);
       setMapBridge(mapLibreAdapter.buildProjectionBridge(map));
+       setMapZoom(map.getZoom());
       ensure3DBuildings(map);
     });
+
+    const syncViewport = () => setMapZoom(map.getZoom());
+    map.on("move", syncViewport);
 
     mapRef.current = map;
 
     return () => {
+      map.off("move", syncViewport);
       entranceMarkerRef.current?.remove();
       entranceMarkerRef.current = null;
       userMarkerRef.current?.remove();
@@ -346,7 +355,7 @@ export default function MapLibreNavigationMap({
     if (!mapReady || !map) return;
 
     const visible =
-      mode === "indoor" &&
+      indoorVisible &&
       shouldUseMapOverlay &&
       Boolean(currentOverlayBounds) &&
       Boolean(floorImageUrl);
@@ -361,7 +370,7 @@ export default function MapLibreNavigationMap({
     currentOverlayBounds,
     floorImageUrl,
     mapReady,
-    mode,
+    indoorVisible,
     shouldUseMapOverlay,
   ]);
 
@@ -477,16 +486,16 @@ export default function MapLibreNavigationMap({
       <div
         className="absolute inset-0"
         style={{
-          zIndex: mode === "indoor" ? 10 : -1,
+          zIndex: indoorVisible ? 10 : -1,
           pointerEvents:
-            mode !== "indoor"
+            !indoorVisible
               ? "none"
               : shouldUseMapOverlay
                 ? roomPickTarget
                   ? "auto"
                   : "none"
                 : "auto",
-          opacity: mode === "indoor" ? (overlayVisible ? 1 : 0) : 0,
+          opacity: indoorVisible ? (overlayVisible || autoIndoorReveal ? 1 : 0) : 0,
           transition: "opacity 0.3s ease-out, z-index 0s",
           mixBlendMode: shouldUseMapOverlay ? "multiply" : "normal",
         }}

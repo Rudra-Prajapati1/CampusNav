@@ -11,13 +11,18 @@ import { v4 as uuidv4 } from "uuid";
 import toast from "react-hot-toast";
 import {
   Accessibility,
+  ArrowDown,
+  ArrowUp,
   Check,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   DoorOpen,
   Download,
   Eye,
   EyeOff,
   GitBranch,
+  GripVertical,
   HelpCircle,
   ImagePlus,
   Import,
@@ -51,9 +56,39 @@ const MIN_ZOOM = 0.25;
 const MAX_ZOOM = 6;
 const MIN_SIZE = 24;
 const LINK_DIST = 48;
+const PATH_LINK_DIST = 26;
+const LEFT_PANEL_COLLAPSE = 84;
+const LEFT_PANEL_MIN = 188;
+const LEFT_PANEL_MAX = 340;
 const WAYPOINTS = ["junction", "entrance", "destination"];
 const TRANSITIONS = ["none", "stairs", "elevator"];
 const ROOM_ALIASES = { toilet: "restroom", staircase: "stairs" };
+const REORDERABLE_KINDS = new Set(["room", "door", "beacon"]);
+const DEFAULT_LAYER_INDEX = {
+  room: 100,
+  door: 200,
+  beacon: 300,
+  waypoint: 900,
+  path: 1000,
+};
+const SHAPE_PRESETS = [
+  { id: "rectangle", label: "Rectangle" },
+  { id: "pill", label: "Pill" },
+  { id: "diamond", label: "Diamond" },
+  { id: "stadium", label: "Stadium" },
+  { id: "hex", label: "Hex" },
+];
+const ICON_PRESETS = [
+  { id: "auto", label: "Auto" },
+  { id: "stairs", label: "Stairs" },
+  { id: "elevator", label: "Elevator" },
+  { id: "restroom", label: "Restroom" },
+  { id: "food", label: "Food" },
+  { id: "parking", label: "Parking" },
+  { id: "exit", label: "Exit" },
+  { id: "office", label: "Office" },
+  { id: "info", label: "Info" },
+];
 
 const TOOLS = [
   { group: "Draw", id: "room", label: "Room", key: "R", icon: RectangleHorizontal },
@@ -78,6 +113,21 @@ const slugify = (value) =>
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "") || "custom";
 const dist = (a, b) => Math.hypot((a.x || 0) - (b.x || 0), (a.y || 0) - (b.y || 0));
+
+function estimatedOverlayBoundsFromEntrance(building) {
+  const lat = Number.parseFloat(building?.entrance_lat);
+  const lng = Number.parseFloat(building?.entrance_lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+  const latSpan = 0.00018;
+  const lngSpan = 0.00018;
+  return {
+    north: (lat + latSpan).toFixed(6),
+    south: (lat - latSpan).toFixed(6),
+    east: (lng + lngSpan).toFixed(6),
+    west: (lng - lngSpan).toFixed(6),
+  };
+}
 
 function pointInPoly(point, points) {
   let inside = false;
@@ -157,6 +207,195 @@ function getBounds(element) {
 function roomCenter(room) {
   const box = getBounds(room);
   return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+}
+
+function normalizeLayerIndex(kind, value) {
+  const parsed = Number.parseFloat(value);
+  if (Number.isFinite(parsed)) return parsed;
+  return DEFAULT_LAYER_INDEX[kind] || 100;
+}
+
+function elementSortWeight(element) {
+  if (element.kind === "path") return 20000 + normalizeLayerIndex(element.kind, element.layerIndex);
+  if (element.kind === "waypoint") return 19000 + normalizeLayerIndex(element.kind, element.layerIndex);
+  return normalizeLayerIndex(element.kind, element.layerIndex);
+}
+
+function renderSort(left, right) {
+  return elementSortWeight(left) - elementSortWeight(right);
+}
+
+function layerListSort(left, right) {
+  return elementSortWeight(right) - elementSortWeight(left);
+}
+
+function defaultShapePresetForType(typeId) {
+  if (typeId === "stairs") return "diamond";
+  if (typeId === "elevator") return "hex";
+  if (typeId === "restroom") return "pill";
+  if (typeId === "parking") return "stadium";
+  if (typeId === "emergency_exit") return "diamond";
+  return "rectangle";
+}
+
+function defaultIconPresetForType(typeId) {
+  if (!typeId) return "auto";
+  if (typeId.includes("restroom")) return "restroom";
+  if (typeId.includes("food") || typeId.includes("caf") || typeId.includes("restaurant")) {
+    return "food";
+  }
+  if (typeId.includes("parking")) return "parking";
+  if (typeId.includes("exit")) return "exit";
+  if (typeId.includes("elevator")) return "elevator";
+  if (typeId.includes("stairs") || typeId.includes("escalator")) return "stairs";
+  if (typeId.includes("office") || typeId.includes("meeting") || typeId.includes("cabin")) {
+    return "office";
+  }
+  if (typeId.includes("info") || typeId.includes("reception")) return "info";
+  return "auto";
+}
+
+function roomIconSymbol(room, industryId) {
+  const resolvedType = resolvedRoomType(room);
+  const iconPreset = room.iconPreset && room.iconPreset !== "auto"
+    ? room.iconPreset
+    : defaultIconPresetForType(resolvedType);
+
+  const symbolMap = {
+    stairs: "⇅",
+    elevator: "⇳",
+    restroom: "WC",
+    food: "☕",
+    parking: "P",
+    exit: "EXIT",
+    office: "OF",
+    info: "i",
+  };
+
+  if (symbolMap[iconPreset]) return symbolMap[iconPreset];
+
+  const meta = getRoomTypeMeta(industryId, resolvedType);
+  if (meta?.navRole === "stairs") return symbolMap.stairs;
+  if (meta?.navRole === "elevator") return symbolMap.elevator;
+
+  return room.name
+    ? room.name
+        .split(/\s+/)
+        .slice(0, 2)
+        .map((part) => part[0])
+        .join("")
+        .toUpperCase()
+    : roomLabel(room, industryId)
+        .split(/\s+/)
+        .slice(0, 2)
+        .map((part) => part[0])
+        .join("")
+        .toUpperCase();
+}
+
+function rectPoints(room) {
+  return [
+    { x: room.x, y: room.y },
+    { x: room.x + room.width, y: room.y },
+    { x: room.x + room.width, y: room.y + room.height },
+    { x: room.x, y: room.y + room.height },
+  ];
+}
+
+function roomPolygon(room) {
+  if (room.shape === "polygon" && room.points?.length >= 3) return room.points;
+  if (room.shapePreset === "diamond") {
+    return [
+      { x: room.x + room.width / 2, y: room.y },
+      { x: room.x + room.width, y: room.y + room.height / 2 },
+      { x: room.x + room.width / 2, y: room.y + room.height },
+      { x: room.x, y: room.y + room.height / 2 },
+    ];
+  }
+  if (room.shapePreset === "hex") {
+    const inset = room.width * 0.16;
+    return [
+      { x: room.x + inset, y: room.y },
+      { x: room.x + room.width - inset, y: room.y },
+      { x: room.x + room.width, y: room.y + room.height / 2 },
+      { x: room.x + room.width - inset, y: room.y + room.height },
+      { x: room.x + inset, y: room.y + room.height },
+      { x: room.x, y: room.y + room.height / 2 },
+    ];
+  }
+  return rectPoints(room);
+}
+
+function drawRoomPath(ctx, room) {
+  if (room.shape === "polygon" && room.points?.length >= 3) {
+    ctx.beginPath();
+    ctx.moveTo(room.points[0].x, room.points[0].y);
+    room.points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
+    ctx.closePath();
+    return;
+  }
+
+  if (room.shapePreset === "diamond" || room.shapePreset === "hex") {
+    const points = roomPolygon(room);
+    ctx.beginPath();
+    ctx.moveTo(points[0].x, points[0].y);
+    points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
+    ctx.closePath();
+    return;
+  }
+
+  if (room.shapePreset === "pill" || room.shapePreset === "stadium") {
+    ctx.beginPath();
+    ctx.roundRect(room.x, room.y, room.width, room.height, Math.min(room.height / 2, 28));
+    return;
+  }
+
+  ctx.beginPath();
+  ctx.roundRect(room.x, room.y, room.width, room.height, room.shapePreset === "rectangle" ? 10 : 14);
+}
+
+function roomCenterFromShape(room) {
+  if (room.shape === "polygon" && room.points?.length >= 3) {
+    const box = boundsFromPoints(room.points);
+    return { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 };
+  }
+  return roomCenter(room);
+}
+
+function createRoomDoorPosition(room, edge = "right", offset = 0.5) {
+  const safeOffset = clamp(offset, 0.05, 0.95);
+  if (edge === "left") {
+    return { x: room.x, y: room.y + room.height * safeOffset };
+  }
+  if (edge === "top") {
+    return { x: room.x + room.width * safeOffset, y: room.y };
+  }
+  if (edge === "bottom") {
+    return { x: room.x + room.width * safeOffset, y: room.y + room.height };
+  }
+  return { x: room.x + room.width, y: room.y + room.height * safeOffset };
+}
+
+function edgeOffsetFromPoint(room, point) {
+  const distances = [
+    { edge: "left", value: Math.abs(point.x - room.x) },
+    { edge: "right", value: Math.abs(point.x - (room.x + room.width)) },
+    { edge: "top", value: Math.abs(point.y - room.y) },
+    { edge: "bottom", value: Math.abs(point.y - (room.y + room.height)) },
+  ].sort((left, right) => left.value - right.value);
+  const edge = distances[0]?.edge || "right";
+
+  if (edge === "left" || edge === "right") {
+    return {
+      edge,
+      offset: clamp((point.y - room.y) / Math.max(room.height, 1), 0.05, 0.95),
+    };
+  }
+
+  return {
+    edge,
+    offset: clamp((point.x - room.x) / Math.max(room.width, 1), 0.05, 0.95),
+  };
 }
 
 function handlePoints(element) {
@@ -318,6 +557,13 @@ function normalizeElement(element, industryId) {
       color: element.color || "",
       wheelchairAccessible: Boolean(element.wheelchairAccessible),
       publicAccess: element.publicAccess ?? true,
+      shapePreset:
+        element.shapePreset ||
+        defaultShapePresetForType(typeState.roomType === "custom" ? typeState.customValue : typeState.roomType),
+      iconPreset:
+        element.iconPreset ||
+        defaultIconPresetForType(typeState.roomType === "custom" ? typeState.customValue : typeState.roomType),
+      layerIndex: normalizeLayerIndex("room", element.layerIndex),
     };
   }
   if (kind === "door") {
@@ -332,6 +578,14 @@ function normalizeElement(element, industryId) {
       widthMeters: element.widthMeters || element.width_meters || "",
       accessible: Boolean(element.accessible),
       locked: Boolean(element.locked),
+      roomId: element.roomId || element.room_id || null,
+      edge: element.edge || "right",
+      offset: Number.isFinite(Number.parseFloat(element.offset))
+        ? Number.parseFloat(element.offset)
+        : 0.5,
+      routingAnchor: element.routingAnchor ?? true,
+      linkedWaypointId: element.linkedWaypointId || element.linked_waypoint_id || null,
+      layerIndex: normalizeLayerIndex("door", element.layerIndex),
     };
   }
   if (kind === "waypoint") {
@@ -357,6 +611,18 @@ function normalizeElement(element, industryId) {
         element.linkedFloorId || element.linkedFloor || element.linked_floor_id || null,
       description: element.description || "",
       customWaypointLabel: element.customWaypointLabel || "",
+      linkedRoomId: element.linkedRoomId || element.linked_room_id || null,
+      linkedDoorId: element.linkedDoorId || element.linked_door_id || null,
+      isAutoRoomWaypoint: Boolean(element.isAutoRoomWaypoint),
+      roomRatioX:
+        Number.isFinite(Number.parseFloat(element.roomRatioX))
+          ? Number.parseFloat(element.roomRatioX)
+          : 0.5,
+      roomRatioY:
+        Number.isFinite(Number.parseFloat(element.roomRatioY))
+          ? Number.parseFloat(element.roomRatioY)
+          : 0.5,
+      layerIndex: normalizeLayerIndex("waypoint", element.layerIndex),
     };
   }
   if (kind === "beacon") {
@@ -371,6 +637,7 @@ function normalizeElement(element, industryId) {
       radiusMeters: element.radiusMeters ?? element.radius_meters ?? 2.5,
       txPower: element.txPower ?? element.tx_power ?? -59,
       notes: element.notes || "",
+      layerIndex: normalizeLayerIndex("beacon", element.layerIndex),
     };
   }
   if (kind === "path") {
@@ -383,6 +650,7 @@ function normalizeElement(element, industryId) {
       accessible: Boolean(element.accessible),
       name: element.name || "",
       staffOnly: Boolean(element.staffOnly),
+      layerIndex: normalizeLayerIndex("path", element.layerIndex),
     };
   }
   return null;
@@ -665,6 +933,9 @@ function serialize(model, bgImage, industryId) {
                 color: element.color,
                 wheelchairAccessible: Boolean(element.wheelchairAccessible),
                 publicAccess: element.publicAccess ?? true,
+                shapePreset: element.shapePreset,
+                iconPreset: element.iconPreset,
+                layerIndex: normalizeLayerIndex("room", element.layerIndex),
               };
             }
             if (element.kind === "door") {
@@ -672,6 +943,12 @@ function serialize(model, bgImage, industryId) {
                 ...element,
                 widthMeters:
                   element.widthMeters === "" ? "" : Number.parseFloat(element.widthMeters) || "",
+                roomId: element.roomId || null,
+                edge: element.edge || "right",
+                offset: Number.parseFloat(element.offset) || 0.5,
+                routingAnchor: element.routingAnchor ?? true,
+                linkedWaypointId: element.linkedWaypointId || null,
+                layerIndex: normalizeLayerIndex("door", element.layerIndex),
               };
             }
             if (element.kind === "waypoint") {
@@ -686,6 +963,12 @@ function serialize(model, bgImage, industryId) {
                 transitionType: element.transitionType,
                 linkedFloorId: element.linkedFloorId,
                 customWaypointLabel: element.customWaypointLabel,
+                linkedRoomId: element.linkedRoomId || null,
+                linkedDoorId: element.linkedDoorId || null,
+                isAutoRoomWaypoint: Boolean(element.isAutoRoomWaypoint),
+                roomRatioX: element.roomRatioX ?? 0.5,
+                roomRatioY: element.roomRatioY ?? 0.5,
+                layerIndex: normalizeLayerIndex("waypoint", element.layerIndex),
               };
             }
             if (element.kind === "beacon") {
@@ -702,9 +985,13 @@ function serialize(model, bgImage, industryId) {
                 txPower:
                   element.txPower === "" ? "" : Number.parseFloat(element.txPower) || -59,
                 notes: element.notes || "",
+                layerIndex: normalizeLayerIndex("beacon", element.layerIndex),
               };
             }
-            return element;
+            return {
+              ...element,
+              layerIndex: normalizeLayerIndex(element.kind, element.layerIndex),
+            };
           }),
         },
       ],
@@ -739,6 +1026,12 @@ function autoPack(elements, industryId) {
       transitionType: meta?.navRole || "none",
       linkedFloorId: null,
       description: "",
+      linkedRoomId: room.id,
+      linkedDoorId: door?.id || null,
+      isAutoRoomWaypoint: true,
+      roomRatioX: (anchor.x - box.x) / Math.max(box.width, 1),
+      roomRatioY: (anchor.y - box.y) / Math.max(box.height, 1),
+      layerIndex: normalizeLayerIndex("waypoint"),
     };
   });
   const paths = [];
@@ -766,15 +1059,195 @@ function autoPack(elements, industryId) {
       bidirectional: true,
       accessible: false,
       name: "",
+      layerIndex: normalizeLayerIndex("path"),
     });
   }
   return { waypoints, paths };
+}
+
+function normalizeModelLinks(model) {
+  const roomsById = new Map(
+    model.elements
+      .filter((element) => element.kind === "room")
+      .map((room) => [room.id, room]),
+  );
+  const waypointsById = new Map(
+    model.elements
+      .filter((element) => element.kind === "waypoint")
+      .map((waypoint) => [waypoint.id, waypoint]),
+  );
+
+  model.elements.forEach((element) => {
+    element.layerIndex = normalizeLayerIndex(element.kind, element.layerIndex);
+    if (element.kind === "room") {
+      element.shapePreset =
+        element.shapePreset || defaultShapePresetForType(resolvedRoomType(element));
+      element.iconPreset =
+        element.iconPreset || defaultIconPresetForType(resolvedRoomType(element));
+    }
+  });
+
+  model.elements
+    .filter((element) => element.kind === "door" && element.roomId)
+    .forEach((door) => {
+      const room = roomsById.get(door.roomId);
+      if (!room) return;
+      const anchor = createRoomDoorPosition(room, door.edge, door.offset);
+      door.x = anchor.x;
+      door.y = anchor.y;
+
+      if (door.routingAnchor && door.linkedWaypointId) {
+        const linkedWaypoint = waypointsById.get(door.linkedWaypointId);
+        if (linkedWaypoint) {
+          linkedWaypoint.x = anchor.x;
+          linkedWaypoint.y = anchor.y;
+          linkedWaypoint.linkedRoomId = room.id;
+          linkedWaypoint.linkedDoorId = door.id;
+          if (!linkedWaypoint.name || linkedWaypoint.name.includes("Door")) {
+            linkedWaypoint.name = `${room.name || "Room"} Door`;
+          }
+        }
+      }
+    });
+
+  model.elements
+    .filter(
+      (element) =>
+        element.kind === "waypoint" &&
+        element.linkedRoomId &&
+        element.isAutoRoomWaypoint &&
+        !element.linkedDoorId,
+    )
+    .forEach((waypoint) => {
+      const room = roomsById.get(waypoint.linkedRoomId);
+      if (!room) return;
+      waypoint.x =
+        room.x + room.width * clamp(waypoint.roomRatioX ?? 0.5, 0.08, 0.92);
+      waypoint.y =
+        room.y + room.height * clamp(waypoint.roomRatioY ?? 0.5, 0.08, 0.92);
+      if (!waypoint.name || waypoint.isAutoRoomWaypoint) {
+        waypoint.name = room.name || "Room Anchor";
+      }
+    });
+
+  return model;
+}
+
+function createRoomWaypoint(room, industryId) {
+  const meta = getRoomTypeMeta(industryId, resolvedRoomType(room));
+  return {
+    id: uuidv4(),
+    kind: "waypoint",
+    type: "waypoint",
+    x: room.x + room.width / 2,
+    y: room.y + room.height / 2,
+    name: room.name || roomLabel(room, industryId),
+    waypointType: meta?.navRole ? "junction" : "destination",
+    transitionType: meta?.navRole || "none",
+    linkedFloorId: null,
+    description: "",
+    customWaypointLabel: "",
+    linkedRoomId: room.id,
+    linkedDoorId: null,
+    isAutoRoomWaypoint: true,
+    roomRatioX: 0.5,
+    roomRatioY: 0.5,
+    layerIndex: normalizeLayerIndex("waypoint"),
+  };
+}
+
+function createManagedDoor(room, index = 0) {
+  const edge = index % 2 === 0 ? "right" : "bottom";
+  const offset = index % 2 === 0 ? 0.5 : 0.35;
+  const anchor = createRoomDoorPosition(room, edge, offset);
+  const doorId = uuidv4();
+  const waypointId = uuidv4();
+
+  return {
+    door: {
+      id: doorId,
+      kind: "door",
+      type: "door",
+      x: anchor.x,
+      y: anchor.y,
+      name: `Door ${index + 1}`,
+      doorType: "main_entrance",
+      widthMeters: "",
+      accessible: false,
+      locked: false,
+      roomId: room.id,
+      edge,
+      offset,
+      routingAnchor: true,
+      linkedWaypointId: waypointId,
+      layerIndex: normalizeLayerIndex("door"),
+    },
+    waypoint: {
+      id: waypointId,
+      kind: "waypoint",
+      type: "waypoint",
+      x: anchor.x,
+      y: anchor.y,
+      name: `${room.name || "Room"} Door`,
+      waypointType: "junction",
+      transitionType: "none",
+      linkedFloorId: null,
+      description: "",
+      customWaypointLabel: "",
+      linkedRoomId: room.id,
+      linkedDoorId: doorId,
+      isAutoRoomWaypoint: false,
+      roomRatioX: 0.5,
+      roomRatioY: 0.5,
+      layerIndex: normalizeLayerIndex("waypoint"),
+    },
+  };
+}
+
+function pathAnchorForPoint(point, elements) {
+  const candidates = elements.filter((element) => element.kind === "waypoint");
+  let best = null;
+  let bestDistance = Infinity;
+
+  candidates.forEach((candidate) => {
+    const value = dist(point, candidate);
+    if (value < bestDistance) {
+      bestDistance = value;
+      best = candidate;
+    }
+  });
+
+  return bestDistance <= PATH_LINK_DIST ? best : null;
+}
+
+function reorderElements(elements, dragId, targetId) {
+  const orderable = elements
+    .filter((element) => REORDERABLE_KINDS.has(element.kind))
+    .sort((left, right) => normalizeLayerIndex(left.kind, left.layerIndex) - normalizeLayerIndex(right.kind, right.layerIndex));
+
+  const dragIndex = orderable.findIndex((element) => element.id === dragId);
+  const targetIndex = orderable.findIndex((element) => element.id === targetId);
+  if (dragIndex === -1 || targetIndex === -1 || dragIndex === targetIndex) return elements;
+
+  const [dragged] = orderable.splice(dragIndex, 1);
+  orderable.splice(targetIndex, 0, dragged);
+
+  const nextLayerMap = new Map(
+    orderable.map((element, index) => [element.id, 100 + index * 20]),
+  );
+
+  return elements.map((element) =>
+    nextLayerMap.has(element.id)
+      ? { ...element, layerIndex: nextLayerMap.get(element.id) }
+      : element,
+  );
 }
 
 const MapEditor = forwardRef(function MapEditor(
   {
     floorData,
     floors = [],
+    building = null,
     buildingIndustry = DEFAULT_INDUSTRY,
     onSave,
     onStateChange,
@@ -788,6 +1261,7 @@ const MapEditor = forwardRef(function MapEditor(
   const bgInputRef = useRef(null);
   const jsonInputRef = useRef(null);
   const actionRef = useRef(null);
+  const panelResizeRef = useRef(null);
   const historyRef = useRef([]);
   const futureRef = useRef([]);
   const didFitRef = useRef(false);
@@ -813,6 +1287,9 @@ const MapEditor = forwardRef(function MapEditor(
   const [redoCount, setRedoCount] = useState(0);
   const [showHelpPanel, setShowHelpPanel] = useState(false);
   const [hiddenIds, setHiddenIds] = useState({});
+  const [leftPanelWidth, setLeftPanelWidth] = useState(220);
+  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);
+  const [draggedLayerId, setDraggedLayerId] = useState(null);
   const [sections, setSections] = useState({
     draw: true,
     edit: true,
@@ -829,7 +1306,10 @@ const MapEditor = forwardRef(function MapEditor(
   }, [buildingIndustry, typeSearch]);
 
   const visibleElements = useMemo(
-    () => model.elements.filter((element) => !hiddenIds[element.id]),
+    () =>
+      model.elements
+        .filter((element) => !hiddenIds[element.id])
+        .sort(renderSort),
     [hiddenIds, model.elements],
   );
 
@@ -837,8 +1317,8 @@ const MapEditor = forwardRef(function MapEditor(
 
   useEffect(() => {
     const next = modelFromFloor(floorData, buildingIndustry);
-    modelRef.current = next;
-    setModel(next);
+    modelRef.current = normalizeModelLinks(next);
+    setModel(normalizeModelLinks(next));
     setSelectionId(null);
     setTool("select");
     setShape("rect");
@@ -851,6 +1331,9 @@ const MapEditor = forwardRef(function MapEditor(
     setDirty(false);
     setShowHelpPanel(false);
     setHiddenIds({});
+    setLeftPanelWidth(220);
+    setLeftPanelCollapsed(false);
+    setDraggedLayerId(null);
     historyRef.current = [];
     futureRef.current = [];
     setUndoCount(0);
@@ -861,6 +1344,31 @@ const MapEditor = forwardRef(function MapEditor(
   useEffect(() => {
     modelRef.current = model;
   }, [model]);
+
+  useEffect(() => {
+    function handlePointerMove(event) {
+      if (!panelResizeRef.current || window.innerWidth <= 900) return;
+      const nextWidth = clamp(event.clientX, LEFT_PANEL_COLLAPSE, LEFT_PANEL_MAX);
+      if (nextWidth <= LEFT_PANEL_COLLAPSE) {
+        setLeftPanelCollapsed(true);
+        setLeftPanelWidth(LEFT_PANEL_MIN);
+        return;
+      }
+      setLeftPanelCollapsed(false);
+      setLeftPanelWidth(clamp(nextWidth, LEFT_PANEL_MIN, LEFT_PANEL_MAX));
+    }
+
+    function handlePointerUp() {
+      panelResizeRef.current = null;
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerUp);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerUp);
+    };
+  }, []);
 
   useEffect(() => {
     if (selectionId && hiddenIds[selectionId]) {
@@ -900,14 +1408,15 @@ const MapEditor = forwardRef(function MapEditor(
   }, []);
 
   function commit(next, track = true) {
+    const normalizedNext = normalizeModelLinks(next);
     if (track) {
       historyRef.current = [...historyRef.current, clone(modelRef.current)].slice(-60);
       futureRef.current = [];
       setUndoCount(historyRef.current.length);
       setRedoCount(0);
     }
-    modelRef.current = next;
-    setModel(next);
+    modelRef.current = normalizedNext;
+    setModel(normalizedNext);
     setDirty(true);
   }
 
@@ -932,7 +1441,9 @@ const MapEditor = forwardRef(function MapEditor(
 
   function undo() {
     if (!historyRef.current.length) return;
-    const previous = historyRef.current[historyRef.current.length - 1];
+    const previous = normalizeModelLinks(
+      historyRef.current[historyRef.current.length - 1],
+    );
     historyRef.current = historyRef.current.slice(0, -1);
     futureRef.current = [clone(modelRef.current), ...futureRef.current].slice(0, 60);
     modelRef.current = previous;
@@ -948,8 +1459,8 @@ const MapEditor = forwardRef(function MapEditor(
     const [next, ...rest] = futureRef.current;
     futureRef.current = rest;
     historyRef.current = [...historyRef.current, clone(modelRef.current)].slice(-60);
-    modelRef.current = next;
-    setModel(next);
+    modelRef.current = normalizeModelLinks(next);
+    setModel(normalizeModelLinks(next));
     setSelectionId(null);
     setDirty(true);
     setUndoCount(historyRef.current.length);
@@ -989,7 +1500,29 @@ const MapEditor = forwardRef(function MapEditor(
   function removeSelected(targetId = selectionId) {
     if (!targetId) return;
     mutate((next) => {
-      next.elements = next.elements.filter((element) => element.id !== targetId);
+      const removed = next.elements.find((element) => element.id === targetId);
+      const idsToRemove = new Set([targetId]);
+
+      if (removed?.kind === "room") {
+        next.elements.forEach((element) => {
+          if (
+            (element.kind === "door" && element.roomId === removed.id) ||
+            (element.kind === "waypoint" && element.linkedRoomId === removed.id)
+          ) {
+            idsToRemove.add(element.id);
+          }
+        });
+      }
+
+      if (removed?.kind === "door" && removed.linkedWaypointId) {
+        idsToRemove.add(removed.linkedWaypointId);
+      }
+
+      if (removed?.kind === "waypoint" && removed.linkedDoorId) {
+        idsToRemove.add(removed.linkedDoorId);
+      }
+
+      next.elements = next.elements.filter((element) => !idsToRemove.has(element.id));
     });
     setSelectionId(null);
   }
@@ -1021,6 +1554,19 @@ const MapEditor = forwardRef(function MapEditor(
     }, false);
   }
 
+  function prefillOverlayFromEntrance() {
+    const estimate = estimatedOverlayBoundsFromEntrance(building);
+    if (!estimate) {
+      toast.error("Add building entrance latitude and longitude first.");
+      return;
+    }
+
+    mutate((next) => {
+      next.overlayBounds = estimate;
+    }, false);
+    toast.success("Overlay bounds prefilled from the building entrance.");
+  }
+
   function toggleVisibility(id) {
     setHiddenIds((current) => {
       const next = { ...current };
@@ -1034,8 +1580,34 @@ const MapEditor = forwardRef(function MapEditor(
     setSections((current) => ({ ...current, [id]: !current[id] }));
   }
 
+  function moveLayer(elementId, direction) {
+    mutate((next) => {
+      const ordered = next.elements
+        .filter((element) => REORDERABLE_KINDS.has(element.kind))
+        .sort(
+          (left, right) =>
+            normalizeLayerIndex(left.kind, left.layerIndex) -
+            normalizeLayerIndex(right.kind, right.layerIndex),
+        );
+      const index = ordered.findIndex((element) => element.id === elementId);
+      if (index === -1) return;
+      const targetIndex = clamp(index + direction, 0, ordered.length - 1);
+      if (targetIndex === index) return;
+      const [item] = ordered.splice(index, 1);
+      ordered.splice(targetIndex, 0, item);
+      const nextLayerMap = new Map(
+        ordered.map((element, entryIndex) => [element.id, 100 + entryIndex * 20]),
+      );
+      next.elements = next.elements.map((element) =>
+        nextLayerMap.has(element.id)
+          ? { ...element, layerIndex: nextLayerMap.get(element.id) }
+          : element,
+      );
+    });
+  }
+
   function saveRoom(bounds, points = []) {
-    addElement({
+    const room = {
       id: uuidv4(),
       kind: "room",
       type: shape === "polygon" ? "polygon" : "rect",
@@ -1053,7 +1625,20 @@ const MapEditor = forwardRef(function MapEditor(
       color: "",
       wheelchairAccessible: false,
       publicAccess: true,
+      shapePreset: defaultShapePresetForType(
+        draftType === "custom" ? slugify(draftCustomLabel) : draftType,
+      ),
+      iconPreset: defaultIconPresetForType(
+        draftType === "custom" ? slugify(draftCustomLabel) : draftType,
+      ),
+      layerIndex: normalizeLayerIndex("room"),
+    };
+    const waypoint = createRoomWaypoint(room, buildingIndustry);
+    mutate((next) => {
+      next.elements.push(room, waypoint);
     });
+    setSelectionId(room.id);
+    setShowHelpPanel(false);
   }
 
   function zoomBy(factor, anchor) {
@@ -1210,6 +1795,25 @@ const MapEditor = forwardRef(function MapEditor(
     [cursor, dirty, selected, tool, zoom],
   );
 
+  function finalizePathDraft() {
+    if (pathDraft.length < 2) return false;
+    addElement({
+      id: uuidv4(),
+      kind: "path",
+      type: "path",
+      points: pathDraft,
+      bidirectional: true,
+      accessible: false,
+      name: "",
+      staffOnly: false,
+      layerIndex: normalizeLayerIndex("path"),
+    });
+    setPathDraft([]);
+    setCursor(null);
+    activate("select");
+    return true;
+  }
+
   useEffect(() => {
     const issues = navigationIssues(model);
     if (!onStateChange) return;
@@ -1256,6 +1860,10 @@ const MapEditor = forwardRef(function MapEditor(
       }
       const key = event.key.toLowerCase();
       if (event.key === "Delete" || event.key === "Backspace") removeSelected();
+      if (!previewMode && key === "enter" && tool === "path") {
+        event.preventDefault();
+        finalizePathDraft();
+      }
       if ((event.ctrlKey || event.metaKey) && key === "z") {
         event.preventDefault();
         event.shiftKey ? redo() : undo();
@@ -1283,9 +1891,13 @@ const MapEditor = forwardRef(function MapEditor(
       if (event.key === "Escape") {
         actionRef.current = null;
         setPolyDraft([]);
-        setPathDraft([]);
         setMeasure(null);
         setSelectionId(null);
+        if (tool === "path" && pathDraft.length >= 2) {
+          finalizePathDraft();
+          return;
+        }
+        setPathDraft([]);
         activate("select");
       }
     }
@@ -1298,7 +1910,7 @@ const MapEditor = forwardRef(function MapEditor(
       window.removeEventListener("keydown", keyDown);
       window.removeEventListener("keyup", keyUp);
     };
-  }, [previewMode, tool, zoom]);
+  }, [finalizePathDraft, pathDraft.length, previewMode, tool, zoom]);
 
   function down(event) {
     canvasRef.current.setPointerCapture(event.pointerId);
@@ -1328,6 +1940,33 @@ const MapEditor = forwardRef(function MapEditor(
     }
     if (tool === "door") {
       if (previewMode) return;
+      const room = [...modelRef.current.elements]
+        .filter((element) => element.kind === "room")
+        .reverse()
+        .find((entry) => hit(world, entry));
+      if (room) {
+        const edgeOffset = edgeOffsetFromPoint(room, snapped);
+        const managed = createManagedDoor(
+          {
+            ...room,
+            edge: edgeOffset.edge,
+            offset: edgeOffset.offset,
+          },
+          modelRef.current.elements.filter(
+            (element) => element.kind === "door" && element.roomId === room.id,
+          ).length,
+        );
+        managed.door.edge = edgeOffset.edge;
+        managed.door.offset = edgeOffset.offset;
+        managed.door.name = `${room.name || "Room"} Door`;
+        mutate((next) => {
+          next.elements.push(managed.door, managed.waypoint);
+        });
+        setSelectionId(managed.door.id);
+        setShowHelpPanel(false);
+        return;
+      }
+
       addElement({
         id: uuidv4(),
         kind: "door",
@@ -1339,6 +1978,12 @@ const MapEditor = forwardRef(function MapEditor(
         widthMeters: "",
         accessible: false,
         locked: false,
+        roomId: null,
+        edge: "right",
+        offset: 0.5,
+        routingAnchor: false,
+        linkedWaypointId: null,
+        layerIndex: normalizeLayerIndex("door"),
       });
       return;
     }
@@ -1356,6 +2001,12 @@ const MapEditor = forwardRef(function MapEditor(
         linkedFloorId: null,
         description: "",
         customWaypointLabel: "",
+        linkedRoomId: null,
+        linkedDoorId: null,
+        isAutoRoomWaypoint: false,
+        roomRatioX: 0.5,
+        roomRatioY: 0.5,
+        layerIndex: normalizeLayerIndex("waypoint"),
       });
       return;
     }
@@ -1371,6 +2022,7 @@ const MapEditor = forwardRef(function MapEditor(
         radiusMeters: 2.5,
         txPower: -59,
         notes: "",
+        layerIndex: normalizeLayerIndex("beacon"),
       });
       return;
     }
@@ -1398,8 +2050,16 @@ const MapEditor = forwardRef(function MapEditor(
     }
     if (tool === "path") {
       if (previewMode) return;
+      const anchor = pathAnchorForPoint(world, modelRef.current.elements);
+      if (!anchor) {
+        toast.error("Path points snap to door anchors or waypoints. Add/select one first.");
+        return;
+      }
       setSelectionId(null);
-      setPathDraft((current) => [...current, snapped]);
+      setPathDraft((current) => {
+        if (current.some((entry) => dist(entry, anchor) < 1)) return current;
+        return [...current, { x: anchor.x, y: anchor.y }];
+      });
       setCursor(snapped);
       return;
     }
@@ -1467,10 +2127,29 @@ const MapEditor = forwardRef(function MapEditor(
       } else if (target.kind === "path") {
         target.points = action.original.points.map((entry) => ({ x: entry.x + dx, y: entry.y + dy }));
       }
+      if (target.kind === "door" && target.roomId) {
+        const room = next.elements.find(
+          (element) => element.kind === "room" && element.id === target.roomId,
+        );
+        if (room) {
+          const edgeOffset = edgeOffsetFromPoint(room, snapped);
+          target.edge = edgeOffset.edge;
+          target.offset = edgeOffset.offset;
+        }
+      }
+      if (target.kind === "waypoint" && target.linkedRoomId && !target.linkedDoorId) {
+        const room = next.elements.find(
+          (element) => element.kind === "room" && element.id === target.linkedRoomId,
+        );
+        if (room) {
+          target.roomRatioX = clamp((snapped.x - room.x) / Math.max(room.width, 1), 0.08, 0.92);
+          target.roomRatioY = clamp((snapped.y - room.y) / Math.max(room.height, 1), 0.08, 0.92);
+        }
+      }
       if (target.x !== undefined) target.x = action.original.x + dx;
       if (target.y !== undefined) target.y = action.original.y + dy;
-      modelRef.current = next;
-      setModel(next);
+      modelRef.current = normalizeModelLinks(next);
+      setModel(normalizeModelLinks(next));
       setDirty(true);
       return;
     }
@@ -1502,8 +2181,8 @@ const MapEditor = forwardRef(function MapEditor(
       target.y = box.y;
       target.width = box.width;
       target.height = box.height;
-      modelRef.current = next;
-      setModel(next);
+      modelRef.current = normalizeModelLinks(next);
+      setModel(normalizeModelLinks(next));
       setDirty(true);
     }
   }
@@ -1542,18 +2221,7 @@ const MapEditor = forwardRef(function MapEditor(
       setCursor(null);
     }
     if (tool === "path" && pathDraft.length >= 2) {
-      addElement({
-        id: uuidv4(),
-        kind: "path",
-        type: "path",
-        points: pathDraft,
-        bidirectional: true,
-        accessible: false,
-        name: "",
-        staffOnly: false,
-      });
-      setPathDraft([]);
-      setCursor(null);
+      finalizePathDraft();
     }
   }
 
@@ -1611,20 +2279,16 @@ const MapEditor = forwardRef(function MapEditor(
       });
     });
     visibleElements.filter((element) => element.kind === "room").forEach((room) => {
-      ctx.beginPath();
-      if (room.shape === "polygon" && room.points.length >= 3) {
-        ctx.moveTo(room.points[0].x, room.points[0].y);
-        room.points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
-        ctx.closePath();
-      } else {
-        ctx.roundRect(room.x, room.y, room.width, room.height, 14);
-      }
+      drawRoomPath(ctx, room);
       ctx.fillStyle = previewMode
         ? room.color || (isDark ? "rgba(30, 58, 95, 0.76)" : "rgba(255, 255, 255, 0.78)")
         : room.color || accentLight;
       if (previewMode && previewView === "3d") {
+        const previewExtrusion =
+          (Number.parseFloat(model.threeD?.extrusionHeight) || 3.2) * 3;
         ctx.save();
-        ctx.translate(8, -8);
+        ctx.translate(previewExtrusion, -previewExtrusion);
+        drawRoomPath(ctx, room);
         ctx.fillStyle = isDark ? "rgba(15, 23, 42, 0.42)" : "rgba(15, 23, 42, 0.12)";
         ctx.fill();
         ctx.restore();
@@ -1633,13 +2297,19 @@ const MapEditor = forwardRef(function MapEditor(
       ctx.strokeStyle = room.color || accent;
       ctx.lineWidth = selectionId === room.id ? 2.5 : 1.5;
       ctx.stroke();
-      const center = roomCenter(room);
+      const center = roomCenterFromShape(room);
+      const icon = roomIconSymbol(room, buildingIndustry);
+      ctx.fillStyle = text;
+      ctx.font = previewMode ? "700 12px Inter, sans-serif" : "700 11px Inter, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(icon, center.x, center.y - (model.showLabels ? 10 : 0));
       if (model.showLabels) {
         ctx.fillStyle = text;
         ctx.font = previewMode ? "600 12px Inter, sans-serif" : "600 11px Inter, sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(room.name || roomLabel(room, buildingIndustry), center.x, center.y);
+        ctx.fillText(room.name || roomLabel(room, buildingIndustry), center.x, center.y + 12);
       }
     });
     visibleElements.filter((element) => element.kind === "door").forEach((door) => {
@@ -1746,23 +2416,46 @@ const MapEditor = forwardRef(function MapEditor(
     "#7C3AED",
     "#0F766E",
   ];
-  const orderedElements = [...model.elements].reverse();
+  const orderedElements = [...model.elements].sort(layerListSort);
+  const attachedDoors =
+    selected?.kind === "room"
+      ? model.elements.filter(
+          (element) => element.kind === "door" && element.roomId === selected.id,
+        )
+      : [];
   const readinessIssues = navigationIssues(model);
 
   return (
-    <div className="map-editor">
-      <aside className="map-editor__rail">
+    <div
+      className={`map-editor ${leftPanelCollapsed ? "is-left-collapsed" : ""}`}
+      style={{
+        "--map-editor-left-width": `${leftPanelCollapsed ? 68 : leftPanelWidth}px`,
+      }}
+    >
+      <aside className={`map-editor__rail ${leftPanelCollapsed ? "is-collapsed" : ""}`}>
         <section className="map-editor__panel">
-          <button
-            type="button"
-            onClick={() => toggleSection("draw")}
-            className="map-editor__section-toggle"
-          >
-            <span>Draw Tools</span>
-            <ChevronDown
-              className={`h-4 w-4 transition-transform ${sections.draw ? "" : "-rotate-90"}`}
-            />
-          </button>
+          <div className="mb-2 flex items-center justify-between gap-2">
+            {!leftPanelCollapsed && (
+              <button
+                type="button"
+                onClick={() => toggleSection("draw")}
+                className="map-editor__section-toggle"
+              >
+                <span>Draw Tools</span>
+                <ChevronDown
+                  className={`h-4 w-4 transition-transform ${sections.draw ? "" : "-rotate-90"}`}
+                />
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => setLeftPanelCollapsed((current) => !current)}
+              className="map-editor__mini-button px-2"
+              title={leftPanelCollapsed ? "Expand tool rail" : "Collapse tool rail"}
+            >
+              {leftPanelCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+            </button>
+          </div>
           {sections.draw && (
             <div className="map-editor__section-body">
               <div className="map-editor__tool-list">
@@ -1778,14 +2471,16 @@ const MapEditor = forwardRef(function MapEditor(
                     >
                       <span className="map-editor__tool-label">
                         <Icon className="h-4 w-4" />
-                        <span>{item.label}</span>
+                        {!leftPanelCollapsed && <span>{item.label}</span>}
                       </span>
-                      <span className="map-editor__tool-key">{item.key}</span>
+                      {!leftPanelCollapsed && <span className="map-editor__tool-key">{item.key}</span>}
                     </button>
                   );
                 })}
               </div>
 
+              {!leftPanelCollapsed && (
+                <>
               <div className="map-editor__divider" />
 
               <div className="section-label">Room Shape</div>
@@ -1848,10 +2543,11 @@ const MapEditor = forwardRef(function MapEditor(
                   />
                 </div>
               )}
+                </>
+              )}
             </div>
           )}
         </section>
-
         <section className="map-editor__panel">
           <button
             type="button"
@@ -1878,11 +2574,11 @@ const MapEditor = forwardRef(function MapEditor(
                     >
                       <span className="map-editor__tool-label">
                         <Icon className="h-4 w-4" />
-                        <span>{item.label}</span>
+                        {!leftPanelCollapsed && <span>{item.label}</span>}
                       </span>
-                      <span className="map-editor__tool-key">
+                      {!leftPanelCollapsed && <span className="map-editor__tool-key">
                         {item.id === "select" ? "S / Esc" : item.key}
-                      </span>
+                      </span>}
                     </button>
                   );
                 })}
@@ -1891,6 +2587,8 @@ const MapEditor = forwardRef(function MapEditor(
           )}
         </section>
 
+        {!leftPanelCollapsed && (
+        <>
         <section className="map-editor__panel">
           <button
             type="button"
@@ -1908,9 +2606,9 @@ const MapEditor = forwardRef(function MapEditor(
                 <button type="button" onClick={fitView} className="map-editor__tool">
                   <span className="map-editor__tool-label">
                     <SearchCheck className="h-4 w-4" />
-                    <span>Fit to Screen</span>
+                    {!leftPanelCollapsed && <span>Fit to Screen</span>}
                   </span>
-                  <span className="map-editor__tool-key">F</span>
+                  {!leftPanelCollapsed && <span className="map-editor__tool-key">F</span>}
                 </button>
                 <button
                   type="button"
@@ -1919,9 +2617,9 @@ const MapEditor = forwardRef(function MapEditor(
                 >
                   <span className="map-editor__tool-label">
                     <Layers className="h-4 w-4" />
-                    <span>Toggle Labels</span>
+                    {!leftPanelCollapsed && <span>Toggle Labels</span>}
                   </span>
-                  <span className="map-editor__tool-key">L</span>
+                  {!leftPanelCollapsed && <span className="map-editor__tool-key">L</span>}
                 </button>
               </div>
             </div>
@@ -1948,11 +2646,27 @@ const MapEditor = forwardRef(function MapEditor(
                   {orderedElements.map((element) => {
                     const Icon = iconForElement(element);
                     const hidden = Boolean(hiddenIds[element.id]);
+                    const pinned = element.kind === "waypoint" || element.kind === "path";
 
                     return (
                       <div
                         key={element.id}
                         className={`map-editor__layer-item group ${selectionId === element.id ? "is-active" : ""}`}
+                        draggable={REORDERABLE_KINDS.has(element.kind)}
+                        onDragStart={() => setDraggedLayerId(element.id)}
+                        onDragOver={(event) => {
+                          if (!REORDERABLE_KINDS.has(element.kind)) return;
+                          event.preventDefault();
+                        }}
+                        onDrop={(event) => {
+                          if (!draggedLayerId) return;
+                          event.preventDefault();
+                          mutate((next) => {
+                            next.elements = reorderElements(next.elements, draggedLayerId, element.id);
+                          });
+                          setDraggedLayerId(null);
+                        }}
+                        onDragEnd={() => setDraggedLayerId(null)}
                       >
                         <button
                           type="button"
@@ -1964,8 +2678,31 @@ const MapEditor = forwardRef(function MapEditor(
                           className="min-w-0 flex flex-1 items-center gap-2 truncate text-left"
                         >
                           <Icon className="h-3.5 w-3.5 shrink-0" />
-                          <span className="truncate">{elementTitle(element, buildingIndustry)}</span>
+                          <span className="truncate">
+                            {elementTitle(element, buildingIndustry)}
+                            {pinned ? " • pinned" : ""}
+                          </span>
                         </button>
+                        {REORDERABLE_KINDS.has(element.kind) && (
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              className="map-editor__layer-visibility"
+                              title="Move up"
+                              onClick={() => moveLayer(element.id, 1)}
+                            >
+                              <ArrowUp className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              className="map-editor__layer-visibility"
+                              title="Move down"
+                              onClick={() => moveLayer(element.id, -1)}
+                            >
+                              <ArrowDown className="h-3.5 w-3.5" />
+                            </button>
+                          </div>
+                        )}
                         <button
                           type="button"
                           title={hidden ? "Show element" : "Hide element"}
@@ -2065,7 +2802,21 @@ const MapEditor = forwardRef(function MapEditor(
             </div>
           )}
         </section>
+        </>
+        )}
       </aside>
+
+      <div
+        className="map-editor__resizer"
+        role="separator"
+        aria-label="Resize tool rail"
+        onPointerDown={() => {
+          panelResizeRef.current = { side: "left" };
+          setLeftPanelCollapsed(false);
+        }}
+      >
+        <GripVertical className="h-4 w-4" />
+      </div>
 
       <section className="map-editor__canvas">
         <div
@@ -2109,7 +2860,7 @@ const MapEditor = forwardRef(function MapEditor(
                 {tool === "room" && shape === "polygon"
                   ? "Click to add corners. Double-click to finish."
                   : tool === "path"
-                    ? "Click waypoints to draw a path."
+                    ? "Click door anchors or waypoints. Enter / double-click / Esc to finish."
                     : tool === "measure"
                       ? "Click two points to measure."
                       : "Select or draw on the canvas."}
@@ -2215,6 +2966,17 @@ const MapEditor = forwardRef(function MapEditor(
                 <p className="mt-2 text-xs subtle-text">
                   Add north, south, east, and west bounds to anchor this floor on the live map.
                 </p>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    disabled={previewMode}
+                    onClick={prefillOverlayFromEntrance}
+                    className="map-editor__mini-button"
+                  >
+                    <MapPin className="h-4 w-4" />
+                    Prefill From Entrance
+                  </button>
+                </div>
                 <div className="mt-3 grid grid-cols-2 gap-2">
                   {["north", "south", "west", "east"].map((key) => (
                     <div key={key}>
@@ -2321,6 +3083,46 @@ const MapEditor = forwardRef(function MapEditor(
               {selected.kind === "room" && (
                 <>
                   <div className="section-label">Room Properties</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="field-label">Shape</label>
+                      <select
+                        className="select"
+                        disabled={previewMode}
+                        value={selected.shapePreset || "rectangle"}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.shapePreset = event.target.value;
+                          })
+                        }
+                      >
+                        {SHAPE_PRESETS.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div>
+                      <label className="field-label">Map Icon</label>
+                      <select
+                        className="select"
+                        disabled={previewMode}
+                        value={selected.iconPreset || "auto"}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.iconPreset = event.target.value;
+                          })
+                        }
+                      >
+                        {ICON_PRESETS.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
                   <div>
                     <label className="field-label">Type</label>
                     <select
@@ -2384,6 +3186,93 @@ const MapEditor = forwardRef(function MapEditor(
                     <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.wheelchairAccessible = !element.wheelchairAccessible; })} className={`map-editor__toggle ${selected.wheelchairAccessible ? "is-active" : ""}`}><Accessibility className="h-4 w-4" />Wheelchair accessible</button>
                     <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.publicAccess = !element.publicAccess; })} className={`map-editor__toggle ${selected.publicAccess ? "is-active" : ""}`}><Check className="h-4 w-4" />Public access</button>
                   </div>
+                  <div className="map-editor__divider" />
+                  <div className="section-label">Doors</div>
+                  <div className="grid gap-2">
+                    {attachedDoors.length === 0 ? (
+                      <div className="rounded-lg border border-default bg-surface-alt px-3 py-3 text-xs text-secondary">
+                        No doors attached yet. Add one and CampusNav will snap it to the room edge with a routing anchor.
+                      </div>
+                    ) : (
+                      attachedDoors.map((door, index) => (
+                        <div key={door.id} className="rounded-lg border border-default bg-surface-alt px-3 py-3">
+                          <div className="flex items-center justify-between gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectionId(door.id);
+                                setShowHelpPanel(false);
+                                setTool("select");
+                              }}
+                              className="text-sm font-medium text-primary"
+                            >
+                              {door.name || `Door ${index + 1}`}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={previewMode}
+                              onClick={() => removeSelected(door.id)}
+                              className="map-editor__mini-button is-danger"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                          <div className="mt-3 grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="field-label">Edge</label>
+                              <select
+                                className="select"
+                                disabled={previewMode}
+                                value={door.edge || "right"}
+                                onChange={(event) =>
+                                  updateElement(door.id, (element) => {
+                                    element.edge = event.target.value;
+                                  })
+                                }
+                              >
+                                <option value="left">Left</option>
+                                <option value="right">Right</option>
+                                <option value="top">Top</option>
+                                <option value="bottom">Bottom</option>
+                              </select>
+                            </div>
+                            <div>
+                              <label className="field-label">Offset</label>
+                              <input
+                                className="input"
+                                type="range"
+                                min="0.05"
+                                max="0.95"
+                                step="0.01"
+                                disabled={previewMode}
+                                value={door.offset ?? 0.5}
+                                onChange={(event) =>
+                                  updateElement(door.id, (element) => {
+                                    element.offset = Number.parseFloat(event.target.value);
+                                  })
+                                }
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                    <button
+                      type="button"
+                      disabled={previewMode}
+                      onClick={() => {
+                        const managed = createManagedDoor(selected, attachedDoors.length);
+                        mutate((next) => {
+                          next.elements.push(managed.door, managed.waypoint);
+                        });
+                        setSelectionId(managed.door.id);
+                      }}
+                      className="map-editor__mini-button"
+                    >
+                      <DoorOpen className="h-4 w-4" />
+                      Add Door
+                    </button>
+                  </div>
                 </>
               )}
               {selected.kind === "door" && (
@@ -2403,6 +3292,37 @@ const MapEditor = forwardRef(function MapEditor(
                     <label className="field-label">Width (m)</label>
                     <input className="input" type="number" step="0.1" disabled={previewMode} value={selected.widthMeters ?? ""} onChange={(event) => updateElement(selected.id, (element) => { element.widthMeters = event.target.value; })} placeholder="1.2" />
                   </div>
+                  {selected.roomId && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="field-label">Edge</label>
+                        <select
+                          className="select"
+                          disabled={previewMode}
+                          value={selected.edge || "right"}
+                          onChange={(event) => updateElement(selected.id, (element) => { element.edge = event.target.value; })}
+                        >
+                          <option value="left">Left</option>
+                          <option value="right">Right</option>
+                          <option value="top">Top</option>
+                          <option value="bottom">Bottom</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="field-label">Offset</label>
+                        <input
+                          className="input"
+                          type="range"
+                          min="0.05"
+                          max="0.95"
+                          step="0.01"
+                          disabled={previewMode}
+                          value={selected.offset ?? 0.5}
+                          onChange={(event) => updateElement(selected.id, (element) => { element.offset = Number.parseFloat(event.target.value); })}
+                        />
+                      </div>
+                    </div>
+                  )}
                   <div className="map-editor__divider" />
                   <div className="section-label">Accessibility</div>
                   <div className="grid gap-2">
@@ -2414,6 +3334,9 @@ const MapEditor = forwardRef(function MapEditor(
               {selected.kind === "waypoint" && (
                 <>
                   <div className="section-label">Waypoint Properties</div>
+                  <p className="text-xs subtle-text">
+                    Waypoints are routing anchor points. Paths connect through them so the navigator knows exactly where a user can move.
+                  </p>
                   <div>
                     <label className="field-label">Type</label>
                     <select className="select" disabled={previewMode} value={selected.transitionType === "elevator" || selected.transitionType === "stairs" ? selected.transitionType : selected.waypointType || "junction"} onChange={(event) => updateElement(selected.id, (element) => {
@@ -2446,6 +3369,32 @@ const MapEditor = forwardRef(function MapEditor(
                       <option value="">No linked floor</option>
                       {floors.filter((floor) => floor.id !== floorData?.id).map((floor) => <option key={floor.id} value={floor.id}>{floor.name}</option>)}
                     </select>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="field-label">X</label>
+                      <input className="input" type="number" disabled={previewMode} value={Math.round(selected.x || 0)} onChange={(event) => updateElement(selected.id, (element) => {
+                        element.x = Number.parseFloat(event.target.value) || 0;
+                        if (element.linkedRoomId && !element.linkedDoorId) {
+                          const room = model.elements.find((item) => item.kind === "room" && item.id === element.linkedRoomId);
+                          if (room) {
+                            element.roomRatioX = clamp((element.x - room.x) / Math.max(room.width, 1), 0.08, 0.92);
+                          }
+                        }
+                      })} />
+                    </div>
+                    <div>
+                      <label className="field-label">Y</label>
+                      <input className="input" type="number" disabled={previewMode} value={Math.round(selected.y || 0)} onChange={(event) => updateElement(selected.id, (element) => {
+                        element.y = Number.parseFloat(event.target.value) || 0;
+                        if (element.linkedRoomId && !element.linkedDoorId) {
+                          const room = model.elements.find((item) => item.kind === "room" && item.id === element.linkedRoomId);
+                          if (room) {
+                            element.roomRatioY = clamp((element.y - room.y) / Math.max(room.height, 1), 0.08, 0.92);
+                          }
+                        }
+                      })} />
+                    </div>
                   </div>
                 </>
               )}
@@ -2516,7 +3465,7 @@ const MapEditor = forwardRef(function MapEditor(
                     Duplicate
                   </button>
                 )}
-                <button type="button" disabled={previewMode} onClick={removeSelected} className="map-editor__mini-button is-danger"><Trash2 className="h-4 w-4" />Delete</button>
+                <button type="button" disabled={previewMode} onClick={() => removeSelected(selected.id)} className="map-editor__mini-button is-danger"><Trash2 className="h-4 w-4" />Delete</button>
               </div>
             </div>
           )}

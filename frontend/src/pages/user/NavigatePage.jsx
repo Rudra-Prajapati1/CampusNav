@@ -347,6 +347,15 @@ export default function NavigatePage() {
     };
   }, [indoorRoute]);
 
+  const currentInstruction = useMemo(() => {
+    const instructions = indoorRoute?.instructions || [];
+    if (!instructions.length) return null;
+    return (
+      instructions.find((instruction) => instruction.floor_id === currentFloor?.id) ||
+      instructions[0]
+    );
+  }, [currentFloor?.id, indoorRoute?.instructions]);
+
   const currentSensorRoomCenter = useMemo(() => {
     if (!fromRoom || fromRoom.floor_id !== currentFloor?.id) return null;
     const room = indoorMap.rooms.find((entry) => entry.id === fromRoom.id) || fromRoom;
@@ -475,6 +484,7 @@ export default function NavigatePage() {
       return;
     }
 
+    setMode("outdoor");
     setLocationLoading(true);
     navigator.geolocation.getCurrentPosition(
       async (position) => {
@@ -588,7 +598,7 @@ export default function NavigatePage() {
   };
 
   const panelContent = (
-    <div className="space-y-4">
+    <div className="max-h-full space-y-4 overflow-y-auto pr-1">
       <div className="flex items-center justify-between gap-3">
         <div className="app-logo">
           <span className="app-logo-mark">
@@ -606,18 +616,16 @@ export default function NavigatePage() {
         </button>
       </div>
 
-      <div className="inline-flex rounded-full border border-default bg-surface-alt p-1">
-        {["outdoor", "indoor"].map((entry) => (
-          <button
-            key={entry}
-            onClick={() => setMode(entry)}
-            className={`rounded-full px-4 py-2 text-sm font-semibold capitalize transition-colors ${
-              mode === entry ? "bg-accent text-white" : "text-secondary"
-            }`}
-          >
-            {entry}
-          </button>
-        ))}
+      <div className="rounded-xl border border-default bg-surface px-4 py-3">
+        <div className="flex items-center justify-between gap-3">
+          <div>
+            <div className="text-sm font-medium text-primary">Unified Map View</div>
+            <div className="mt-1 text-xs subtle-text">
+              Outdoor map stays live. Indoor layers appear as you zoom into mapped buildings.
+            </div>
+          </div>
+          <span className="badge-neutral">{mode === "indoor" ? "Indoor focus" : "Outdoor focus"}</span>
+        </div>
       </div>
 
       {mode === "indoor" && (
@@ -653,7 +661,31 @@ export default function NavigatePage() {
         </div>
       )}
 
-      {mode === "indoor" ? (
+      <>
+        <div className="rounded-xl border border-default bg-surface px-4 py-4">
+          <div className="text-sm font-medium text-primary">
+            Building entrance
+          </div>
+          <div className="mt-2 text-sm subtle-text">
+            {building?.address || "Entrance details have not been added yet."}
+          </div>
+          <div className="mt-3">
+            <button
+              onClick={getUserLocation}
+              disabled={locationLoading}
+              className="btn-primary w-full"
+            >
+              <Crosshair className="h-4 w-4" />
+              {locationLoading ? "Finding your location..." : "Find My Location"}
+            </button>
+          </div>
+          {outdoorRouteMessage && (
+            <div className="mt-3 rounded-xl border border-default bg-surface-alt px-4 py-3 text-sm subtle-text">
+              {outdoorRouteMessage}
+            </div>
+          )}
+        </div>
+
         <>
           <div className="space-y-3">
             <SearchField
@@ -840,31 +872,7 @@ export default function NavigatePage() {
             </div>
           )}
         </>
-      ) : (
-        <>
-          <div className="rounded-xl border border-default bg-surface px-4 py-4">
-            <div className="text-sm font-medium text-primary">
-              Building entrance
-            </div>
-            <div className="mt-2 text-sm subtle-text">
-              {building?.address || "Entrance details have not been added yet."}
-            </div>
-          </div>
-          <button
-            onClick={getUserLocation}
-            disabled={locationLoading}
-            className="btn-primary w-full"
-          >
-            <Crosshair className="h-4 w-4" />
-            {locationLoading ? "Finding your location..." : "Find My Location"}
-          </button>
-          {outdoorRouteMessage && (
-            <div className="rounded-xl border border-default bg-surface px-4 py-3 text-sm subtle-text">
-              {outdoorRouteMessage}
-            </div>
-          )}
-        </>
-      )}
+      </>
     </div>
   );
 
@@ -911,8 +919,21 @@ export default function NavigatePage() {
         </div>
       )}
 
-      <div className="absolute left-4 top-4 z-[700] hidden w-full max-w-[360px] lg:block">
-        <div className="map-panel rounded-xl border border-default p-4">
+      {currentInstruction && (
+        <div className="absolute left-1/2 top-4 z-[705] w-[min(90vw,560px)] -translate-x-1/2">
+          <div className="map-panel rounded-2xl border border-default px-4 py-3">
+            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted">
+              Live Navigation
+            </div>
+            <div className="mt-1 text-sm font-medium text-primary">
+              {currentInstruction.text || "Follow the highlighted route"}
+            </div>
+          </div>
+        </div>
+      )}
+
+      <div className="absolute left-4 top-4 z-[700] hidden w-full max-w-[380px] lg:block">
+        <div className="map-panel max-h-[calc(100vh-2rem)] overflow-hidden rounded-xl border border-default p-4">
           {panelContent}
         </div>
       </div>
@@ -987,7 +1008,9 @@ export default function NavigatePage() {
           >
             <span className="sheet-handle" />
           </button>
-          {panelContent}
+          <div className="max-h-[calc(78vh-3rem)] overflow-y-auto">
+            {panelContent}
+          </div>
 
           {routeSummary && (
             <div className="mt-4 rounded-xl border border-default bg-surface px-4 py-4">

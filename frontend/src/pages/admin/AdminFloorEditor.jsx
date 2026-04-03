@@ -266,6 +266,29 @@ export default function AdminFloorEditor() {
             <span className="px-2">/</span>
             <span className="truncate">{floorData.name}</span>
           </div>
+          {floors.length > 1 && (
+            <select
+              className="select h-8 min-w-[170px] py-1 text-sm"
+              value={floorData.id}
+              onChange={(event) => {
+                const nextFloor = floors.find((floor) => floor.id === event.target.value);
+                if (!nextFloor || nextFloor.id === floorData.id) return;
+                if (
+                  editorStatus.dirty &&
+                  !window.confirm("You have unsaved changes. Switch floors anyway?")
+                ) {
+                  return;
+                }
+                navigate(`/admin/buildings/${buildingId}/floors/${nextFloor.id}/editor`);
+              }}
+            >
+              {floors.map((floor) => (
+                <option key={floor.id} value={floor.id}>
+                  {floor.name}
+                </option>
+              ))}
+            </select>
+          )}
         </div>
 
         <div className="hidden items-center gap-2 md:flex">
@@ -383,6 +406,7 @@ export default function AdminFloorEditor() {
           ref={editorRef}
           floorData={floorData}
           floors={floors}
+          building={building}
           buildingIndustry={building?.industry || "education"}
           onSave={handleSave}
           onStateChange={setEditorStatus}
