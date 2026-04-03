@@ -10,86 +10,42 @@ import {
 } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
-  MapContainer,
-  Marker,
-  Polyline,
-  TileLayer,
-  useMap,
-} from "react-leaflet";
-import L from "leaflet";
-import "leaflet/dist/leaflet.css";
-import {
+  Activity,
   ArrowUpDown,
-  Building2,
   Compass,
   Crosshair,
+  LocateFixed,
   Moon,
   Navigation,
   Search,
   Sun,
+  Wifi,
   X,
-  ZoomIn,
-  ZoomOut,
 } from "lucide-react";
-import IndoorCanvas from "../../components/navigation/IndoorCanvas.jsx";
+import NavigationMapRenderer from "../../components/navigation/NavigationMapRenderer.jsx";
+import { buildCanonicalIndoorMap } from "../../components/navigation/indoorMapModel.js";
+import { resolveNavigationAdapter } from "../../components/navigation/adapters/adapterRegistry.js";
+import { MAP_PROVIDER } from "../../components/navigation/mapProviderConfig.js";
 import { useSensorFusion } from "../../hooks/useSensorFusion.js";
+import { useAuthStore } from "../../stores/authStore.js";
 import { api } from "../../utils/api.js";
 import { useTheme } from "../../context/themeContext.jsx";
 
-delete L.Icon.Default.prototype._getIconUrl;
-L.Icon.Default.mergeOptions({
-  iconRetinaUrl:
-    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-});
+function roomCenter(room) {
+  if (!room) return null;
+  if (Array.isArray(room.polygon_points) && room.polygon_points.length > 0) {
+    const xs = room.polygon_points.map((point) => point.x);
+    const ys = room.polygon_points.map((point) => point.y);
+    return {
+      x: (Math.min(...xs) + Math.max(...xs)) / 2,
+      y: (Math.min(...ys) + Math.max(...ys)) / 2,
+    };
+  }
 
-const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY;
-const USE_MAPTILER =
-  import.meta.env.VITE_USE_MAPTILER === "true" && Boolean(MAPTILER_KEY);
-const TILE_URL = USE_MAPTILER
-  ? `https://api.maptiler.com/maps/streets-v2/{z}/{x}/{y}.png?key=${MAPTILER_KEY}`
-  : "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
-const TILE_ATTRIBUTION = USE_MAPTILER
-  ? '&copy; <a href="https://www.maptiler.com">MapTiler</a> &copy; <a href="https://www.openstreetmap.org">OpenStreetMap</a>'
-  : '&copy; <a href="https://www.openstreetmap.org">OpenStreetMap</a> contributors';
-
-function pinIcon(color, size = 16) {
-  return L.divIcon({
-    className: "",
-    html: `<div style="width:${size}px;height:${size}px;background:${color};border:3px solid white;border-radius:999px;box-shadow:0 8px 20px rgba(15,23,42,0.2)"></div>`,
-    iconSize: [size, size],
-    iconAnchor: [size / 2, size / 2],
-  });
-}
-
-function FitMapToPoints({ points, fallbackCenter, fallbackZoom = 18 }) {
-  const map = useMap();
-
-  useEffect(() => {
-    if (points?.length > 1) {
-      map.fitBounds(points, { padding: [46, 46], maxZoom: 20 });
-    } else if (fallbackCenter) {
-      map.setView(fallbackCenter, fallbackZoom, { animate: true });
-    }
-  }, [fallbackCenter, fallbackZoom, map, points]);
-
-  return null;
-}
-
-function OutdoorMapControls() {
-  const map = useMap();
-
-  return (
-    <div className="absolute bottom-4 right-4 z-[500] flex flex-col gap-2">
-      <button onClick={() => map.zoomIn()} className="btn-secondary px-3">
-        <ZoomIn className="h-4 w-4" />
-      </button>
-      <button onClick={() => map.zoomOut()} className="btn-secondary px-3">
-        <ZoomOut className="h-4 w-4" />
-      </button>
-    </div>
-  );
+  return {
+    x: room.x + room.width / 2,
+    y: room.y + room.height / 2,
+  };
 }
 
 function SearchField({ label, room, active, onActivate, accent }) {
@@ -125,7 +81,9 @@ export default function NavigatePage() {
   const [searchParams] = useSearchParams();
   const fromRoomId = searchParams.get("from");
   const { isDark, toggleTheme } = useTheme();
-  const sensorFusion = useSensorFusion(false);
+  const isAdmin = useAuthStore((store) => store.isAdmin);
+  const [sensorFusionEnabled, setSensorFusionEnabled] = useState(false);
+  const sensorFusion = useSensorFusion(sensorFusionEnabled);
 
   const [mode, setMode] = useState(fromRoomId ? "indoor" : "outdoor");
   const [building, setBuilding] = useState(null);
@@ -135,6 +93,7 @@ export default function NavigatePage() {
   const [floorData, setFloorData] = useState(null);
   const [floorImage, setFloorImage] = useState(null);
   const [selectingFor, setSelectingFor] = useState("from");
+  const [roomPickTarget, setRoomPickTarget] = useState(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
@@ -148,10 +107,42 @@ export default function NavigatePage() {
   const [outdoorRouteMessage, setOutdoorRouteMessage] = useState("");
   const [recentSearches, setRecentSearches] = useState([]);
   const [mobileSheetExpanded, setMobileSheetExpanded] = useState(false);
+  const [overlayVisible, setOverlayVisible] = useState(false);
+  const [indoorViewMode, setIndoorViewMode] = useState("3d");
+  const [sensorPosition, setSensorPosition] = useState(null);
   const dragStartRef = useRef(null);
+  const lastStepCountRef = useRef(0);
 
   const deferredSearchQuery = useDeferredValue(searchQuery.trim());
   const recentKey = `campusnav-recent-searches:${buildingId}`;
+  const entranceCenter = useMemo(() => {
+    const lat = Number.parseFloat(building?.entrance_lat);
+    const lng = Number.parseFloat(building?.entrance_lng);
+
+    return Number.isFinite(lat) && Number.isFinite(lng) ? [lat, lng] : null;
+  }, [building?.entrance_lat, building?.entrance_lng]);
+  const indoorMap = useMemo(() => buildCanonicalIndoorMap(floorData), [floorData]);
+  const currentOverlayBounds = useMemo(
+    () => indoorMap.floor.overlayBounds,
+    [indoorMap],
+  );
+  const hasGeoAnchor = Boolean(entranceCenter && currentOverlayBounds);
+  const bluetoothSupported =
+    typeof navigator !== "undefined" && "bluetooth" in navigator;
+  const rendererResolution = useMemo(
+    () => resolveNavigationAdapter(MAP_PROVIDER),
+    [],
+  );
+  const currentFloorBeacons = useMemo(
+    () =>
+      indoorMap.beacons.filter(
+        (beacon) =>
+          !beacon.floorId ||
+          beacon.floorId === currentFloor?.id ||
+          beacon.floorId === floorData?.id,
+      ),
+    [currentFloor?.id, floorData?.id, indoorMap.beacons],
+  );
 
   useEffect(() => {
     api.buildings
@@ -264,6 +255,54 @@ export default function NavigatePage() {
     };
   }, [buildingId, deferredSearchQuery]);
 
+  useEffect(() => {
+    if (mode !== "indoor") {
+      setOverlayVisible(false);
+      setRoomPickTarget(null);
+      return;
+    }
+
+    setOverlayVisible(false);
+    const timer = window.setTimeout(() => setOverlayVisible(true), 50);
+    return () => window.clearTimeout(timer);
+  }, [currentFloor?.id, floorData?.id, mode]);
+
+  useEffect(() => {
+    lastStepCountRef.current = sensorFusion.stepCount;
+  }, [sensorFusionEnabled]);
+
+  useEffect(() => {
+    if (!sensorFusionEnabled || !sensorPosition || sensorFusion.heading === null) return;
+    if (sensorPosition.floorId !== currentFloor?.id) return;
+
+    const deltaSteps = sensorFusion.stepCount - lastStepCountRef.current;
+    if (deltaSteps <= 0) return;
+    lastStepCountRef.current = sensorFusion.stepCount;
+
+    const pixelsPerMeter = indoorMap.metadata.pixelsPerMeter || 40;
+    const stepPixels = pixelsPerMeter * 0.72 * deltaSteps;
+    const radians = (sensorFusion.heading * Math.PI) / 180;
+    const dx = Math.sin(radians) * stepPixels;
+    const dy = -Math.cos(radians) * stepPixels;
+
+    setSensorPosition((current) =>
+      current
+        ? {
+            ...current,
+            x: current.x + dx,
+            y: current.y + dy,
+          }
+        : current,
+    );
+  }, [
+    currentFloor?.id,
+    indoorMap.metadata.pixelsPerMeter,
+    sensorFusion.heading,
+    sensorFusion.stepCount,
+    sensorFusionEnabled,
+    sensorPosition,
+  ]);
+
   const visibleFloors = useMemo(() => {
     if (!indoorRoute?.floors_involved?.length) return floors;
     const routeFloorIds = new Set(indoorRoute.floors_involved);
@@ -308,6 +347,12 @@ export default function NavigatePage() {
     };
   }, [indoorRoute]);
 
+  const currentSensorRoomCenter = useMemo(() => {
+    if (!fromRoom || fromRoom.floor_id !== currentFloor?.id) return null;
+    const room = indoorMap.rooms.find((entry) => entry.id === fromRoom.id) || fromRoom;
+    return roomCenter(room);
+  }, [currentFloor?.id, fromRoom, indoorMap.rooms]);
+
   const persistRecentSearch = useCallback(
     (from, to) => {
       if (!from || !to) return;
@@ -334,15 +379,70 @@ export default function NavigatePage() {
 
   const selectRoom = useCallback(
     (room) => {
-      if (selectingFor === "from") setFromRoom(room);
+      const target = roomPickTarget || selectingFor;
+      if (target === "from") setFromRoom(room);
       else setToRoom(room);
+      setSelectingFor(target);
+      setRoomPickTarget(null);
       setSearchQuery("");
       setSearchResults([]);
       setIndoorRoute(null);
+      setMode("indoor");
       setMobileSheetExpanded(true);
     },
-    [selectingFor],
+    [roomPickTarget, selectingFor],
   );
+
+  const placeBlueDotFromStart = useCallback(() => {
+    if (!fromRoom || fromRoom.floor_id !== currentFloor?.id || !currentSensorRoomCenter) return;
+    setSensorPosition({
+      floorId: currentFloor.id,
+      x: currentSensorRoomCenter.x,
+      y: currentSensorRoomCenter.y,
+      source: "start-room",
+    });
+    lastStepCountRef.current = sensorFusion.stepCount;
+  }, [
+    currentFloor?.id,
+    currentSensorRoomCenter,
+    fromRoom,
+    sensorFusion.stepCount,
+  ]);
+
+  const snapBlueDotToNearestBeacon = useCallback(() => {
+    if (!sensorPosition || !currentFloorBeacons.length) return;
+    const nearest = [...currentFloorBeacons].sort((left, right) => {
+      const leftDistance = Math.hypot(left.x - sensorPosition.x, left.y - sensorPosition.y);
+      const rightDistance = Math.hypot(right.x - sensorPosition.x, right.y - sensorPosition.y);
+      return leftDistance - rightDistance;
+    })[0];
+
+    if (!nearest) return;
+    setSensorPosition({
+      floorId: currentFloor?.id,
+      x: nearest.x,
+      y: nearest.y,
+      source: "beacon-snap",
+    });
+  }, [currentFloor?.id, currentFloorBeacons, sensorPosition]);
+
+  const enableSensorFusion = useCallback(async () => {
+    if (sensorFusion.permissionNeeded && !sensorFusion.permissionGranted) {
+      const granted = await sensorFusion.requestPermission();
+      if (!granted) {
+        window.alert("Motion and orientation permission is required for sensor-assisted positioning.");
+        return;
+      }
+    }
+
+    setSensorFusionEnabled(true);
+    lastStepCountRef.current = sensorFusion.stepCount;
+  }, [
+    sensorFusion.permissionGranted,
+    sensorFusion.permissionNeeded,
+    sensorFusion.requestPermission,
+    sensorFusion.stepCount,
+  ]);
 
   const dismissRecentSearch = (id) => {
     const next = recentSearches.filter((entry) => entry.id !== id);
@@ -362,6 +462,7 @@ export default function NavigatePage() {
       ]);
       setFromRoom(from);
       setToRoom(to);
+      setRoomPickTarget(null);
       setMode("indoor");
     } catch (error) {
       console.error(error);
@@ -448,6 +549,7 @@ export default function NavigatePage() {
         buildingId,
       );
       setIndoorRoute(result);
+      setRoomPickTarget(null);
       setMode("indoor");
       const firstFloor = floors.find(
         (floor) => floor.id === result.floors_involved?.[0],
@@ -465,6 +567,7 @@ export default function NavigatePage() {
     setFromRoom(toRoom);
     setToRoom(fromRoom);
     setIndoorRoute(null);
+    setRoomPickTarget(null);
   };
 
   const handleBuildingChange = (nextBuildingId) => {
@@ -517,6 +620,22 @@ export default function NavigatePage() {
         ))}
       </div>
 
+      {mode === "indoor" && (
+        <div className="inline-flex rounded-full border border-default bg-surface-alt p-1">
+          {["2d", "3d"].map((entry) => (
+            <button
+              key={entry}
+              onClick={() => setIndoorViewMode(entry)}
+              className={`rounded-full px-4 py-2 text-sm font-semibold uppercase transition-colors ${
+                indoorViewMode === entry ? "bg-accent text-white" : "text-secondary"
+              }`}
+            >
+              {entry}
+            </button>
+          ))}
+        </div>
+      )}
+
       {buildingOptions.length > 1 && (
         <div>
           <label className="field-label">Building</label>
@@ -541,7 +660,11 @@ export default function NavigatePage() {
               label="From"
               room={fromRoom}
               active={selectingFor === "from"}
-              onActivate={() => setSelectingFor("from")}
+              onActivate={() => {
+                setSelectingFor("from");
+                setRoomPickTarget("from");
+                setMode("indoor");
+              }}
               accent="bg-emerald-500"
             />
             <div className="flex justify-center">
@@ -553,7 +676,11 @@ export default function NavigatePage() {
               label="To"
               room={toRoom}
               active={selectingFor === "to"}
-              onActivate={() => setSelectingFor("to")}
+              onActivate={() => {
+                setSelectingFor("to");
+                setRoomPickTarget("to");
+                setMode("indoor");
+              }}
               accent="bg-rose-500"
             />
           </div>
@@ -628,6 +755,60 @@ export default function NavigatePage() {
             {routeLoading ? "Calculating..." : "Get Directions"}
           </button>
 
+          <div className="rounded-xl border border-default bg-surface px-4 py-4">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <div className="text-sm font-medium text-primary">Positioning Pilot</div>
+                <div className="mt-1 text-xs subtle-text">
+                  Sensor fusion combines heading and motion into a live indoor estimate.
+                </div>
+              </div>
+              <div className="inline-flex items-center gap-2 rounded-full bg-surface-alt px-3 py-1 text-[11px] font-medium text-secondary">
+                <Wifi className="h-3.5 w-3.5" />
+                {currentFloorBeacons.length} beacons
+              </div>
+            </div>
+            <div className="mt-3 grid gap-2">
+              <div className="rounded-lg border border-default bg-surface-alt px-3 py-2 text-xs text-secondary">
+                Browser BLE: {bluetoothSupported ? "available" : "not available"} • Sensors:{" "}
+                {sensorFusion.supported ? "available" : "not available"}
+              </div>
+              <div className="rounded-lg border border-default bg-surface-alt px-3 py-2 text-xs text-secondary">
+                Heading: {sensorFusion.heading !== null ? `${Math.round(sensorFusion.heading)}°` : "--"} • Steps:{" "}
+                {sensorFusion.stepCount} • Movement: {sensorFusion.movement}
+              </div>
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={enableSensorFusion}
+                disabled={!sensorFusion.supported}
+                className="btn-secondary px-3"
+              >
+                <Activity className="h-4 w-4" />
+                {sensorFusionEnabled ? "Sensors Active" : "Enable Sensors"}
+              </button>
+              <button
+                type="button"
+                onClick={placeBlueDotFromStart}
+                disabled={!currentSensorRoomCenter}
+                className="btn-secondary px-3"
+              >
+                <LocateFixed className="h-4 w-4" />
+                Set From Start Room
+              </button>
+              <button
+                type="button"
+                onClick={snapBlueDotToNearestBeacon}
+                disabled={!sensorPosition || !currentFloorBeacons.length}
+                className="btn-secondary px-3"
+              >
+                <Wifi className="h-4 w-4" />
+                Snap to Beacon
+              </button>
+            </div>
+          </div>
+
           {recentSearches.length > 0 && (
             <div>
               <div className="field-label">Recent Searches</div>
@@ -687,146 +868,48 @@ export default function NavigatePage() {
     </div>
   );
 
-  function MapContent() {
-    const map = useMap();
-    const [, setMapInstance] = useState(null);
-
-    useEffect(() => {
-      setMapInstance(map);
-    }, [map]);
-
-    return (
-      <>
-        <TileLayer
-          url={TILE_URL}
-          attribution={TILE_ATTRIBUTION}
-          maxZoom={22}
-          maxNativeZoom={USE_MAPTILER ? 22 : 19}
-          tileSize={USE_MAPTILER ? 512 : 256}
-          zoomOffset={USE_MAPTILER ? -1 : 0}
-        />
-        <FitMapToPoints
-          points={outdoorFitPoints}
-          fallbackCenter={[
-            Number.parseFloat(building?.entrance_lat),
-            Number.parseFloat(building?.entrance_lng),
-          ]}
-        />
-        {userLocation && (
-          <Marker position={userLocation} icon={pinIcon("#16A34A")} />
-        )}
-        {building?.entrance_lat && building?.entrance_lng && (
-          <Marker
-            position={[
-              Number.parseFloat(building.entrance_lat),
-              Number.parseFloat(building.entrance_lng),
-            ]}
-            icon={pinIcon("#2563EB")}
-          />
-        )}
-        {outdoorRoute?.length > 0 && (
-          <Polyline
-            positions={outdoorRoute}
-            pathOptions={{ color: "#2563EB", weight: 6, opacity: 0.88 }}
-          />
-        )}
-        {mode === "outdoor" && <OutdoorMapControls />}
-      </>
-    );
-  }
-
-  function IndoorOverlayContent() {
-    const map = useMap();
-    const overlayBounds = useMemo(() => {
-      if (!floorData?.map_data?.floors?.length) return null;
-      const matched =
-        floorData.map_data.floors.find((entry) => entry.id === floorData.id) ||
-        floorData.map_data.floors.find(
-          (entry) => entry.name === floorData.name,
-        ) ||
-        floorData.map_data.floors.find(
-          (entry) => entry.level === floorData.level,
-        ) ||
-        floorData.map_data.floors[0];
-
-      return matched?.overlayBounds || null;
-    }, [floorData]);
-
-    return (
-      <div
-        className="absolute inset-0"
-        style={{
-          zIndex: mode === "indoor" ? 10 : -1,
-          pointerEvents: mode === "indoor" ? "auto" : "none",
-          opacity: mode === "indoor" ? 1 : 0,
-          transition: "opacity 0.3s ease-out, z-index 0s",
-        }}
-      >
-        {floorData ? (
-          <IndoorCanvas
-            floorData={floorData}
-            floorImage={floorImage}
-            pathPoints={currentFloorPath}
-            fromRoom={fromRoom}
-            toRoom={toRoom}
-            currentFloorId={currentFloor?.id}
-            isDark={isDark}
-            mapInstance={map}
-            overlayBounds={overlayBounds}
-            interactive={selectingFor !== null}
-            onRoomPick={selectingFor ? selectRoom : undefined}
-          />
-        ) : (
-          <div className="flex h-full items-center justify-center px-6">
-            <div className="card-sm flex items-center gap-3">
-              <div className="h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-              <span className="text-sm subtle-text">Loading indoor map...</span>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
   return (
     <div className="page-shell relative h-screen overflow-hidden bg-bg">
       <div className="absolute inset-0">
-        {building?.entrance_lat && building?.entrance_lng ? (
-          <MapContainer
-            center={[
-              Number.parseFloat(building.entrance_lat),
-              Number.parseFloat(building.entrance_lng),
-            ]}
-            zoom={18}
-            minZoom={3}
-            maxZoom={22}
-            zoomControl={false}
-            style={{
-              width: "100%",
-              height: "100%",
-              zIndex: mode === "outdoor" ? 1 : 0,
-            }}
-          >
-            <MapContent />
-            <IndoorOverlayContent />
-          </MapContainer>
-        ) : (
-          <div className="flex h-full items-center justify-center px-6">
-            <div className="card max-w-lg text-center">
-              <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-xl bg-accent-light text-accent">
-                <Building2 className="h-6 w-6" />
-              </div>
-              <h2 className="mt-6 text-2xl font-bold tracking-[-0.02em]">
-                Entrance coordinates missing
-              </h2>
-              <p className="mt-3 text-sm subtle-text">
-                Ask an administrator to set the building entrance latitude and
-                longitude before using outdoor navigation.
-              </p>
-            </div>
-          </div>
-        )}
+        <NavigationMapRenderer
+          provider={rendererResolution.activeProvider}
+          mode={mode}
+          entranceCenter={entranceCenter}
+          building={building}
+          floorData={floorData}
+          floorImage={floorImage}
+          currentFloorPath={currentFloorPath}
+          fromRoom={fromRoom}
+          toRoom={toRoom}
+          currentFloor={currentFloor}
+          isDark={isDark}
+          currentOverlayBounds={currentOverlayBounds}
+          roomPickTarget={roomPickTarget}
+          overlayVisible={overlayVisible}
+          selectRoom={selectRoom}
+          hasGeoAnchor={hasGeoAnchor}
+          outdoorFitPoints={outdoorFitPoints}
+          outdoorRoute={outdoorRoute}
+          userLocation={userLocation}
+          viewMode={mode === "indoor" ? indoorViewMode : "2d"}
+          sensorPosition={
+            sensorPosition?.floorId === currentFloor?.id ? sensorPosition : null
+          }
+          showBeacons={mode === "indoor"}
+        />
       </div>
+
+      {rendererResolution.fallbackReason && (
+        <div className="absolute left-1/2 top-4 z-[710] -translate-x-1/2 rounded-md border border-default bg-[color:var(--color-map-overlay)] px-3 py-2 text-xs text-secondary shadow-sm">
+          {rendererResolution.fallbackReason}
+        </div>
+      )}
+
+      {mode === "indoor" && isAdmin && (!entranceCenter || !currentOverlayBounds) && (
+        <div className="absolute left-1/2 top-4 z-[710] -translate-x-1/2 rounded-md border border-default bg-[color:var(--color-map-overlay)] px-3 py-2 text-xs text-secondary shadow-sm">
+          Add building coordinates and floor overlay bounds in admin settings to enable map overlay.
+        </div>
+      )}
 
       <div className="absolute left-4 top-4 z-[700] hidden w-full max-w-[360px] lg:block">
         <div className="map-panel rounded-xl border border-default p-4">

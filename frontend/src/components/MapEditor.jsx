@@ -35,6 +35,7 @@ import {
   Sparkles,
   Spline,
   Trash2,
+  Wifi,
   X,
 } from "lucide-react";
 import {
@@ -58,6 +59,7 @@ const TOOLS = [
   { group: "Draw", id: "room", label: "Room", key: "R", icon: RectangleHorizontal },
   { group: "Draw", id: "door", label: "Door", key: "D", icon: DoorOpen },
   { group: "Draw", id: "waypoint", label: "Waypoint", key: "W", icon: MapPin },
+  { group: "Draw", id: "beacon", label: "Beacon", key: "B", icon: Wifi },
   { group: "Draw", id: "path", label: "Path", key: "P", icon: Spline },
   { group: "Edit", id: "select", label: "Select", key: "S", icon: MousePointer2 },
   { group: "Edit", id: "move", label: "Move", key: "M", icon: Move },
@@ -141,7 +143,7 @@ function getBounds(element) {
       height: box.maxY - box.minY,
     };
   }
-  if (element.kind === "door" || element.kind === "waypoint") {
+  if (element.kind === "door" || element.kind === "waypoint" || element.kind === "beacon") {
     return { x: element.x - 12, y: element.y - 12, width: 24, height: 24 };
   }
   return {
@@ -281,6 +283,7 @@ function iconForElement(element) {
   if (element.kind === "room") return RectangleHorizontal;
   if (element.kind === "door") return DoorOpen;
   if (element.kind === "waypoint") return MapPin;
+  if (element.kind === "beacon") return Wifi;
   return Spline;
 }
 
@@ -354,6 +357,20 @@ function normalizeElement(element, industryId) {
         element.linkedFloorId || element.linkedFloor || element.linked_floor_id || null,
       description: element.description || "",
       customWaypointLabel: element.customWaypointLabel || "",
+    };
+  }
+  if (kind === "beacon") {
+    return {
+      id: element.id || uuidv4(),
+      kind: "beacon",
+      type: "beacon",
+      x: element.x || 0,
+      y: element.y || 0,
+      name: element.name || "Beacon",
+      beaconId: element.beaconId || element.hardwareId || "",
+      radiusMeters: element.radiusMeters ?? element.radius_meters ?? 2.5,
+      txPower: element.txPower ?? element.tx_power ?? -59,
+      notes: element.notes || "",
     };
   }
   if (kind === "path") {
@@ -453,7 +470,37 @@ function modelFromFloor(floorData, industryId) {
     showLabels: floorData.map_data?.showLabels ?? true,
     snapToGrid: floorData.map_data?.snapToGrid ?? true,
     overlayBounds: normalizeOverlayBounds(entry?.overlayBounds),
+    threeD: {
+      extrusionHeight: entry?.threeD?.extrusionHeight ?? 3.2,
+      wallHeight: entry?.threeD?.wallHeight ?? 3.2,
+    },
   };
+}
+
+function navigationIssues(model) {
+  const rooms = model.elements.filter((element) => element.kind === "room");
+  const waypoints = model.elements.filter((element) => element.kind === "waypoint");
+  const paths = model.elements.filter((element) => element.kind === "path");
+  const beacons = model.elements.filter((element) => element.kind === "beacon");
+  const overlayBounds = cleanOverlayBounds(model.overlayBounds);
+  const issues = [];
+
+  if (!rooms.length) issues.push("Add at least one room or POI.");
+  if (rooms.some((room) => !String(room.name || "").trim())) {
+    issues.push("Name all rooms so users can search them.");
+  }
+  if (rooms.length && !waypoints.length) issues.push("Add waypoints for routing.");
+  if (waypoints.length > 1 && !paths.length) {
+    issues.push("Connect waypoints with at least one path.");
+  }
+  if (!overlayBounds) {
+    issues.push("Add overlay bounds to anchor this floor on the live map.");
+  }
+  if (!beacons.length) {
+    issues.push("Place BLE beacons to prepare blue-dot positioning.");
+  }
+
+  return issues;
 }
 
 function editorBounds(model, bgImage) {
@@ -592,6 +639,10 @@ function serialize(model, bgImage, industryId) {
           backgroundDataUrl: model.floor.bg || null,
           bgImage: model.floor.bg || null,
           overlayBounds: cleanOverlayBounds(model.overlayBounds),
+          threeD: {
+            extrusionHeight: Number.parseFloat(model.threeD?.extrusionHeight) || 3.2,
+            wallHeight: Number.parseFloat(model.threeD?.wallHeight) || 3.2,
+          },
           elements: model.elements.map((element) => {
             if (element.kind === "room") {
               return {
@@ -635,6 +686,22 @@ function serialize(model, bgImage, industryId) {
                 transitionType: element.transitionType,
                 linkedFloorId: element.linkedFloorId,
                 customWaypointLabel: element.customWaypointLabel,
+              };
+            }
+            if (element.kind === "beacon") {
+              return {
+                id: element.id,
+                kind: "beacon",
+                type: "beacon",
+                x: element.x,
+                y: element.y,
+                name: element.name,
+                beaconId: element.beaconId,
+                radiusMeters:
+                  element.radiusMeters === "" ? "" : Number.parseFloat(element.radiusMeters) || 2.5,
+                txPower:
+                  element.txPower === "" ? "" : Number.parseFloat(element.txPower) || -59,
+                notes: element.notes || "",
               };
             }
             return element;
@@ -712,6 +779,7 @@ const MapEditor = forwardRef(function MapEditor(
     onSave,
     onStateChange,
     previewMode = false,
+    previewView = "2d",
   },
   ref,
 ) {
@@ -750,7 +818,7 @@ const MapEditor = forwardRef(function MapEditor(
     edit: true,
     view: true,
     layers: true,
-    utilities: true,
+    utilities: false,
   });
 
   const roomTypes = useMemo(() => {
@@ -1136,12 +1204,14 @@ const MapEditor = forwardRef(function MapEditor(
         snapToGrid: modelRef.current.snapToGrid,
         cursor,
         overlayBounds: modelRef.current.overlayBounds,
+        issues: navigationIssues(modelRef.current),
       }),
     }),
     [cursor, dirty, selected, tool, zoom],
   );
 
   useEffect(() => {
+    const issues = navigationIssues(model);
     if (!onStateChange) return;
     onStateChange({
       tool,
@@ -1158,6 +1228,7 @@ const MapEditor = forwardRef(function MapEditor(
         waypoints: model.elements.filter((element) => element.kind === "waypoint").length,
         paths: model.elements.filter((element) => element.kind === "path").length,
         doors: model.elements.filter((element) => element.kind === "door").length,
+        beacons: model.elements.filter((element) => element.kind === "beacon").length,
       },
       selectedElement: selected
         ? {
@@ -1169,6 +1240,9 @@ const MapEditor = forwardRef(function MapEditor(
       saveStatus: dirty ? "Unsaved changes" : "All changes saved",
       cursor,
       overlayBounds: model.overlayBounds,
+      issues,
+      readiness:
+        issues.length === 0 ? "Ready for navigation" : `${issues.length} issue${issues.length === 1 ? "" : "s"} to review`,
     });
   }, [buildingIndustry, cursor, dirty, model, onStateChange, selected, shape, tool, zoom]);
 
@@ -1198,6 +1272,7 @@ const MapEditor = forwardRef(function MapEditor(
       if (!previewMode && key === "r") activate("room");
       if (!previewMode && key === "d") activate("door");
       if (!previewMode && key === "w") activate("waypoint");
+      if (!previewMode && key === "b") activate("beacon");
       if (!previewMode && key === "p") activate("path");
       if (key === "s" && !event.ctrlKey && !event.metaKey) activate("select");
       if (!previewMode && key === "m") activate("move");
@@ -1281,6 +1356,21 @@ const MapEditor = forwardRef(function MapEditor(
         linkedFloorId: null,
         description: "",
         customWaypointLabel: "",
+      });
+      return;
+    }
+    if (tool === "beacon") {
+      addElement({
+        id: uuidv4(),
+        kind: "beacon",
+        type: "beacon",
+        x: snapped.x,
+        y: snapped.y,
+        name: "Beacon",
+        beaconId: "",
+        radiusMeters: 2.5,
+        txPower: -59,
+        notes: "",
       });
       return;
     }
@@ -1532,6 +1622,13 @@ const MapEditor = forwardRef(function MapEditor(
       ctx.fillStyle = previewMode
         ? room.color || (isDark ? "rgba(30, 58, 95, 0.76)" : "rgba(255, 255, 255, 0.78)")
         : room.color || accentLight;
+      if (previewMode && previewView === "3d") {
+        ctx.save();
+        ctx.translate(8, -8);
+        ctx.fillStyle = isDark ? "rgba(15, 23, 42, 0.42)" : "rgba(15, 23, 42, 0.12)";
+        ctx.fill();
+        ctx.restore();
+      }
       ctx.fill();
       ctx.strokeStyle = room.color || accent;
       ctx.lineWidth = selectionId === room.id ? 2.5 : 1.5;
@@ -1560,6 +1657,20 @@ const MapEditor = forwardRef(function MapEditor(
       ctx.fillStyle = accent;
       ctx.fill();
       ctx.lineWidth = selectionId === waypoint.id ? 2.5 : 2;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+    });
+    visibleElements.filter((element) => element.kind === "beacon").forEach((beacon) => {
+      const radius = Math.max(18, (Number(beacon.radiusMeters) || 2.5) * 12);
+      ctx.beginPath();
+      ctx.arc(beacon.x, beacon.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = isDark ? "rgba(245, 158, 11, 0.16)" : "rgba(245, 158, 11, 0.12)";
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(beacon.x, beacon.y, 7, 0, Math.PI * 2);
+      ctx.fillStyle = warn;
+      ctx.fill();
+      ctx.lineWidth = selectionId === beacon.id ? 2.5 : 2;
       ctx.strokeStyle = "#ffffff";
       ctx.stroke();
     });
@@ -1620,7 +1731,7 @@ const MapEditor = forwardRef(function MapEditor(
       ctx.stroke();
     }
     ctx.restore();
-  }, [bgImage, buildingIndustry, cursor, measure, model, pan, pathDraft, polyDraft, previewMode, selectionId, selected, viewport, visibleElements, zoom]);
+  }, [bgImage, buildingIndustry, cursor, measure, model, pan, pathDraft, polyDraft, previewMode, previewView, selectionId, selected, viewport, visibleElements, zoom]);
 
   const drawTools = TOOLS.filter((entry) => entry.group === "Draw");
   const editTools = TOOLS.filter(
@@ -1636,6 +1747,7 @@ const MapEditor = forwardRef(function MapEditor(
     "#0F766E",
   ];
   const orderedElements = [...model.elements].reverse();
+  const readinessIssues = navigationIssues(model);
 
   return (
     <div className="map-editor">
@@ -2012,7 +2124,7 @@ const MapEditor = forwardRef(function MapEditor(
                 {measure.meters ? ` | ${measure.meters.toFixed(1)} m` : ""}
               </span>
             </div>
-          </div>
+          )}
         </div>
       </section>
 
@@ -2120,10 +2232,87 @@ const MapEditor = forwardRef(function MapEditor(
                   ))}
                 </div>
               </div>
+
+              <div className="map-editor__divider" />
+
+              <div>
+                <div className="section-label">Navigation Readiness</div>
+                <div className="mt-3 rounded-lg border border-default bg-surface-alt px-3 py-3 text-xs text-secondary">
+                  <div className="flex items-center justify-between">
+                    <span>Rooms</span>
+                    <span>{model.elements.filter((element) => element.kind === "room").length}</span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between">
+                    <span>Waypoints</span>
+                    <span>{model.elements.filter((element) => element.kind === "waypoint").length}</span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between">
+                    <span>Paths</span>
+                    <span>{model.elements.filter((element) => element.kind === "path").length}</span>
+                  </div>
+                  <div className="mt-2 flex items-center justify-between">
+                    <span>Beacons</span>
+                    <span>{model.elements.filter((element) => element.kind === "beacon").length}</span>
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-2">
+                  {readinessIssues.length === 0 ? (
+                    <div className="rounded-lg border border-[color:rgba(34,197,94,0.25)] bg-[color:rgba(34,197,94,0.08)] px-3 py-2 text-xs text-secondary">
+                      This floor is ready for search, routing, overlay alignment, and positioning tests.
+                    </div>
+                  ) : (
+                    readinessIssues.map((issue) => (
+                      <div key={issue} className="rounded-lg border border-default bg-surface-alt px-3 py-2 text-xs text-secondary">
+                        {issue}
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div className="map-editor__divider" />
+
+              <div>
+                <div className="section-label">3D Preview</div>
+                <div className="mt-3 grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="field-label">Wall Height</label>
+                    <input
+                      className="input"
+                      type="number"
+                      step="0.1"
+                      disabled={previewMode}
+                      value={model.threeD?.wallHeight ?? 3.2}
+                      onChange={(event) =>
+                        mutate((next) => {
+                          next.threeD = next.threeD || {};
+                          next.threeD.wallHeight = event.target.value;
+                        }, false)
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="field-label">Extrusion</label>
+                    <input
+                      className="input"
+                      type="number"
+                      step="0.1"
+                      disabled={previewMode}
+                      value={model.threeD?.extrusionHeight ?? 3.2}
+                      onChange={(event) =>
+                        mutate((next) => {
+                          next.threeD = next.threeD || {};
+                          next.threeD.extrusionHeight = event.target.value;
+                        }, false)
+                      }
+                    />
+                  </div>
+                </div>
+              </div>
             </div>
           ) : (
             <div className="map-editor__property-grid mt-6">
-              {selected.kind !== "path" && (
+              {selected.kind !== "path" && selected.kind !== "beacon" && (
                 <div>
                   <label className="field-label">Name</label>
                   <input className="input" disabled={previewMode} value={selected.name || ""} onChange={(event) => updateElement(selected.id, (element) => { element.name = event.target.value; })} placeholder="Main Lobby" />
@@ -2131,24 +2320,31 @@ const MapEditor = forwardRef(function MapEditor(
               )}
               {selected.kind === "room" && (
                 <>
+                  <div className="section-label">Room Properties</div>
                   <div>
                     <label className="field-label">Type</label>
-                    <div className="map-editor__type-grid">
+                    <select
+                      className="select"
+                      disabled={previewMode}
+                      value={selected.roomType || defaultRoomType(buildingIndustry)}
+                      onChange={(event) =>
+                        updateElement(selected.id, (element) => {
+                          element.roomType = event.target.value;
+                          if (event.target.value !== "custom") {
+                            element.customLabel = "";
+                            element.customValue = "";
+                          }
+                        })
+                      }
+                    >
                       {getRoomTypes(buildingIndustry).map((entry) => {
-                        const Icon = resolvePoiIcon(entry.icon);
                         return (
-                          <button key={entry.id} type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => {
-                            element.roomType = entry.id;
-                            if (entry.id !== "custom") {
-                              element.customLabel = "";
-                              element.customValue = "";
-                            }
-                          })} className={`map-editor__type-button ${selected.roomType === entry.id ? "is-active" : ""}`}>
-                            <Icon className="h-4 w-4" />{entry.label}
-                          </button>
+                          <option key={entry.id} value={entry.id}>
+                            {entry.label}
+                          </option>
                         );
                       })}
-                    </div>
+                    </select>
                   </div>
                   {selected.roomType === "custom" && (
                     <div>
@@ -2183,6 +2379,7 @@ const MapEditor = forwardRef(function MapEditor(
                     </div>
                   </div>
                   <div className="map-editor__divider" />
+                  <div className="section-label">Accessibility</div>
                   <div className="grid gap-2">
                     <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.wheelchairAccessible = !element.wheelchairAccessible; })} className={`map-editor__toggle ${selected.wheelchairAccessible ? "is-active" : ""}`}><Accessibility className="h-4 w-4" />Wheelchair accessible</button>
                     <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.publicAccess = !element.publicAccess; })} className={`map-editor__toggle ${selected.publicAccess ? "is-active" : ""}`}><Check className="h-4 w-4" />Public access</button>
@@ -2191,6 +2388,7 @@ const MapEditor = forwardRef(function MapEditor(
               )}
               {selected.kind === "door" && (
                 <>
+                  <div className="section-label">Door Properties</div>
                   <div>
                     <label className="field-label">Type</label>
                     <select className="select" disabled={previewMode} value={selected.doorType || "main_entrance"} onChange={(event) => updateElement(selected.id, (element) => { element.doorType = event.target.value; })}>
@@ -2206,6 +2404,7 @@ const MapEditor = forwardRef(function MapEditor(
                     <input className="input" type="number" step="0.1" disabled={previewMode} value={selected.widthMeters ?? ""} onChange={(event) => updateElement(selected.id, (element) => { element.widthMeters = event.target.value; })} placeholder="1.2" />
                   </div>
                   <div className="map-editor__divider" />
+                  <div className="section-label">Accessibility</div>
                   <div className="grid gap-2">
                     <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.accessible = !element.accessible; })} className={`map-editor__toggle ${selected.accessible ? "is-active" : ""}`}><Accessibility className="h-4 w-4" />Accessible</button>
                     <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.locked = !element.locked; })} className={`map-editor__toggle ${selected.locked ? "is-active" : ""}`}><Check className="h-4 w-4" />Locked by default</button>
@@ -2214,6 +2413,7 @@ const MapEditor = forwardRef(function MapEditor(
               )}
               {selected.kind === "waypoint" && (
                 <>
+                  <div className="section-label">Waypoint Properties</div>
                   <div>
                     <label className="field-label">Type</label>
                     <select className="select" disabled={previewMode} value={selected.transitionType === "elevator" || selected.transitionType === "stairs" ? selected.transitionType : selected.waypointType || "junction"} onChange={(event) => updateElement(selected.id, (element) => {
@@ -2251,6 +2451,7 @@ const MapEditor = forwardRef(function MapEditor(
               )}
               {selected.kind === "path" && (
                 <>
+                  <div className="section-label">Path Properties</div>
                   <div>
                     <label className="field-label">Label</label>
                     <input className="input" disabled={previewMode} value={selected.name || ""} onChange={(event) => updateElement(selected.id, (element) => { element.name = event.target.value; })} placeholder="Optional" />
@@ -2265,7 +2466,35 @@ const MapEditor = forwardRef(function MapEditor(
                   </div>
                 </>
               )}
+              {selected.kind === "beacon" && (
+                <>
+                  <div className="section-label">Beacon Properties</div>
+                  <div>
+                    <label className="field-label">Beacon Name</label>
+                    <input className="input" disabled={previewMode} value={selected.name || ""} onChange={(event) => updateElement(selected.id, (element) => { element.name = event.target.value; })} placeholder="Entrance Beacon" />
+                  </div>
+                  <div>
+                    <label className="field-label">Hardware ID</label>
+                    <input className="input" disabled={previewMode} value={selected.beaconId || ""} onChange={(event) => updateElement(selected.id, (element) => { element.beaconId = event.target.value; })} placeholder="BEACON-01" />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="field-label">Radius (m)</label>
+                      <input className="input" type="number" step="0.1" disabled={previewMode} value={selected.radiusMeters ?? ""} onChange={(event) => updateElement(selected.id, (element) => { element.radiusMeters = event.target.value; })} placeholder="2.5" />
+                    </div>
+                    <div>
+                      <label className="field-label">TX Power</label>
+                      <input className="input" type="number" step="1" disabled={previewMode} value={selected.txPower ?? ""} onChange={(event) => updateElement(selected.id, (element) => { element.txPower = event.target.value; })} placeholder="-59" />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="field-label">Notes</label>
+                    <textarea className="textarea" rows={2} disabled={previewMode} value={selected.notes || ""} onChange={(event) => updateElement(selected.id, (element) => { element.notes = event.target.value; })} placeholder="Mounted near the main corridor ceiling." />
+                  </div>
+                </>
+              )}
               <div className="map-editor__divider" />
+              <div className="section-label">Actions</div>
               <div className="map-editor__utility-row">
                 {selected.kind !== "path" && (
                   <button

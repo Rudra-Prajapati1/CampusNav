@@ -32,8 +32,10 @@ function defaultStatus() {
     snapToGrid: true,
     cursor: null,
     selectedElement: null,
-    counts: { rooms: 0, waypoints: 0, paths: 0, doors: 0 },
+    counts: { rooms: 0, waypoints: 0, paths: 0, doors: 0, beacons: 0 },
     saveStatus: "Saved",
+    readiness: "Needs review",
+    issues: [],
   };
 }
 
@@ -65,6 +67,7 @@ export default function AdminFloorEditor() {
   const [saving, setSaving] = useState(false);
   const [saveSucceeded, setSaveSucceeded] = useState(false);
   const [previewMode, setPreviewMode] = useState(false);
+  const [previewView, setPreviewView] = useState("2d");
   const [building, setBuilding] = useState(null);
   const [floorData, setFloorData] = useState(null);
   const [floors, setFloors] = useState([]);
@@ -197,7 +200,8 @@ export default function AdminFloorEditor() {
     editorStatus.counts.rooms +
     editorStatus.counts.waypoints +
     editorStatus.counts.paths +
-    editorStatus.counts.doors;
+    editorStatus.counts.doors +
+    (editorStatus.counts.beacons || 0);
 
   const statusText = saving
     ? "Saving..."
@@ -322,6 +326,24 @@ export default function AdminFloorEditor() {
         </div>
 
         <div className="flex items-center gap-2">
+          {previewMode && (
+            <div className="hidden items-center rounded-md border border-default bg-surface p-1 sm:inline-flex">
+              {["2d", "3d"].map((modeOption) => (
+                <button
+                  key={modeOption}
+                  type="button"
+                  onClick={() => setPreviewView(modeOption)}
+                  className={`rounded px-2 py-1 text-xs font-semibold uppercase tracking-[0.08em] ${
+                    previewView === modeOption
+                      ? "bg-accent text-white"
+                      : "text-secondary"
+                  }`}
+                >
+                  {modeOption}
+                </button>
+              ))}
+            </div>
+          )}
           <button
             type="button"
             onClick={() => setPreviewMode((current) => !current)}
@@ -365,6 +387,7 @@ export default function AdminFloorEditor() {
           onSave={handleSave}
           onStateChange={setEditorStatus}
           previewMode={previewMode}
+          previewView={previewView}
         />
       </div>
 
@@ -372,9 +395,10 @@ export default function AdminFloorEditor() {
         <div>Tool: {editorStatus.tool || "select"}</div>
         <div className="hidden md:block">
           {totalElements} elements • {editorStatus.counts.rooms} rooms •{" "}
-          {editorStatus.counts.waypoints} waypoints
+          {editorStatus.counts.waypoints} waypoints • {editorStatus.counts.beacons || 0} beacons
         </div>
         <div className="flex items-center gap-3 font-mono">
+          <span className="hidden md:inline">{editorStatus.readiness}</span>
           <span>{statusText}</span>
           <span>
             {editorStatus.cursor

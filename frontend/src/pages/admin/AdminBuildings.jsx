@@ -1,6 +1,6 @@
 // CampusNav redesign — AdminBuildings.jsx — updated
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import {
   Building2,
   ChevronDown,
@@ -279,6 +279,7 @@ function ConfirmModal({ title, description, onCancel, onConfirm, confirming }) {
 
 export default function AdminBuildings() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [buildings, setBuildings] = useState([]);
   const [floorsByBuilding, setFloorsByBuilding] = useState({});
   const [expandedBuildingId, setExpandedBuildingId] = useState(null);
@@ -306,6 +307,33 @@ export default function AdminBuildings() {
   useEffect(() => {
     loadBuildings();
   }, []);
+
+  useEffect(() => {
+    const editBuildingId = searchParams.get("edit");
+    if (!editBuildingId || loading || modal?.type === "building") return;
+
+    const buildingToEdit = buildings.find((building) => building.id === editBuildingId);
+    if (buildingToEdit) {
+      setExpandedBuildingId(buildingToEdit.id);
+      setModal({ type: "building", building: buildingToEdit });
+      return;
+    }
+
+    if (!loading && buildings.length > 0) {
+      const next = new URLSearchParams(searchParams);
+      next.delete("edit");
+      setSearchParams(next, { replace: true });
+    }
+  }, [buildings, loading, modal?.type, searchParams, setSearchParams]);
+
+  const closeModal = () => {
+    setModal(null);
+    if (!searchParams.get("edit")) return;
+
+    const next = new URLSearchParams(searchParams);
+    next.delete("edit");
+    setSearchParams(next, { replace: true });
+  };
 
   const loadFloors = async (buildingId) => {
     const floors = await api.floors.byBuilding(buildingId).catch(() => []);
@@ -590,9 +618,9 @@ export default function AdminBuildings() {
       {modal?.type === "building" && (
         <BuildingModal
           building={modal.building || null}
-          onClose={() => setModal(null)}
+          onClose={closeModal}
           onSave={async () => {
-            setModal(null);
+            closeModal();
             await loadBuildings();
           }}
         />
@@ -602,10 +630,10 @@ export default function AdminBuildings() {
         <FloorModal
           floor={modal.floor || null}
           buildingId={modal.buildingId}
-          onClose={() => setModal(null)}
+          onClose={closeModal}
           onSave={async () => {
             const buildingId = modal.buildingId;
-            setModal(null);
+            closeModal();
             await loadFloors(buildingId);
             await loadBuildings();
           }}

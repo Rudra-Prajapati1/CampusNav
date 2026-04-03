@@ -358,7 +358,7 @@ export default function AdminDashboard() {
 
                 <div className="flex w-8 shrink-0 justify-end">
                   <Link
-                    to="/admin/buildings"
+                    to={`/admin/buildings?edit=${building.id}`}
                     className="btn-ghost h-8 w-8 px-0"
                     aria-label={`Edit ${building.name}`}
                   >
