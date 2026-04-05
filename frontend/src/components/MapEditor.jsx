@@ -35,6 +35,7 @@ import {
   MoveDiagonal2,
   PencilRuler,
   RectangleHorizontal,
+  RotateCw,
   Search,
   SearchCheck,
   Sparkles,
@@ -50,6 +51,8 @@ import {
   getRoomTypes,
   resolvePoiIcon,
 } from "../config/poiTypes.js";
+import { api } from "../utils/api.js";
+import { downloadDataUrl, sanitizeFilename } from "../utils/zipDownload.js";
 
 const GRID = 20;
 const MIN_ZOOM = 0.25;
@@ -106,6 +109,7 @@ const clone = (value) => JSON.parse(JSON.stringify(value));
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
 const snap = (value, enabled) =>
   enabled ? Math.round(value / GRID) * GRID : value;
+const toRadians = (degrees) => (Number(degrees || 0) * Math.PI) / 180;
 const slugify = (value) =>
   String(value || "")
     .trim()
@@ -174,9 +178,28 @@ function boundsFromPoints(points = []) {
   );
 }
 
+function rotatePoint(point, center, degrees = 0) {
+  const radians = toRadians(degrees);
+  if (Math.abs(radians) < 0.0001) return { ...point };
+
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+
+  return {
+    x: center.x + dx * cos - dy * sin,
+    y: center.y + dx * sin + dy * cos,
+  };
+}
+
+function inverseRotatePoint(point, center, degrees = 0) {
+  return rotatePoint(point, center, -degrees);
+}
+
 function getBounds(element) {
-  if (element.kind === "room" && element.shape === "polygon") {
-    const box = boundsFromPoints(element.points);
+  if (element.kind === "room") {
+    const box = boundsFromPoints(roomPolygon(element));
     return {
       x: box.minX,
       y: box.minY,
@@ -205,8 +228,14 @@ function getBounds(element) {
 }
 
 function roomCenter(room) {
-  const box = getBounds(room);
-  return { x: box.x + box.width / 2, y: box.y + box.height / 2 };
+  if (room.shape === "polygon" && room.points?.length >= 3) {
+    const box = boundsFromPoints(room.points);
+    return { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 };
+  }
+  return {
+    x: (room.x || 0) + (room.width || 0) / 2,
+    y: (room.y || 0) + (room.height || 0) / 2,
+  };
 }
 
 function normalizeLayerIndex(kind, value) {
@@ -302,7 +331,7 @@ function rectPoints(room) {
   ];
 }
 
-function roomPolygon(room) {
+function baseRoomPolygon(room) {
   if (room.shape === "polygon" && room.points?.length >= 3) return room.points;
   if (room.shapePreset === "diamond") {
     return [
@@ -326,75 +355,180 @@ function roomPolygon(room) {
   return rectPoints(room);
 }
 
+function roomPolygon(room) {
+  const points = baseRoomPolygon(room);
+  const rotation = Number(room.rotation || 0);
+  if (!rotation) return points;
+  const center = roomCenter(room);
+  return points.map((point) => rotatePoint(point, center, rotation));
+}
+
 function drawRoomPath(ctx, room) {
-  if (room.shape === "polygon" && room.points?.length >= 3) {
-    ctx.beginPath();
-    ctx.moveTo(room.points[0].x, room.points[0].y);
-    room.points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
-    ctx.closePath();
-    return;
-  }
-
-  if (room.shapePreset === "diamond" || room.shapePreset === "hex") {
-    const points = roomPolygon(room);
-    ctx.beginPath();
-    ctx.moveTo(points[0].x, points[0].y);
-    points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
-    ctx.closePath();
-    return;
-  }
-
   if (room.shapePreset === "pill" || room.shapePreset === "stadium") {
+    const center = roomCenter(room);
+    ctx.save();
+    ctx.translate(center.x, center.y);
+    ctx.rotate(toRadians(room.rotation || 0));
     ctx.beginPath();
-    ctx.roundRect(room.x, room.y, room.width, room.height, Math.min(room.height / 2, 28));
+    ctx.roundRect(
+      -room.width / 2,
+      -room.height / 2,
+      room.width,
+      room.height,
+      Math.min(room.height / 2, 28),
+    );
+    ctx.restore();
     return;
   }
-
+  const points = roomPolygon(room);
   ctx.beginPath();
-  ctx.roundRect(room.x, room.y, room.width, room.height, room.shapePreset === "rectangle" ? 10 : 14);
+  ctx.moveTo(points[0].x, points[0].y);
+  points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
+  ctx.closePath();
 }
 
 function roomCenterFromShape(room) {
-  if (room.shape === "polygon" && room.points?.length >= 3) {
-    const box = boundsFromPoints(room.points);
-    return { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 };
-  }
   return roomCenter(room);
 }
 
 function createRoomDoorPosition(room, edge = "right", offset = 0.5) {
   const safeOffset = clamp(offset, 0.05, 0.95);
+  const center = roomCenter(room);
+  let point = null;
   if (edge === "left") {
-    return { x: room.x, y: room.y + room.height * safeOffset };
+    point = { x: room.x, y: room.y + room.height * safeOffset };
+  } else if (edge === "top") {
+    point = { x: room.x + room.width * safeOffset, y: room.y };
+  } else if (edge === "bottom") {
+    point = { x: room.x + room.width * safeOffset, y: room.y + room.height };
+  } else {
+    point = { x: room.x + room.width, y: room.y + room.height * safeOffset };
   }
-  if (edge === "top") {
-    return { x: room.x + room.width * safeOffset, y: room.y };
+  return rotatePoint(point, center, room.rotation || 0);
+}
+
+function doorVectors(room, edge = "right") {
+  const rotation = Number(room.rotation || 0);
+  const tangentBase =
+    edge === "left" || edge === "right"
+      ? { x: 0, y: 1 }
+      : { x: 1, y: 0 };
+  const normalBase =
+    edge === "left"
+      ? { x: -1, y: 0 }
+      : edge === "right"
+        ? { x: 1, y: 0 }
+        : edge === "top"
+          ? { x: 0, y: -1 }
+          : { x: 0, y: 1 };
+
+  return {
+    tangent: rotatePoint(tangentBase, { x: 0, y: 0 }, rotation),
+    normal: rotatePoint(normalBase, { x: 0, y: 0 }, rotation),
+  };
+}
+
+function doorOpeningLength(door) {
+  const widthMeters = Number.parseFloat(door.widthMeters);
+  if (Number.isFinite(widthMeters) && widthMeters > 0) {
+    return clamp(widthMeters * 22, 18, 54);
   }
-  if (edge === "bottom") {
-    return { x: room.x + room.width * safeOffset, y: room.y + room.height };
+  return 26;
+}
+
+function drawDoorOpening(ctx, room, door, background, accent, preview3d = false, depth = 0) {
+  const center = createRoomDoorPosition(room, door.edge, door.offset);
+  const { tangent, normal } = doorVectors(room, door.edge);
+  const half = doorOpeningLength(door) / 2;
+  const doorDepthX = preview3d ? depth * 0.9 : 0;
+  const doorDepthY = preview3d ? -depth * 0.55 : 0;
+  const start = {
+    x: center.x - tangent.x * half + doorDepthX,
+    y: center.y - tangent.y * half + doorDepthY,
+  };
+  const end = {
+    x: center.x + tangent.x * half + doorDepthX,
+    y: center.y + tangent.y * half + doorDepthY,
+  };
+
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.strokeStyle = background;
+  ctx.lineWidth = preview3d ? 10 : 9;
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  ctx.lineTo(end.x, end.y);
+  ctx.stroke();
+
+  ctx.strokeStyle = accent;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(
+    center.x + doorDepthX + normal.x * 2,
+    center.y + doorDepthY + normal.y * 2,
+  );
+  ctx.lineTo(
+    center.x + doorDepthX + normal.x * 10,
+    center.y + doorDepthY + normal.y * 10,
+  );
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawRoomExtrusion(ctx, room, fill, stroke, shadow, selected, depth = 10) {
+  const topPolygon = roomPolygon(room);
+  const offsetPolygon = topPolygon.map((point) => ({
+    x: point.x + depth * 1.15,
+    y: point.y - depth * 0.7,
+  }));
+
+  for (let index = topPolygon.length - 1; index >= 0; index -= 1) {
+    const current = topPolygon[index];
+    const next = topPolygon[(index + 1) % topPolygon.length];
+    const currentTop = offsetPolygon[index];
+    const nextTop = offsetPolygon[(index + 1) % topPolygon.length];
+
+    ctx.beginPath();
+    ctx.moveTo(current.x, current.y);
+    ctx.lineTo(next.x, next.y);
+    ctx.lineTo(nextTop.x, nextTop.y);
+    ctx.lineTo(currentTop.x, currentTop.y);
+    ctx.closePath();
+    ctx.fillStyle = shadow;
+    ctx.fill();
   }
-  return { x: room.x + room.width, y: room.y + room.height * safeOffset };
+
+  ctx.beginPath();
+  ctx.moveTo(offsetPolygon[0].x, offsetPolygon[0].y);
+  offsetPolygon.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
+  ctx.closePath();
+  ctx.fillStyle = fill;
+  ctx.fill();
+  ctx.strokeStyle = stroke;
+  ctx.lineWidth = selected ? 2.5 : 1.5;
+  ctx.stroke();
 }
 
 function edgeOffsetFromPoint(room, point) {
+  const localPoint = inverseRotatePoint(point, roomCenter(room), room.rotation || 0);
   const distances = [
-    { edge: "left", value: Math.abs(point.x - room.x) },
-    { edge: "right", value: Math.abs(point.x - (room.x + room.width)) },
-    { edge: "top", value: Math.abs(point.y - room.y) },
-    { edge: "bottom", value: Math.abs(point.y - (room.y + room.height)) },
+    { edge: "left", value: Math.abs(localPoint.x - room.x) },
+    { edge: "right", value: Math.abs(localPoint.x - (room.x + room.width)) },
+    { edge: "top", value: Math.abs(localPoint.y - room.y) },
+    { edge: "bottom", value: Math.abs(localPoint.y - (room.y + room.height)) },
   ].sort((left, right) => left.value - right.value);
   const edge = distances[0]?.edge || "right";
 
   if (edge === "left" || edge === "right") {
     return {
       edge,
-      offset: clamp((point.y - room.y) / Math.max(room.height, 1), 0.05, 0.95),
+      offset: clamp((localPoint.y - room.y) / Math.max(room.height, 1), 0.05, 0.95),
     };
   }
 
   return {
     edge,
-    offset: clamp((point.x - room.x) / Math.max(room.width, 1), 0.05, 0.95),
+    offset: clamp((localPoint.x - room.x) / Math.max(room.width, 1), 0.05, 0.95),
   };
 }
 
@@ -446,8 +580,8 @@ function roomLabel(room, industryId) {
 }
 
 function hit(point, element) {
-  if (element.kind === "room" && element.shape === "polygon") {
-    return pointInPoly(point, element.points || []);
+  if (element.kind === "room") {
+    return pointInPoly(point, roomPolygon(element));
   }
   if (element.kind === "path") {
     return element.points.some((entry, index) => {
@@ -557,6 +691,7 @@ function normalizeElement(element, industryId) {
       color: element.color || "",
       wheelchairAccessible: Boolean(element.wheelchairAccessible),
       publicAccess: element.publicAccess ?? true,
+      rotation: Number.parseFloat(element.rotation) || 0,
       shapePreset:
         element.shapePreset ||
         defaultShapePresetForType(typeState.roomType === "custom" ? typeState.customValue : typeState.roomType),
@@ -933,6 +1068,7 @@ function serialize(model, bgImage, industryId) {
                 color: element.color,
                 wheelchairAccessible: Boolean(element.wheelchairAccessible),
                 publicAccess: element.publicAccess ?? true,
+                rotation: Number.parseFloat(element.rotation) || 0,
                 shapePreset: element.shapePreset,
                 iconPreset: element.iconPreset,
                 layerIndex: normalizeLayerIndex("room", element.layerIndex),
@@ -1407,6 +1543,23 @@ const MapEditor = forwardRef(function MapEditor(
     return () => observer.disconnect();
   }, []);
 
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return undefined;
+
+    const handleWheel = (event) => {
+      event.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      zoomBy(event.deltaY > 0 ? 0.9 : 1.1, {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+      });
+    };
+
+    canvas.addEventListener("wheel", handleWheel, { passive: false });
+    return () => canvas.removeEventListener("wheel", handleWheel);
+  }, [zoom, pan]);
+
   function commit(next, track = true) {
     const normalizedNext = normalizeModelLinks(next);
     if (track) {
@@ -1625,6 +1778,7 @@ const MapEditor = forwardRef(function MapEditor(
       color: "",
       wheelchairAccessible: false,
       publicAccess: true,
+      rotation: 0,
       shapePreset: defaultShapePresetForType(
         draftType === "custom" ? slugify(draftCustomLabel) : draftType,
       ),
@@ -1683,6 +1837,79 @@ const MapEditor = forwardRef(function MapEditor(
       next.elements.push(...pack.waypoints, ...pack.paths);
     });
     toast.success("Waypoints and paths generated.");
+  }
+
+  async function autoTraceDraft() {
+    if (!floorData?.id) {
+      toast.error("Save the floor record before running auto trace.");
+      return;
+    }
+
+    if (
+      modelRef.current.elements.some((element) => element.kind === "room") &&
+      !window.confirm(
+        "Replace the current drafted rooms, doors, waypoints, and paths with a new auto-traced draft?",
+      )
+    ) {
+      return;
+    }
+
+    try {
+      const traced = await api.floors.autoTrace(floorData.id);
+      if (!traced?.rooms?.length) {
+        toast.error("No editable rooms were detected in the uploaded floor plan.");
+        return;
+      }
+
+      mutate((next) => {
+        next.elements = next.elements.filter(
+          (element) => !["room", "door", "waypoint", "path"].includes(element.kind),
+        );
+
+        traced.rooms.forEach((entry, index) => {
+          const room = normalizeElement(
+            {
+              id: uuidv4(),
+              kind: "room",
+              type: "rect",
+              shape: "rect",
+              x: entry.x,
+              y: entry.y,
+              width: entry.width,
+              height: entry.height,
+              name: entry.name || `Room ${index + 1}`,
+              roomType: entry.roomType || defaultRoomType(buildingIndustry),
+            },
+            buildingIndustry,
+          );
+          next.elements.push(room, createRoomWaypoint(room, buildingIndustry));
+        });
+      });
+
+      toast.success(
+        `Drafted ${traced.rooms.length} spaces from the uploaded floor plan. Review and refine before publishing.`,
+      );
+    } catch (error) {
+      toast.error(error.message || "Unable to auto trace this floor plan.");
+    }
+  }
+
+  async function downloadRoomQr(room) {
+    if (!room?.id) return;
+    try {
+      const payload = await api.qr.room(room.id);
+      if (!payload?.qr) {
+        toast.error("QR code is not available for this room yet.");
+        return;
+      }
+      downloadDataUrl(
+        payload.qr,
+        `${sanitizeFilename(room.name || roomLabel(room, buildingIndustry) || "room")}-qr.png`,
+      );
+      toast.success("Room QR downloaded");
+    } catch (error) {
+      toast.error(error.message || "Save the map first so this room can get a QR code.");
+    }
   }
 
   function uploadBackground(event) {
@@ -2259,6 +2486,7 @@ const MapEditor = forwardRef(function MapEditor(
     const text = root.getPropertyValue("--color-text-primary").trim() || "#0f172a";
     const warn = root.getPropertyValue("--color-warning").trim() || "#d97706";
     const success = root.getPropertyValue("--color-success").trim() || "#16a34a";
+    const canvasBg = root.getPropertyValue("--color-bg").trim() || "#f8f9fa";
     visibleElements.filter((element) => element.kind === "path").forEach((path) => {
       if (!path.points.length) return;
       ctx.beginPath();
@@ -2279,40 +2507,68 @@ const MapEditor = forwardRef(function MapEditor(
       });
     });
     visibleElements.filter((element) => element.kind === "room").forEach((room) => {
-      drawRoomPath(ctx, room);
-      ctx.fillStyle = previewMode
+      const roomDoors = visibleElements.filter(
+        (element) => element.kind === "door" && element.roomId === room.id,
+      );
+      const roomFill = previewMode
         ? room.color || (isDark ? "rgba(30, 58, 95, 0.76)" : "rgba(255, 255, 255, 0.78)")
         : room.color || accentLight;
+      const extrusionDepth =
+        (Number.parseFloat(model.threeD?.extrusionHeight) || 3.2) * 3;
       if (previewMode && previewView === "3d") {
-        const previewExtrusion =
-          (Number.parseFloat(model.threeD?.extrusionHeight) || 3.2) * 3;
-        ctx.save();
-        ctx.translate(previewExtrusion, -previewExtrusion);
+        drawRoomExtrusion(
+          ctx,
+          room,
+          roomFill,
+          room.color || accent,
+          isDark ? "rgba(15, 23, 42, 0.42)" : "rgba(15, 23, 42, 0.12)",
+          selectionId === room.id,
+          extrusionDepth,
+        );
+      } else {
         drawRoomPath(ctx, room);
-        ctx.fillStyle = isDark ? "rgba(15, 23, 42, 0.42)" : "rgba(15, 23, 42, 0.12)";
+        ctx.fillStyle = roomFill;
         ctx.fill();
-        ctx.restore();
+        ctx.strokeStyle = room.color || accent;
+        ctx.lineWidth = selectionId === room.id ? 2.5 : 1.5;
+        ctx.stroke();
       }
-      ctx.fill();
-      ctx.strokeStyle = room.color || accent;
-      ctx.lineWidth = selectionId === room.id ? 2.5 : 1.5;
-      ctx.stroke();
+      roomDoors.forEach((door) =>
+        drawDoorOpening(
+          ctx,
+          room,
+          door,
+          canvasBg,
+          warn,
+          previewMode && previewView === "3d",
+          extrusionDepth,
+        ),
+      );
       const center = roomCenterFromShape(room);
+      const labelCenter =
+        previewMode && previewView === "3d"
+          ? { x: center.x + extrusionDepth * 0.55, y: center.y - extrusionDepth * 0.35 }
+          : center;
       const icon = roomIconSymbol(room, buildingIndustry);
       ctx.fillStyle = text;
       ctx.font = previewMode ? "700 12px Inter, sans-serif" : "700 11px Inter, sans-serif";
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
-      ctx.fillText(icon, center.x, center.y - (model.showLabels ? 10 : 0));
+      ctx.fillText(icon, labelCenter.x, labelCenter.y - (model.showLabels ? 10 : 0));
       if (model.showLabels) {
         ctx.fillStyle = text;
         ctx.font = previewMode ? "600 12px Inter, sans-serif" : "600 11px Inter, sans-serif";
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(room.name || roomLabel(room, buildingIndustry), center.x, center.y + 12);
+        ctx.fillText(
+          room.name || roomLabel(room, buildingIndustry),
+          labelCenter.x,
+          labelCenter.y + 12,
+        );
       }
     });
     visibleElements.filter((element) => element.kind === "door").forEach((door) => {
+      if (door.roomId) return;
       ctx.beginPath();
       ctx.arc(door.x, door.y, 6, 0, Math.PI * 2);
       ctx.fillStyle = warn;
@@ -2773,12 +3029,23 @@ const MapEditor = forwardRef(function MapEditor(
                 <button
                   type="button"
                   disabled={previewMode}
+                  onClick={autoTraceDraft}
+                  className="map-editor__mini-button"
+                >
+                  <Sparkles className="h-4 w-4" />
+                  Auto Trace Draft
+                </button>
+                <button
+                  type="button"
+                  disabled={previewMode}
                   onClick={autoWaypoints}
                   className="map-editor__mini-button"
                 >
                   <Sparkles className="h-4 w-4" />
                   Auto Waypoints
                 </button>
+              </div>
+              <div className="map-editor__utility-row">
                 <button type="button" onClick={validate} className="map-editor__mini-button">
                   <Check className="h-4 w-4" />
                   Validate
@@ -2841,10 +3108,13 @@ const MapEditor = forwardRef(function MapEditor(
                       : "crosshair",
           }}
         >
-          <canvas ref={canvasRef} onPointerDown={down} onPointerMove={move} onPointerUp={up} onDoubleClick={dbl} onWheel={(event) => {
-            event.preventDefault();
-            zoomBy(event.deltaY > 0 ? 0.9 : 1.1, { x: event.nativeEvent.offsetX, y: event.nativeEvent.offsetY });
-          }} />
+          <canvas
+            ref={canvasRef}
+            onPointerDown={down}
+            onPointerMove={move}
+            onPointerUp={up}
+            onDoubleClick={dbl}
+          />
           {previewMode && (
             <div className="pointer-events-none absolute left-3 top-3 z-10">
               <span className="badge-neutral">
@@ -3104,6 +3374,65 @@ const MapEditor = forwardRef(function MapEditor(
                       </select>
                     </div>
                     <div>
+                      <label className="field-label">Rotation</label>
+                      <div className="flex items-center gap-2">
+                        <span className="flex h-10 w-10 items-center justify-center rounded-lg border border-default bg-surface-alt text-secondary">
+                          <RotateCw className="h-4 w-4" />
+                        </span>
+                        <input
+                          className="input"
+                          type="number"
+                          step="1"
+                          disabled={previewMode}
+                          value={Math.round(selected.rotation || 0)}
+                          onChange={(event) =>
+                            updateElement(selected.id, (element) => {
+                              element.rotation = Number.parseFloat(event.target.value) || 0;
+                            })
+                          }
+                          placeholder="0"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="field-label">Width</label>
+                      <input
+                        className="input"
+                        type="number"
+                        min={MIN_SIZE}
+                        step="1"
+                        disabled={previewMode}
+                        value={Math.round(selected.width || 0)}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.width = Math.max(
+                              MIN_SIZE,
+                              Number.parseFloat(event.target.value) || MIN_SIZE,
+                            );
+                          })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="field-label">Height</label>
+                      <input
+                        className="input"
+                        type="number"
+                        min={MIN_SIZE}
+                        step="1"
+                        disabled={previewMode}
+                        value={Math.round(selected.height || 0)}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.height = Math.max(
+                              MIN_SIZE,
+                              Number.parseFloat(event.target.value) || MIN_SIZE,
+                            );
+                          })
+                        }
+                      />
+                    </div>
+                    <div>
                       <label className="field-label">Map Icon</label>
                       <select
                         className="select"
@@ -3271,6 +3600,15 @@ const MapEditor = forwardRef(function MapEditor(
                     >
                       <DoorOpen className="h-4 w-4" />
                       Add Door
+                    </button>
+                    <button
+                      type="button"
+                      disabled={previewMode}
+                      onClick={() => downloadRoomQr(selected)}
+                      className="map-editor__mini-button"
+                    >
+                      <Download className="h-4 w-4" />
+                      Download Room QR
                     </button>
                   </div>
                 </>

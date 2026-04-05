@@ -170,6 +170,7 @@ export const api = {
     update: (id, data) => api.put(`/floors/${id}`, data),
     delete: (id) => api.delete(`/floors/${id}`),
     saveMap: (id, data) => api.post(`/floors/${id}/save-map`, data),
+    autoTrace: (id) => api.post(`/floors/${id}/auto-trace`, {}),
   },
 
   // Rooms: /api/v1/rooms

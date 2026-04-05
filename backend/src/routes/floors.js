@@ -2,6 +2,7 @@ import express from "express";
 import { supabase } from "../utils/supabase.js";
 import { requireAdmin } from "../middleware/auth.js";
 import graphCache from "../cache/graphCache.js";
+import { autoTraceFloorPlan } from "../services/floorPlanAutoTrace.js";
 
 const router = express.Router();
 
@@ -86,6 +87,26 @@ router.put("/:id", requireAdmin, async (req, res) => {
 
   if (error) return res.status(400).json({ error: error.message });
   res.json(data);
+});
+
+// Admin: Generate an editable draft from the uploaded floor plan image
+router.post("/:id/auto-trace", requireAdmin, async (req, res) => {
+  try {
+    const { data: floor, error } = await supabase
+      .from("floors")
+      .select("id, floor_plan_url")
+      .eq("id", req.params.id)
+      .single();
+
+    if (error || !floor) {
+      return res.status(404).json({ error: "Floor not found" });
+    }
+
+    const traced = await autoTraceFloorPlan(floor.floor_plan_url);
+    res.json(traced);
+  } catch (error) {
+    res.status(400).json({ error: error.message || "Auto trace failed" });
+  }
 });
 
 // Admin: Delete floor

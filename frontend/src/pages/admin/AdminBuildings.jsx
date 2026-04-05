@@ -2,8 +2,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import {
+  ArrowDown,
+  ArrowUp,
   Building2,
   ChevronDown,
+  Download,
   Edit3,
   ImagePlus,
   Layers,
@@ -17,6 +20,7 @@ import toast from "react-hot-toast";
 import { getIndustry, INDUSTRY_TYPES, resolvePoiIcon } from "../../config/poiTypes.js";
 import { api } from "../../utils/api.js";
 import { uploadFile } from "../../utils/supabase.js";
+import { downloadQrBatchZip, sanitizeFilename } from "../../utils/zipDownload.js";
 
 const FLOOR_PLAN_BUCKET =
   import.meta.env.VITE_SUPABASE_FLOOR_PLAN_BUCKET || "floor-plans";
@@ -509,6 +513,47 @@ export default function AdminBuildings() {
     setFloorsByBuilding((current) => ({ ...current, [buildingId]: floors }));
   };
 
+  const moveFloor = async (buildingId, floorId, direction) => {
+    const floors = [...(floorsByBuilding[buildingId] || [])].sort(
+      (left, right) => left.level - right.level,
+    );
+    const index = floors.findIndex((floor) => floor.id === floorId);
+    const targetIndex = index + direction;
+    if (index === -1 || targetIndex < 0 || targetIndex >= floors.length) return;
+
+    const current = floors[index];
+    const target = floors[targetIndex];
+
+    try {
+      await Promise.all([
+        api.floors.update(current.id, { level: target.level }),
+        api.floors.update(target.id, { level: current.level }),
+      ]);
+      toast.success("Floor order updated");
+      await loadFloors(buildingId);
+      await loadBuildings();
+    } catch (error) {
+      toast.error(error.message || "Unable to reorder floors");
+    }
+  };
+
+  const downloadFloorQrZip = async (building, floor) => {
+    try {
+      const entries = await api.qr.floor(floor.id);
+      if (!entries?.length) {
+        toast.error("No room QR codes are available for this floor yet.");
+        return;
+      }
+      downloadQrBatchZip(
+        entries,
+        `${sanitizeFilename(building.name || "building")}-${sanitizeFilename(floor.name || "floor")}-qr.zip`,
+      );
+      toast.success("QR ZIP downloaded");
+    } catch (error) {
+      toast.error(error.message || "Unable to download floor QR ZIP");
+    }
+  };
+
   const filteredBuildings = useMemo(() => {
     return buildings.filter((building) => {
       const matchesSearch =
@@ -733,7 +778,7 @@ export default function AdminBuildings() {
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {floors.map((floor) => (
+                      {floors.map((floor, index) => (
                         <div
                           key={floor.id}
                           className="flex flex-col gap-4 rounded-xl border border-default bg-surface-alt p-4 lg:flex-row lg:items-center"
@@ -746,6 +791,22 @@ export default function AdminBuildings() {
                             <div className="text-sm subtle-text">Level {floor.level}</div>
                           </div>
                           <div className="flex flex-wrap gap-2">
+                            <button
+                              onClick={() => moveFloor(building.id, floor.id, -1)}
+                              disabled={index === 0}
+                              className="btn-secondary"
+                              title="Move floor up"
+                            >
+                              <ArrowUp className="h-4 w-4" />
+                            </button>
+                            <button
+                              onClick={() => moveFloor(building.id, floor.id, 1)}
+                              disabled={index === floors.length - 1}
+                              className="btn-secondary"
+                              title="Move floor down"
+                            >
+                              <ArrowDown className="h-4 w-4" />
+                            </button>
                             <button
                               onClick={() =>
                                 setModal({
@@ -766,6 +827,13 @@ export default function AdminBuildings() {
                               className="btn-primary"
                             >
                               Open Editor
+                            </button>
+                            <button
+                              onClick={() => downloadFloorQrZip(building, floor)}
+                              className="btn-secondary"
+                            >
+                              <Download className="h-4 w-4" />
+                              QR ZIP
                             </button>
                             <button
                               onClick={() =>

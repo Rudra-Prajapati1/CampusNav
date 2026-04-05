@@ -55,6 +55,7 @@ function normalizeRoom(room = {}) {
     shape: room.shape || room.type || "rect",
     shapePreset: room.shapePreset || "rectangle",
     iconPreset: room.iconPreset || "auto",
+    rotation: toFiniteNumber(room.rotation) ?? 0,
     layerIndex: toFiniteNumber(room.layerIndex) ?? 100,
     polygon_points: Array.isArray(room.polygon_points)
       ? room.polygon_points.map(normalizePoint)
@@ -87,6 +88,7 @@ function normalizeElement(element = {}) {
       : [],
     shapePreset: element.shapePreset || "rectangle",
     iconPreset: element.iconPreset || "auto",
+    rotation: toFiniteNumber(element.rotation) ?? 0,
     layerIndex: toFiniteNumber(element.layerIndex) ?? 0,
     radiusMeters: toFiniteNumber(element.radiusMeters ?? element.radius_meters) ?? null,
     txPower: toFiniteNumber(element.txPower ?? element.tx_power) ?? null,

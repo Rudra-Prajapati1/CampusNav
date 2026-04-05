@@ -17,7 +17,8 @@ const ROUTE_SOURCE_ID = "campusnav-outdoor-route";
 const ROUTE_LAYER_ID = "campusnav-outdoor-route-layer";
 const FLOOR_IMAGE_SOURCE_ID = "campusnav-floor-image";
 const FLOOR_IMAGE_LAYER_ID = "campusnav-floor-image-layer";
-const BUILDING_3D_LAYER_ID = "campusnav-3d-buildings";
+const FOCUS_BUILDING_SOURCE_ID = "campusnav-focus-building";
+const FOCUS_BUILDING_LAYER_ID = "campusnav-focus-building-layer";
 
 function createMarkerElement(color) {
   const marker = document.createElement("div");
@@ -112,53 +113,85 @@ function removeFloorImageOverlay(map) {
   if (map.getSource(FLOOR_IMAGE_SOURCE_ID)) map.removeSource(FLOOR_IMAGE_SOURCE_ID);
 }
 
-function ensure3DBuildings(map) {
-  if (map.getLayer(BUILDING_3D_LAYER_ID)) return;
+function buildingFeature(bounds, entranceCenter) {
+  const safeBounds = bounds
+    ? bounds
+    : entranceCenter
+      ? {
+          north: entranceCenter[0] + 0.00008,
+          south: entranceCenter[0] - 0.00008,
+          east: entranceCenter[1] + 0.00008,
+          west: entranceCenter[1] - 0.00008,
+        }
+      : null;
 
-  const buildingReference = map
-    .getStyle()
-    ?.layers?.find((layer) => layer["source-layer"] === "building");
+  if (!safeBounds) return null;
 
-  if (!buildingReference?.source) return;
+  return {
+    type: "Feature",
+    properties: {
+      extrusionHeight: 28,
+      baseHeight: 0,
+    },
+    geometry: {
+      type: "Polygon",
+      coordinates: [[
+        [safeBounds.west, safeBounds.north],
+        [safeBounds.east, safeBounds.north],
+        [safeBounds.east, safeBounds.south],
+        [safeBounds.west, safeBounds.south],
+        [safeBounds.west, safeBounds.north],
+      ]],
+    },
+  };
+}
 
-  const labelLayerId = map
-    .getStyle()
-    ?.layers?.find((layer) => layer.type === "symbol" && layer.layout?.["text-field"])?.id;
+function upsertFocusBuildingExtrusion(map, bounds, entranceCenter) {
+  const feature = buildingFeature(bounds, entranceCenter);
 
-  map.addLayer(
-    {
-      id: BUILDING_3D_LAYER_ID,
+  if (!feature) {
+    if (map.getLayer(FOCUS_BUILDING_LAYER_ID)) map.removeLayer(FOCUS_BUILDING_LAYER_ID);
+    if (map.getSource(FOCUS_BUILDING_SOURCE_ID)) map.removeSource(FOCUS_BUILDING_SOURCE_ID);
+    return;
+  }
+
+  const data = {
+    type: "FeatureCollection",
+    features: [feature],
+  };
+
+  const source = map.getSource(FOCUS_BUILDING_SOURCE_ID);
+  if (source) {
+    source.setData(data);
+  } else {
+    map.addSource(FOCUS_BUILDING_SOURCE_ID, {
+      type: "geojson",
+      data,
+    });
+  }
+
+  if (!map.getLayer(FOCUS_BUILDING_LAYER_ID)) {
+    map.addLayer({
+      id: FOCUS_BUILDING_LAYER_ID,
       type: "fill-extrusion",
-      source: buildingReference.source,
-      "source-layer": buildingReference["source-layer"],
-      minzoom: 14,
+      source: FOCUS_BUILDING_SOURCE_ID,
+      minzoom: 15,
       paint: {
         "fill-extrusion-color": [
           "interpolate",
           ["linear"],
           ["zoom"],
-          14,
-          "#cbd5e1",
-          18,
-          "#94a3b8",
+          15,
+          "#93C5FD",
+          18.5,
+          "#2563EB",
         ],
-        "fill-extrusion-height": [
-          "coalesce",
-          ["get", "render_height"],
-          ["get", "height"],
-          8,
-        ],
-        "fill-extrusion-base": [
-          "coalesce",
-          ["get", "render_min_height"],
-          ["get", "min_height"],
-          0,
-        ],
-        "fill-extrusion-opacity": 0.72,
+        "fill-extrusion-height": ["get", "extrusionHeight"],
+        "fill-extrusion-base": ["get", "baseHeight"],
+        "fill-extrusion-opacity": 0.78,
       },
-    },
-    labelLayerId,
-  );
+    });
+  }
 }
 
 function LoadingIndoorState() {
@@ -205,8 +238,9 @@ export default function MapLibreNavigationMap({
 
   const shouldUseMapOverlay = Boolean(hasGeoAnchor);
   const autoIndoorReveal = shouldUseMapOverlay && mapZoom >= 18.15;
-  const indoorVisible =
-    mode === "indoor" || autoIndoorReveal || (!entranceCenter && floorData);
+  const indoorVisible = shouldUseMapOverlay
+    ? mapZoom >= 18.05 && (mode === "indoor" || autoIndoorReveal)
+    : mode === "indoor" || (!entranceCenter && floorData);
   const floorImageUrl =
     floorData?.floor_plan_url ||
     floorData?.map_data?.floors?.find((entry) => entry.id === floorData?.id)?.backgroundDataUrl ||
@@ -232,8 +266,7 @@ export default function MapLibreNavigationMap({
     map.on("load", () => {
       setMapReady(true);
       setMapBridge(mapLibreAdapter.buildProjectionBridge(map));
-       setMapZoom(map.getZoom());
-      ensure3DBuildings(map);
+      setMapZoom(map.getZoom());
     });
 
     const syncViewport = () => setMapZoom(map.getZoom());
@@ -287,6 +320,19 @@ export default function MapLibreNavigationMap({
       duration: 900,
     });
   }, [entranceCenter, mapReady, mode]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map || !entranceCenter || !roomPickTarget) return;
+    if (map.getZoom() >= 18.2) return;
+
+    map.easeTo({
+      center: mapLibreAdapter.toLngLat(entranceCenter),
+      zoom: 19,
+      pitch: 55,
+      duration: 650,
+    });
+  }, [entranceCenter, mapReady, roomPickTarget]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -349,6 +395,12 @@ export default function MapLibreNavigationMap({
 
     upsertGeoJsonLine(map, outdoorRouteCoordinates);
   }, [mapReady, outdoorRouteCoordinates]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map) return;
+    upsertFocusBuildingExtrusion(map, currentOverlayBounds, entranceCenter);
+  }, [currentOverlayBounds, entranceCenter, mapReady]);
 
   useEffect(() => {
     const map = mapRef.current;

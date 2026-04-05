@@ -10,17 +10,13 @@ import {
 } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
-  Activity,
   ArrowUpDown,
   Compass,
   Crosshair,
-  LocateFixed,
   Moon,
   Navigation,
   Search,
   Sun,
-  Wifi,
-  X,
 } from "lucide-react";
 import NavigationMapRenderer from "../../components/navigation/NavigationMapRenderer.jsx";
 import { buildCanonicalIndoorMap } from "../../components/navigation/indoorMapModel.js";
@@ -48,30 +44,88 @@ function roomCenter(room) {
   };
 }
 
-function SearchField({ label, room, active, onActivate, accent }) {
+function SearchField({
+  label,
+  room,
+  active,
+  accent,
+  query,
+  loading = false,
+  results = [],
+  mapPicking = false,
+  onFocus,
+  onQueryChange,
+  onPickOnMap,
+  onSelectRoom,
+}) {
   return (
-    <button
-      type="button"
-      onClick={onActivate}
-      className={`w-full rounded-xl border px-4 py-4 text-left transition-colors ${
-        active
-          ? "border-accent bg-accent-light"
-          : "border-default bg-surface hover:bg-surface-alt"
+    <div
+      className={`rounded-xl border px-4 py-4 transition-colors ${
+        active ? "border-accent bg-accent-light" : "border-default bg-surface"
       }`}
     >
-      <div className="flex items-center gap-3">
-        <span className={`h-2.5 w-2.5 rounded-full ${accent}`} />
-        <span className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">
-          {label}
-        </span>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <span className={`h-2.5 w-2.5 rounded-full ${accent}`} />
+          <span className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+            {label}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={onPickOnMap}
+          className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] ${
+            mapPicking
+              ? "border-accent bg-accent text-white"
+              : "border-default bg-surface-alt text-secondary"
+          }`}
+        >
+          Pick on map
+        </button>
       </div>
-      <div className="mt-2 text-sm font-medium text-primary">
-        {room?.name || "Choose a room"}
+
+      <div className="map-editor__search mt-3">
+        <Search className="h-4 w-4 text-muted" />
+        <input
+          value={query}
+          onFocus={onFocus}
+          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder={`Type a ${label.toLowerCase()} room or POI`}
+        />
       </div>
-      <div className="mt-1 text-xs subtle-text">
-        {room?.type || "Search by room or point of interest"}
+
+      <div className="mt-2 text-xs subtle-text">
+        {mapPicking
+          ? "Click directly on the map to choose this location."
+          : room?.type || "Search by room name or point of interest"}
       </div>
-    </button>
+
+      {active && (query.trim() || loading) && (
+        <div className="mt-3 max-h-52 space-y-2 overflow-y-auto">
+          {loading ? (
+            <div className="rounded-xl border border-default bg-surface px-4 py-3 text-sm subtle-text">
+              Searching available rooms...
+            </div>
+          ) : results.length === 0 ? (
+            <div className="rounded-xl border border-default bg-surface px-4 py-3 text-sm subtle-text">
+              No matching rooms found yet.
+            </div>
+          ) : (
+            results.map((result) => (
+              <button
+                key={result.id}
+                type="button"
+                onClick={() => onSelectRoom(result)}
+                className="w-full rounded-xl border border-default bg-surface px-4 py-3 text-left transition-colors hover:bg-surface-alt"
+              >
+                <div className="font-medium text-primary">{result.name}</div>
+                <div className="mt-1 text-sm subtle-text">{result.type}</div>
+              </button>
+            ))
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -82,7 +136,7 @@ export default function NavigatePage() {
   const fromRoomId = searchParams.get("from");
   const { isDark, toggleTheme } = useTheme();
   const isAdmin = useAuthStore((store) => store.isAdmin);
-  const [sensorFusionEnabled, setSensorFusionEnabled] = useState(false);
+  const [sensorFusionEnabled] = useState(true);
   const sensorFusion = useSensorFusion(sensorFusionEnabled);
 
   const [mode, setMode] = useState(fromRoomId ? "indoor" : "outdoor");
@@ -94,7 +148,8 @@ export default function NavigatePage() {
   const [floorImage, setFloorImage] = useState(null);
   const [selectingFor, setSelectingFor] = useState("from");
   const [roomPickTarget, setRoomPickTarget] = useState(null);
-  const [searchQuery, setSearchQuery] = useState("");
+  const [fromQuery, setFromQuery] = useState("");
+  const [toQuery, setToQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [searchLoading, setSearchLoading] = useState(false);
   const [fromRoom, setFromRoom] = useState(null);
@@ -105,7 +160,6 @@ export default function NavigatePage() {
   const [locationLoading, setLocationLoading] = useState(false);
   const [outdoorRoute, setOutdoorRoute] = useState(null);
   const [outdoorRouteMessage, setOutdoorRouteMessage] = useState("");
-  const [recentSearches, setRecentSearches] = useState([]);
   const [mobileSheetExpanded, setMobileSheetExpanded] = useState(false);
   const [overlayVisible, setOverlayVisible] = useState(false);
   const [indoorViewMode, setIndoorViewMode] = useState("3d");
@@ -113,8 +167,8 @@ export default function NavigatePage() {
   const dragStartRef = useRef(null);
   const lastStepCountRef = useRef(0);
 
-  const deferredSearchQuery = useDeferredValue(searchQuery.trim());
-  const recentKey = `campusnav-recent-searches:${buildingId}`;
+  const activeSearchQuery = selectingFor === "from" ? fromQuery : toQuery;
+  const deferredSearchQuery = useDeferredValue(activeSearchQuery.trim());
   const entranceCenter = useMemo(() => {
     const lat = Number.parseFloat(building?.entrance_lat);
     const lng = Number.parseFloat(building?.entrance_lng);
@@ -127,8 +181,6 @@ export default function NavigatePage() {
     [indoorMap],
   );
   const hasGeoAnchor = Boolean(entranceCenter && currentOverlayBounds);
-  const bluetoothSupported =
-    typeof navigator !== "undefined" && "bluetooth" in navigator;
   const rendererResolution = useMemo(
     () => resolveNavigationAdapter(MAP_PROVIDER),
     [],
@@ -168,21 +220,13 @@ export default function NavigatePage() {
   }, [buildingId]);
 
   useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem(recentKey);
-      setRecentSearches(saved ? JSON.parse(saved) : []);
-    } catch {
-      setRecentSearches([]);
-    }
-  }, [recentKey]);
-
-  useEffect(() => {
     if (!fromRoomId) return;
 
     api.rooms
       .get(fromRoomId)
       .then((room) => {
         setFromRoom(room);
+        setFromQuery(room.name || "");
         setMode("indoor");
       })
       .catch((error) => console.error(error));
@@ -272,6 +316,76 @@ export default function NavigatePage() {
   }, [sensorFusionEnabled]);
 
   useEffect(() => {
+    if (!sensorFusion.supported) return undefined;
+    if (!sensorFusion.permissionNeeded || sensorFusion.permissionGranted) return undefined;
+
+    const requestOnFirstInteraction = () => {
+      sensorFusion.requestPermission().catch(() => {});
+      window.removeEventListener("pointerdown", requestOnFirstInteraction);
+    };
+
+    window.addEventListener("pointerdown", requestOnFirstInteraction, { once: true });
+    return () => window.removeEventListener("pointerdown", requestOnFirstInteraction);
+  }, [
+    sensorFusion.permissionGranted,
+    sensorFusion.permissionNeeded,
+    sensorFusion.requestPermission,
+    sensorFusion.supported,
+  ]);
+
+  const currentSensorRoomCenter = useMemo(() => {
+    if (!fromRoom || fromRoom.floor_id !== currentFloor?.id) return null;
+    const room = indoorMap.rooms.find((entry) => entry.id === fromRoom.id) || fromRoom;
+    return roomCenter(room);
+  }, [currentFloor?.id, fromRoom, indoorMap.rooms]);
+
+  useEffect(() => {
+    if (!currentSensorRoomCenter || !currentFloor?.id) return;
+    setSensorPosition((current) => {
+      if (
+        current?.floorId === currentFloor.id &&
+        current.source !== "start-room" &&
+        current.roomId === fromRoom?.id
+      ) {
+        return current;
+      }
+      return {
+        floorId: currentFloor.id,
+        x: currentSensorRoomCenter.x,
+        y: currentSensorRoomCenter.y,
+        source: "start-room",
+        roomId: fromRoom?.id || null,
+      };
+    });
+    lastStepCountRef.current = sensorFusion.stepCount;
+  }, [currentFloor?.id, currentSensorRoomCenter, fromRoom?.id, sensorFusion.stepCount]);
+
+  useEffect(() => {
+    if (!sensorPosition || !currentFloorBeacons.length) return;
+    const nearest = [...currentFloorBeacons].sort((left, right) => {
+      const leftDistance = Math.hypot(left.x - sensorPosition.x, left.y - sensorPosition.y);
+      const rightDistance = Math.hypot(right.x - sensorPosition.x, right.y - sensorPosition.y);
+      return leftDistance - rightDistance;
+    })[0];
+
+    if (!nearest) return;
+    const distance = Math.hypot(nearest.x - sensorPosition.x, nearest.y - sensorPosition.y);
+    if (distance > Math.max(48, (nearest.radiusMeters || 2.5) * 24)) return;
+
+    setSensorPosition((current) =>
+      current
+        ? {
+            ...current,
+            floorId: currentFloor?.id,
+            x: nearest.x,
+            y: nearest.y,
+            source: "beacon-snap",
+          }
+        : current,
+    );
+  }, [currentFloor?.id, currentFloorBeacons, sensorPosition]);
+
+  useEffect(() => {
     if (!sensorFusionEnabled || !sensorPosition || sensorFusion.heading === null) return;
     if (sensorPosition.floorId !== currentFloor?.id) return;
 
@@ -356,44 +470,18 @@ export default function NavigatePage() {
     );
   }, [currentFloor?.id, indoorRoute?.instructions]);
 
-  const currentSensorRoomCenter = useMemo(() => {
-    if (!fromRoom || fromRoom.floor_id !== currentFloor?.id) return null;
-    const room = indoorMap.rooms.find((entry) => entry.id === fromRoom.id) || fromRoom;
-    return roomCenter(room);
-  }, [currentFloor?.id, fromRoom, indoorMap.rooms]);
-
-  const persistRecentSearch = useCallback(
-    (from, to) => {
-      if (!from || !to) return;
-      const next = [
-        {
-          id: `${from.id}:${to.id}`,
-          fromId: from.id,
-          fromName: from.name,
-          toId: to.id,
-          toName: to.name,
-        },
-        ...recentSearches.filter((entry) => entry.id !== `${from.id}:${to.id}`),
-      ].slice(0, 3);
-
-      setRecentSearches(next);
-      try {
-        window.localStorage.setItem(recentKey, JSON.stringify(next));
-      } catch {
-        // Ignore storage failures.
-      }
-    },
-    [recentKey, recentSearches],
-  );
-
   const selectRoom = useCallback(
     (room) => {
       const target = roomPickTarget || selectingFor;
-      if (target === "from") setFromRoom(room);
-      else setToRoom(room);
+      if (target === "from") {
+        setFromRoom(room);
+        setFromQuery(room.name || "");
+      } else {
+        setToRoom(room);
+        setToQuery(room.name || "");
+      }
       setSelectingFor(target);
       setRoomPickTarget(null);
-      setSearchQuery("");
       setSearchResults([]);
       setIndoorRoute(null);
       setMode("indoor");
@@ -401,82 +489,6 @@ export default function NavigatePage() {
     },
     [roomPickTarget, selectingFor],
   );
-
-  const placeBlueDotFromStart = useCallback(() => {
-    if (!fromRoom || fromRoom.floor_id !== currentFloor?.id || !currentSensorRoomCenter) return;
-    setSensorPosition({
-      floorId: currentFloor.id,
-      x: currentSensorRoomCenter.x,
-      y: currentSensorRoomCenter.y,
-      source: "start-room",
-    });
-    lastStepCountRef.current = sensorFusion.stepCount;
-  }, [
-    currentFloor?.id,
-    currentSensorRoomCenter,
-    fromRoom,
-    sensorFusion.stepCount,
-  ]);
-
-  const snapBlueDotToNearestBeacon = useCallback(() => {
-    if (!sensorPosition || !currentFloorBeacons.length) return;
-    const nearest = [...currentFloorBeacons].sort((left, right) => {
-      const leftDistance = Math.hypot(left.x - sensorPosition.x, left.y - sensorPosition.y);
-      const rightDistance = Math.hypot(right.x - sensorPosition.x, right.y - sensorPosition.y);
-      return leftDistance - rightDistance;
-    })[0];
-
-    if (!nearest) return;
-    setSensorPosition({
-      floorId: currentFloor?.id,
-      x: nearest.x,
-      y: nearest.y,
-      source: "beacon-snap",
-    });
-  }, [currentFloor?.id, currentFloorBeacons, sensorPosition]);
-
-  const enableSensorFusion = useCallback(async () => {
-    if (sensorFusion.permissionNeeded && !sensorFusion.permissionGranted) {
-      const granted = await sensorFusion.requestPermission();
-      if (!granted) {
-        window.alert("Motion and orientation permission is required for sensor-assisted positioning.");
-        return;
-      }
-    }
-
-    setSensorFusionEnabled(true);
-    lastStepCountRef.current = sensorFusion.stepCount;
-  }, [
-    sensorFusion.permissionGranted,
-    sensorFusion.permissionNeeded,
-    sensorFusion.requestPermission,
-    sensorFusion.stepCount,
-  ]);
-
-  const dismissRecentSearch = (id) => {
-    const next = recentSearches.filter((entry) => entry.id !== id);
-    setRecentSearches(next);
-    try {
-      window.localStorage.setItem(recentKey, JSON.stringify(next));
-    } catch {
-      // Ignore storage failures.
-    }
-  };
-
-  const applyRecentSearch = async (entry) => {
-    try {
-      const [from, to] = await Promise.all([
-        api.rooms.get(entry.fromId),
-        api.rooms.get(entry.toId),
-      ]);
-      setFromRoom(from);
-      setToRoom(to);
-      setRoomPickTarget(null);
-      setMode("indoor");
-    } catch (error) {
-      console.error(error);
-    }
-  };
 
   const getUserLocation = useCallback(() => {
     if (!navigator.geolocation) {
@@ -565,17 +577,18 @@ export default function NavigatePage() {
         (floor) => floor.id === result.floors_involved?.[0],
       );
       if (firstFloor) setCurrentFloor(firstFloor);
-      persistRecentSearch(fromRoom, toRoom);
     } catch (error) {
       window.alert(error.message || "Unable to calculate route.");
     } finally {
       setRouteLoading(false);
     }
-  }, [buildingId, floors, fromRoom, persistRecentSearch, toRoom]);
+  }, [buildingId, floors, fromRoom, toRoom]);
 
   const handleSwapRooms = () => {
     setFromRoom(toRoom);
     setToRoom(fromRoom);
+    setFromQuery(toRoom?.name || "");
+    setToQuery(fromRoom?.name || "");
     setIndoorRoute(null);
     setRoomPickTarget(null);
   };
@@ -598,7 +611,7 @@ export default function NavigatePage() {
   };
 
   const panelContent = (
-    <div className="max-h-full space-y-4 overflow-y-auto pr-1">
+    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto pr-1">
       <div className="flex items-center justify-between gap-3">
         <div className="app-logo">
           <span className="app-logo-mark">
@@ -692,11 +705,26 @@ export default function NavigatePage() {
               label="From"
               room={fromRoom}
               active={selectingFor === "from"}
-              onActivate={() => {
+              query={fromQuery}
+              loading={selectingFor === "from" && searchLoading}
+              results={selectingFor === "from" ? searchResults : []}
+              mapPicking={roomPickTarget === "from"}
+              onFocus={() => {
+                setSelectingFor("from");
+                setRoomPickTarget(null);
+                setMode("indoor");
+              }}
+              onQueryChange={(value) => {
+                setSelectingFor("from");
+                setFromQuery(value);
+                if (!value.trim()) setFromRoom(null);
+              }}
+              onPickOnMap={() => {
                 setSelectingFor("from");
                 setRoomPickTarget("from");
                 setMode("indoor");
               }}
+              onSelectRoom={selectRoom}
               accent="bg-emerald-500"
             />
             <div className="flex justify-center">
@@ -708,52 +736,28 @@ export default function NavigatePage() {
               label="To"
               room={toRoom}
               active={selectingFor === "to"}
-              onActivate={() => {
+              query={toQuery}
+              loading={selectingFor === "to" && searchLoading}
+              results={selectingFor === "to" ? searchResults : []}
+              mapPicking={roomPickTarget === "to"}
+              onFocus={() => {
+                setSelectingFor("to");
+                setRoomPickTarget(null);
+                setMode("indoor");
+              }}
+              onQueryChange={(value) => {
+                setSelectingFor("to");
+                setToQuery(value);
+                if (!value.trim()) setToRoom(null);
+              }}
+              onPickOnMap={() => {
                 setSelectingFor("to");
                 setRoomPickTarget("to");
                 setMode("indoor");
               }}
+              onSelectRoom={selectRoom}
               accent="bg-rose-500"
             />
-          </div>
-
-          <div>
-            <label className="field-label">
-              {selectingFor === "from"
-                ? "Search starting point"
-                : "Search destination"}
-            </label>
-            <div className="map-editor__search">
-              <Search className="h-4 w-4 text-muted" />
-              <input
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Search rooms or points of interest"
-              />
-            </div>
-            <div className="mt-3 max-h-60 space-y-2 overflow-y-auto">
-              {searchLoading ? (
-                <div className="rounded-xl border border-default bg-surface px-4 py-3 text-sm subtle-text">
-                  Searching available rooms...
-                </div>
-              ) : searchResults.length === 0 ? (
-                <div className="rounded-xl border border-default bg-surface px-4 py-3 text-sm subtle-text">
-                  Start typing to search available rooms.
-                </div>
-              ) : (
-                searchResults.map((room) => (
-                  <button
-                    key={room.id}
-                    type="button"
-                    onClick={() => selectRoom(room)}
-                    className="w-full rounded-xl border border-default bg-surface px-4 py-3 text-left transition-colors hover:bg-surface-alt"
-                  >
-                    <div className="font-medium text-primary">{room.name}</div>
-                    <div className="mt-1 text-sm subtle-text">{room.type}</div>
-                  </button>
-                ))
-              )}
-            </div>
           </div>
 
           {mode === "indoor" && currentFloor && (
@@ -786,91 +790,6 @@ export default function NavigatePage() {
             <Navigation className="h-4 w-4" />
             {routeLoading ? "Calculating..." : "Get Directions"}
           </button>
-
-          <div className="rounded-xl border border-default bg-surface px-4 py-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-medium text-primary">Positioning Pilot</div>
-                <div className="mt-1 text-xs subtle-text">
-                  Sensor fusion combines heading and motion into a live indoor estimate.
-                </div>
-              </div>
-              <div className="inline-flex items-center gap-2 rounded-full bg-surface-alt px-3 py-1 text-[11px] font-medium text-secondary">
-                <Wifi className="h-3.5 w-3.5" />
-                {currentFloorBeacons.length} beacons
-              </div>
-            </div>
-            <div className="mt-3 grid gap-2">
-              <div className="rounded-lg border border-default bg-surface-alt px-3 py-2 text-xs text-secondary">
-                Browser BLE: {bluetoothSupported ? "available" : "not available"} • Sensors:{" "}
-                {sensorFusion.supported ? "available" : "not available"}
-              </div>
-              <div className="rounded-lg border border-default bg-surface-alt px-3 py-2 text-xs text-secondary">
-                Heading: {sensorFusion.heading !== null ? `${Math.round(sensorFusion.heading)}°` : "--"} • Steps:{" "}
-                {sensorFusion.stepCount} • Movement: {sensorFusion.movement}
-              </div>
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={enableSensorFusion}
-                disabled={!sensorFusion.supported}
-                className="btn-secondary px-3"
-              >
-                <Activity className="h-4 w-4" />
-                {sensorFusionEnabled ? "Sensors Active" : "Enable Sensors"}
-              </button>
-              <button
-                type="button"
-                onClick={placeBlueDotFromStart}
-                disabled={!currentSensorRoomCenter}
-                className="btn-secondary px-3"
-              >
-                <LocateFixed className="h-4 w-4" />
-                Set From Start Room
-              </button>
-              <button
-                type="button"
-                onClick={snapBlueDotToNearestBeacon}
-                disabled={!sensorPosition || !currentFloorBeacons.length}
-                className="btn-secondary px-3"
-              >
-                <Wifi className="h-4 w-4" />
-                Snap to Beacon
-              </button>
-            </div>
-          </div>
-
-          {recentSearches.length > 0 && (
-            <div>
-              <div className="field-label">Recent Searches</div>
-              <div className="space-y-2">
-                {recentSearches.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className="flex items-center justify-between gap-3 rounded-xl border border-default bg-surface px-4 py-3"
-                  >
-                    <button
-                      type="button"
-                      onClick={() => applyRecentSearch(entry)}
-                      className="min-w-0 flex-1 text-left"
-                    >
-                      <div className="truncate text-sm font-medium text-primary">
-                        {entry.fromName} to {entry.toName}
-                      </div>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => dismissRecentSearch(entry.id)}
-                      className="text-muted"
-                    >
-                      <X className="h-4 w-4" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </>
       </>
     </div>
@@ -933,7 +852,7 @@ export default function NavigatePage() {
       )}
 
       <div className="absolute left-4 top-4 z-[700] hidden w-full max-w-[380px] lg:block">
-        <div className="map-panel max-h-[calc(100vh-2rem)] overflow-hidden rounded-xl border border-default p-4">
+        <div className="map-panel h-[calc(100vh-2rem)] overflow-hidden rounded-xl border border-default p-4">
           {panelContent}
         </div>
       </div>

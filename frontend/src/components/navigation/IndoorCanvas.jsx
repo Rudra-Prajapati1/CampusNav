@@ -9,9 +9,25 @@ import { buildLeafletProjectionBridge } from "./adapters/leafletAdapter.js";
 
 const MIN_ZOOM = 0.28;
 const MAX_ZOOM = 7;
+const toRadians = (degrees) => (Number(degrees || 0) * Math.PI) / 180;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
+}
+
+function rotatePoint(point, center, degrees = 0) {
+  const radians = toRadians(degrees);
+  if (Math.abs(radians) < 0.0001) return { ...point };
+
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+
+  return {
+    x: center.x + dx * cos - dy * sin,
+    y: center.y + dx * sin + dy * cos,
+  };
 }
 
 function pointInPolygon(point, polygon = []) {
@@ -67,6 +83,7 @@ function getThemeColors(isDark, overlayMode) {
 }
 
 function getRoomPolygon(room) {
+  const basePolygon = (() => {
   if (Array.isArray(room?.polygon_points) && room.polygon_points.length >= 3) {
     return room.polygon_points;
   }
@@ -98,6 +115,15 @@ function getRoomPolygon(room) {
     { x: room.x + room.width, y: room.y + room.height },
     { x: room.x, y: room.y + room.height },
   ];
+  })();
+
+  const rotation = Number(room?.rotation || 0);
+  if (!rotation) return basePolygon;
+  const center = {
+    x: room.x + room.width / 2,
+    y: room.y + room.height / 2,
+  };
+  return basePolygon.map((point) => rotatePoint(point, center, rotation));
 }
 
 function roomIconSymbol(room) {
@@ -133,22 +159,14 @@ function drawPolygonPath(ctx, points = []) {
 }
 
 function getRoomBounds(room) {
-  if (Array.isArray(room?.polygon_points) && room.polygon_points.length > 0) {
-    const xs = room.polygon_points.map((point) => point.x);
-    const ys = room.polygon_points.map((point) => point.y);
-    return {
-      minX: Math.min(...xs),
-      minY: Math.min(...ys),
-      maxX: Math.max(...xs),
-      maxY: Math.max(...ys),
-    };
-  }
-
+  const points = getRoomPolygon(room);
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
   return {
-    minX: room.x,
-    minY: room.y,
-    maxX: room.x + room.width,
-    maxY: room.y + room.height,
+    minX: Math.min(...xs),
+    minY: Math.min(...ys),
+    maxX: Math.max(...xs),
+    maxY: Math.max(...ys),
   };
 }
 
@@ -261,11 +279,65 @@ function drawRoom(ctx, room, colors, routeState, showLabels = true) {
   }
 }
 
+function doorVectors(room, edge = "right") {
+  const rotation = Number(room.rotation || 0);
+  const tangentBase =
+    edge === "left" || edge === "right"
+      ? { x: 0, y: 1 }
+      : { x: 1, y: 0 };
+  const normalBase =
+    edge === "left"
+      ? { x: -1, y: 0 }
+      : edge === "right"
+        ? { x: 1, y: 0 }
+        : edge === "top"
+          ? { x: 0, y: -1 }
+          : { x: 0, y: 1 };
+
+  return {
+    tangent: rotatePoint(tangentBase, { x: 0, y: 0 }, rotation),
+    normal: rotatePoint(normalBase, { x: 0, y: 0 }, rotation),
+  };
+}
+
+function drawDoorOpening(ctx, room, door, colors, is3D = false, extrusion = 0) {
+  const half = Math.max(9, ((door.widthMeters || 1.1) * 22) / 2);
+  const center = { x: door.x, y: door.y };
+  const { tangent, normal } = doorVectors(room, door.edge);
+  const depthX = is3D ? extrusion * 0.9 : 0;
+  const depthY = is3D ? -extrusion * 0.55 : 0;
+  const start = {
+    x: center.x - tangent.x * half + depthX,
+    y: center.y - tangent.y * half + depthY,
+  };
+  const end = {
+    x: center.x + tangent.x * half + depthX,
+    y: center.y + tangent.y * half + depthY,
+  };
+
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.strokeStyle = colors.canvas;
+  ctx.lineWidth = is3D ? 10 : 8;
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  ctx.lineTo(end.x, end.y);
+  ctx.stroke();
+
+  ctx.strokeStyle = colors.door;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(center.x + depthX + normal.x * 2, center.y + depthY + normal.y * 2);
+  ctx.lineTo(center.x + depthX + normal.x * 10, center.y + depthY + normal.y * 10);
+  ctx.stroke();
+  ctx.restore();
+}
+
 function drawRoom3D(ctx, room, colors, routeState, showLabels = true, extrusion = 10) {
   const topPolygon = getRoomPolygon(room);
   const offsetPolygon = topPolygon.map((point) => ({
-    x: point.x + extrusion,
-    y: point.y - extrusion,
+    x: point.x + extrusion * 1.2,
+    y: point.y - extrusion * 0.7,
   }));
   const fill = routeState ? colors.roomSelectedFill : room.color || colors.roomFill;
   const stroke = routeState ? colors.roomSelectedStroke : colors.roomStroke;
@@ -360,15 +432,7 @@ function drawUserDot(ctx, position, colors) {
 
 function findRoomAtPoint(rooms, point) {
   return rooms.find((room) => {
-    if (Array.isArray(room.polygon_points) && room.polygon_points.length > 2) {
-      return pointInPolygon(point, room.polygon_points);
-    }
-    return (
-      point.x >= room.x &&
-      point.x <= room.x + room.width &&
-      point.y >= room.y &&
-      point.y <= room.y + room.height
-    );
+    return pointInPolygon(point, getRoomPolygon(room));
   });
 }
 
@@ -546,6 +610,7 @@ export default function IndoorCanvas({
     const pathRoomIds = new Set(
       (pathPoints || []).map((point) => point.room_id).filter(Boolean),
     );
+    const roomsById = new Map(indoorMap.rooms.map((room) => [room.id, room]));
 
     indoorMap.rooms.forEach((room) => {
       let roomState = null;
@@ -565,6 +630,10 @@ export default function IndoorCanvas({
       } else {
         drawRoom(ctx, room, colors, roomState, indoorMap.metadata.showLabels);
       }
+
+      indoorMap.doors
+        .filter((door) => door.roomId === room.id)
+        .forEach((door) => drawDoorOpening(ctx, room, door, colors, is3D, 10));
     });
 
     indoorMap.waypoints.forEach((waypoint) => {
@@ -615,6 +684,7 @@ export default function IndoorCanvas({
     mapElements
       .filter((element) => element.kind === "door")
       .forEach((door) => {
+        if (door.roomId && roomsById.has(door.roomId)) return;
         ctx.beginPath();
         ctx.arc(door.x, door.y, 6, 0, Math.PI * 2);
         ctx.fillStyle = colors.door;
