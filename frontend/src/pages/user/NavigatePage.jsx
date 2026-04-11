@@ -13,10 +13,15 @@ import {
   ArrowUpDown,
   Compass,
   Crosshair,
+  DoorOpen,
+  Info,
+  LifeBuoy,
   Moon,
   Navigation,
   Search,
+  Star,
   Sun,
+  UtensilsCrossed,
 } from "lucide-react";
 import NavigationMapRenderer from "../../components/navigation/NavigationMapRenderer.jsx";
 import { buildCanonicalIndoorMap } from "../../components/navigation/indoorMapModel.js";
@@ -42,6 +47,10 @@ function roomCenter(room) {
     x: room.x + room.width / 2,
     y: room.y + room.height / 2,
   };
+}
+
+function pointDistance(a, b) {
+  return Math.hypot((a?.x || 0) - (b?.x || 0), (a?.y || 0) - (b?.y || 0));
 }
 
 function SearchField({
@@ -97,7 +106,9 @@ function SearchField({
       <div className="mt-2 text-xs subtle-text">
         {mapPicking
           ? "Click directly on the map to choose this location."
-          : room?.type || "Search by room name or point of interest"}
+          : room?.kind === "poi"
+            ? `${room.type || "poi"}${room.floor_name ? ` • ${room.floor_name}` : ""}`
+            : room?.type || "Search by room name or point of interest"}
       </div>
 
       {active && (query.trim() || loading) && (
@@ -119,7 +130,11 @@ function SearchField({
                 className="w-full rounded-xl border border-default bg-surface px-4 py-3 text-left transition-colors hover:bg-surface-alt"
               >
                 <div className="font-medium text-primary">{result.name}</div>
-                <div className="mt-1 text-sm subtle-text">{result.type}</div>
+                <div className="mt-1 text-sm subtle-text">
+                  {result.kind === "poi"
+                    ? `${result.type || "POI"}${result.floor_name ? ` • ${result.floor_name}` : ""}`
+                    : result.type}
+                </div>
               </button>
             ))
           )}
@@ -162,7 +177,7 @@ export default function NavigatePage() {
   const [outdoorRouteMessage, setOutdoorRouteMessage] = useState("");
   const [mobileSheetExpanded, setMobileSheetExpanded] = useState(false);
   const [overlayVisible, setOverlayVisible] = useState(false);
-  const [indoorViewMode, setIndoorViewMode] = useState("3d");
+  const [indoorViewMode, setIndoorViewMode] = useState("isometric");
   const [sensorPosition, setSensorPosition] = useState(null);
   const dragStartRef = useRef(null);
   const lastStepCountRef = useRef(0);
@@ -173,14 +188,30 @@ export default function NavigatePage() {
     const lat = Number.parseFloat(building?.entrance_lat);
     const lng = Number.parseFloat(building?.entrance_lng);
 
-    return Number.isFinite(lat) && Number.isFinite(lng) ? [lat, lng] : null;
-  }, [building?.entrance_lat, building?.entrance_lng]);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      return [lat, lng];
+    }
+
+    const anchor =
+      floorData?.map_data?.georeference ||
+      floorData?.map_data?.floors?.find((entry) => entry.id === floorData?.id)?.georeference ||
+      null;
+
+    const fallbackLat = Number.parseFloat(anchor?.anchorLat || anchor?.anchor_lat);
+    const fallbackLng = Number.parseFloat(anchor?.anchorLng || anchor?.anchor_lng);
+    return Number.isFinite(fallbackLat) && Number.isFinite(fallbackLng)
+      ? [fallbackLat, fallbackLng]
+      : null;
+  }, [building?.entrance_lat, building?.entrance_lng, floorData]);
   const indoorMap = useMemo(() => buildCanonicalIndoorMap(floorData), [floorData]);
   const currentOverlayBounds = useMemo(
     () => indoorMap.floor.overlayBounds,
     [indoorMap],
   );
-  const hasGeoAnchor = Boolean(entranceCenter && currentOverlayBounds);
+  const hasGeoAnchor = Boolean(
+    entranceCenter &&
+      (currentOverlayBounds || (indoorMap.floor.corners || []).length >= 4),
+  );
   const rendererResolution = useMemo(
     () => resolveNavigationAdapter(MAP_PROVIDER),
     [],
@@ -233,9 +264,9 @@ export default function NavigatePage() {
   }, [fromRoomId]);
 
   useEffect(() => {
-    if (!fromRoom?.floor_id || !floors.length) return;
+    if (!(fromRoom?.floor_id || fromRoom?.floorId) || !floors.length) return;
     const matchingFloor = floors.find(
-      (entry) => entry.id === fromRoom.floor_id,
+      (entry) => entry.id === (fromRoom.floor_id || fromRoom.floorId),
     );
     if (matchingFloor) setCurrentFloor(matchingFloor);
   }, [floors, fromRoom]);
@@ -334,8 +365,11 @@ export default function NavigatePage() {
   ]);
 
   const currentSensorRoomCenter = useMemo(() => {
-    if (!fromRoom || fromRoom.floor_id !== currentFloor?.id) return null;
-    const room = indoorMap.rooms.find((entry) => entry.id === fromRoom.id) || fromRoom;
+    if (!fromRoom) return null;
+    const activeFloorId = fromRoom.floor_id || fromRoom.floorId || null;
+    if (activeFloorId !== currentFloor?.id) return null;
+    const routeRoomId = fromRoom.route_room_id || fromRoom.id;
+    const room = indoorMap.rooms.find((entry) => entry.id === routeRoomId) || fromRoom;
     return roomCenter(room);
   }, [currentFloor?.id, fromRoom, indoorMap.rooms]);
 
@@ -441,14 +475,11 @@ export default function NavigatePage() {
 
     const points = [];
     if (userLocation) points.push(userLocation);
-    if (building?.entrance_lat && building?.entrance_lng) {
-      points.push([
-        Number.parseFloat(building.entrance_lat),
-        Number.parseFloat(building.entrance_lng),
-      ]);
+    if (entranceCenter) {
+      points.push(entranceCenter);
     }
     return points;
-  }, [building, outdoorRoute, userLocation]);
+  }, [entranceCenter, outdoorRoute, userLocation]);
 
   const routeSummary = useMemo(() => {
     if (!indoorRoute) return null;
@@ -473,6 +504,11 @@ export default function NavigatePage() {
   const selectRoom = useCallback(
     (room) => {
       const target = roomPickTarget || selectingFor;
+      const matchingFloorId = room.floor_id || room.floorId || null;
+      if (matchingFloorId) {
+        const matchingFloor = floors.find((entry) => entry.id === matchingFloorId);
+        if (matchingFloor) setCurrentFloor(matchingFloor);
+      }
       if (target === "from") {
         setFromRoom(room);
         setFromQuery(room.name || "");
@@ -487,7 +523,35 @@ export default function NavigatePage() {
       setMode("indoor");
       setMobileSheetExpanded(true);
     },
-    [roomPickTarget, selectingFor],
+    [floors, roomPickTarget, selectingFor],
+  );
+
+  const resolveRouteRoomId = useCallback(
+    (target) => {
+      if (!target) return null;
+      if (target.route_room_id) return target.route_room_id;
+      if (target.kind !== "poi") return target.id || null;
+
+      const targetFloorId = target.floor_id || target.floorId || currentFloor?.id || floorData?.id;
+      const floorRooms = indoorMap.rooms.filter(
+        (room) =>
+          !targetFloorId ||
+          !room.floor_id ||
+          room.floor_id === targetFloorId ||
+          room.floorId === targetFloorId,
+      );
+
+      if (!floorRooms.length) return null;
+
+      const nearestRoom = [...floorRooms].sort((left, right) => {
+        const leftDistance = pointDistance(roomCenter(left), target);
+        const rightDistance = pointDistance(roomCenter(right), target);
+        return leftDistance - rightDistance;
+      })[0];
+
+      return nearestRoom?.id || null;
+    },
+    [currentFloor?.id, floorData?.id, indoorMap.rooms],
   );
 
   const getUserLocation = useCallback(() => {
@@ -506,14 +570,14 @@ export default function NavigatePage() {
         ];
         setUserLocation(currentLocation);
 
-        if (!building?.entrance_lat || !building?.entrance_lng) {
+        if (!entranceCenter) {
           setLocationLoading(false);
           return;
         }
 
         try {
           const response = await fetch(
-            `/api/v1/navigation/outdoor-route?fromLat=${currentLocation[0]}&fromLng=${currentLocation[1]}&toLat=${building.entrance_lat}&toLng=${building.entrance_lng}`,
+            `/api/v1/navigation/outdoor-route?fromLat=${currentLocation[0]}&fromLng=${currentLocation[1]}&toLat=${entranceCenter[0]}&toLng=${entranceCenter[1]}`,
           );
           const data = await response.json();
 
@@ -525,10 +589,7 @@ export default function NavigatePage() {
           } else {
             setOutdoorRoute([
               currentLocation,
-              [
-                Number.parseFloat(building.entrance_lat),
-                Number.parseFloat(building.entrance_lng),
-              ],
+              entranceCenter,
             ]);
             setOutdoorRouteMessage(
               "Walking directions are temporarily unavailable, so a direct approach line is shown instead.",
@@ -538,10 +599,7 @@ export default function NavigatePage() {
           console.error(error);
           setOutdoorRoute([
             currentLocation,
-            [
-              Number.parseFloat(building.entrance_lat),
-              Number.parseFloat(building.entrance_lng),
-            ],
+            entranceCenter,
           ]);
           setOutdoorRouteMessage(
             "Walking directions are temporarily unavailable, so a direct approach line is shown instead.",
@@ -558,16 +616,24 @@ export default function NavigatePage() {
       },
       { enableHighAccuracy: true, timeout: 10000 },
     );
-  }, [building]);
+  }, [entranceCenter]);
 
   const getIndoorRoute = useCallback(async () => {
     if (!fromRoom || !toRoom) return;
 
+    const fromRouteRoomId = resolveRouteRoomId(fromRoom);
+    const toRouteRoomId = resolveRouteRoomId(toRoom);
+
+    if (!fromRouteRoomId || !toRouteRoomId) {
+      window.alert("Pick rooms or POIs that can be anchored to a mapped room before routing.");
+      return;
+    }
+
     setRouteLoading(true);
     try {
       const result = await api.navigation.route(
-        fromRoom.id,
-        toRoom.id,
+        fromRouteRoomId,
+        toRouteRoomId,
         buildingId,
       );
       setIndoorRoute(result);
@@ -582,7 +648,7 @@ export default function NavigatePage() {
     } finally {
       setRouteLoading(false);
     }
-  }, [buildingId, floors, fromRoom, toRoom]);
+  }, [buildingId, floors, fromRoom, resolveRouteRoomId, toRoom]);
 
   const handleSwapRooms = () => {
     setFromRoom(toRoom);
@@ -596,6 +662,14 @@ export default function NavigatePage() {
   const handleBuildingChange = (nextBuildingId) => {
     if (!nextBuildingId || nextBuildingId === buildingId) return;
     navigate(`/navigate/${nextBuildingId}`);
+  };
+
+  const applyQuickCategory = (query) => {
+    setMode("indoor");
+    setSelectingFor("to");
+    setToQuery(query);
+    setRoomPickTarget(null);
+    setMobileSheetExpanded(true);
   };
 
   const handleTouchStart = (event) => {
@@ -629,12 +703,54 @@ export default function NavigatePage() {
         </button>
       </div>
 
+      <div className="rounded-[24px] border border-default bg-surface px-4 py-4 shadow-sm">
+        <div className="map-editor__search">
+          <Search className="h-4 w-4 text-muted" />
+          <input
+            value={selectingFor === "to" ? toQuery : fromQuery}
+            onFocus={() => {
+              setSelectingFor("to");
+              setMode("indoor");
+            }}
+            onChange={(event) => {
+              setSelectingFor("to");
+              setToQuery(event.target.value);
+            }}
+            placeholder="Search here..."
+          />
+        </div>
+
+        <div className="mt-4 grid grid-cols-4 gap-2">
+          {[
+            { label: "Dining", icon: UtensilsCrossed, query: "food" },
+            { label: "Help", icon: LifeBuoy, query: "help" },
+            { label: "Departments", icon: Star, query: "department" },
+            { label: "Exits", icon: DoorOpen, query: "exit" },
+          ].map((entry) => {
+            const Icon = entry.icon;
+            return (
+              <button
+                key={entry.label}
+                type="button"
+                onClick={() => applyQuickCategory(entry.query)}
+                className="rounded-2xl border border-default bg-surface-alt px-2 py-3 text-center transition-colors hover:bg-surface"
+              >
+                <Icon className="mx-auto h-4 w-4 text-secondary" />
+                <div className="mt-2 text-[11px] font-medium text-secondary">
+                  {entry.label}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       <div className="rounded-xl border border-default bg-surface px-4 py-3">
         <div className="flex items-center justify-between gap-3">
           <div>
             <div className="text-sm font-medium text-primary">Unified Map View</div>
             <div className="mt-1 text-xs subtle-text">
-              Outdoor map stays live. Indoor layers appear as you zoom into mapped buildings.
+              Outdoor context stays live. Indoor layers reveal themselves as you zoom into mapped buildings.
             </div>
           </div>
           <span className="badge-neutral">{mode === "indoor" ? "Indoor focus" : "Outdoor focus"}</span>
@@ -643,15 +759,19 @@ export default function NavigatePage() {
 
       {mode === "indoor" && (
         <div className="inline-flex rounded-full border border-default bg-surface-alt p-1">
-          {["2d", "3d"].map((entry) => (
+          {[
+            { id: "2d", label: "2D" },
+            { id: "isometric", label: "2.5D" },
+            { id: "3d", label: "3D" },
+          ].map((entry) => (
             <button
-              key={entry}
-              onClick={() => setIndoorViewMode(entry)}
+              key={entry.id}
+              onClick={() => setIndoorViewMode(entry.id)}
               className={`rounded-full px-4 py-2 text-sm font-semibold uppercase transition-colors ${
-                indoorViewMode === entry ? "bg-accent text-white" : "text-secondary"
+                indoorViewMode === entry.id ? "bg-accent text-white" : "text-secondary"
               }`}
             >
-              {entry}
+              {entry.label}
             </button>
           ))}
         </div>
@@ -832,9 +952,9 @@ export default function NavigatePage() {
         </div>
       )}
 
-      {mode === "indoor" && isAdmin && (!entranceCenter || !currentOverlayBounds) && (
+      {mode === "indoor" && isAdmin && (!entranceCenter || !hasGeoAnchor) && (
         <div className="absolute left-1/2 top-4 z-[710] -translate-x-1/2 rounded-md border border-default bg-[color:var(--color-map-overlay)] px-3 py-2 text-xs text-secondary shadow-sm">
-          Add building coordinates and floor overlay bounds in admin settings to enable map overlay.
+          Complete Position on World for this floor to enable the live map overlay.
         </div>
       )}
 
@@ -850,6 +970,23 @@ export default function NavigatePage() {
           </div>
         </div>
       )}
+
+      <div className="absolute right-4 top-4 z-[706] flex items-center gap-2">
+        <button
+          type="button"
+          onClick={() => setMode("outdoor")}
+          className="rounded-full border border-default bg-[color:var(--color-map-overlay)] px-4 py-2 text-sm font-medium text-secondary shadow-sm"
+        >
+          Exit {building?.name || "Building"}
+        </button>
+        <button
+          type="button"
+          title="Map information"
+          className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-default bg-[color:var(--color-map-overlay)] text-secondary shadow-sm"
+        >
+          <Info className="h-4 w-4" />
+        </button>
+      </div>
 
       <div className="absolute left-4 top-4 z-[700] hidden w-full max-w-[380px] lg:block">
         <div className="map-panel h-[calc(100vh-2rem)] overflow-hidden rounded-xl border border-default p-4">
@@ -895,7 +1032,7 @@ export default function NavigatePage() {
 
       {mode === "indoor" && visibleFloors.length > 1 && (
         <div
-          className="absolute bottom-5 left-1/2 z-[700] hidden -translate-x-1/2 items-center gap-2 rounded-full bg-[color:var(--color-map-overlay)] px-2 py-2 lg:flex"
+          className="absolute right-4 top-28 z-[700] hidden flex-col items-stretch gap-2 rounded-[20px] bg-[color:var(--color-map-overlay)] p-2 lg:flex"
           style={{ boxShadow: "var(--shadow-panel)" }}
         >
           {visibleFloors.map((floor) => (
@@ -911,6 +1048,23 @@ export default function NavigatePage() {
           ))}
         </div>
       )}
+
+      <div className="absolute bottom-5 left-4 z-[700] hidden lg:block">
+        <div className="rounded-full border border-default bg-[color:var(--color-map-overlay)] px-3 py-2 text-sm text-secondary shadow-sm">
+          <select
+            className="bg-transparent text-sm outline-none"
+            defaultValue="English (US)"
+          >
+            <option>English (US)</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="absolute bottom-5 left-1/2 z-[700] hidden -translate-x-1/2 lg:block">
+        <div className="rounded-full border border-default bg-[color:var(--color-map-overlay)] px-4 py-2 text-xs text-secondary shadow-sm">
+          CampusNav © MapTiler © OpenStreetMap contributors
+        </div>
+      </div>
 
       <div className="fixed bottom-0 left-0 right-0 z-[720] lg:hidden">
         <div

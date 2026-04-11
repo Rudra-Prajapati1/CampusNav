@@ -37,6 +37,8 @@ function normalizeFloorDescriptor(entry = {}, fallback = {}) {
     name: entry.name || fallback.name || "Untitled floor",
     level: toFiniteNumber(entry.level ?? fallback.level) ?? 0,
     overlayBounds: normalizeOverlayBounds(entry.overlayBounds),
+    corners: Array.isArray(entry.corners) ? entry.corners : [],
+    georeference: entry.georeference || null,
     metadata: {
       backgroundDataUrl: entry.backgroundDataUrl || null,
       threeD: entry.threeD || {},
@@ -145,7 +147,9 @@ export function buildCanonicalIndoorMap(floorData) {
     .map(normalizePath);
   const doors = elements.filter((element) => element.kind === "door");
   const walls = elements.filter((element) => element.kind === "wall");
+  const windows = elements.filter((element) => element.kind === "window");
   const beacons = elements.filter((element) => element.kind === "beacon");
+  const objects = elements.filter((element) => element.kind === "object");
 
   return {
     version: 1,
@@ -160,7 +164,9 @@ export function buildCanonicalIndoorMap(floorData) {
     waypoints,
     paths,
     walls,
+    windows,
     beacons,
+    objects,
     metadata: {
       showGrid: mapData.showGrid ?? true,
       showLabels: mapData.showLabels ?? true,

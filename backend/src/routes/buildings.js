@@ -13,33 +13,36 @@ function isMissingColumnError(error) {
   );
 }
 
+function normalizeCoordinate(value) {
+  if (value === "" || value === undefined || value === null) return null;
+  const parsed =
+    typeof value === "number" ? value : Number.parseFloat(String(value));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 function normalizeBuildingPayload(body, userId) {
-  return {
-    name: body.name,
-    industry: body.industry || "education",
-    description: body.description,
-    address: body.address,
-    logo_url: body.logo_url,
-    entrance_lat:
-      body.entrance_lat === "" || body.entrance_lat === undefined
-        ? null
-        : body.entrance_lat,
-    entrance_lng:
-      body.entrance_lng === "" || body.entrance_lng === undefined
-        ? null
-        : body.entrance_lng,
-    ...(userId ? { created_by: userId } : {}),
-  };
+  const payload = {};
+
+  if ("name" in body) payload.name = body.name;
+  if ("industry" in body) payload.industry = body.industry || "education";
+  if ("description" in body) payload.description = body.description;
+  if ("address" in body) payload.address = body.address;
+  if ("logo_url" in body) payload.logo_url = body.logo_url;
+  if ("entrance_lat" in body) payload.entrance_lat = normalizeCoordinate(body.entrance_lat);
+  if ("entrance_lng" in body) payload.entrance_lng = normalizeCoordinate(body.entrance_lng);
+  if (userId) payload.created_by = userId;
+
+  return payload;
 }
 
 function legacyBuildingPayload(body, userId) {
-  return {
-    name: body.name,
-    description: body.description,
-    address: body.address,
-    logo_url: body.logo_url,
-    ...(userId ? { created_by: userId } : {}),
-  };
+  const payload = {};
+  if ("name" in body) payload.name = body.name;
+  if ("description" in body) payload.description = body.description;
+  if ("address" in body) payload.address = body.address;
+  if ("logo_url" in body) payload.logo_url = body.logo_url;
+  if (userId) payload.created_by = userId;
+  return payload;
 }
 
 // Public: Get all buildings

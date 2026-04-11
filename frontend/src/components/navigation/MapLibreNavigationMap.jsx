@@ -2,14 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import {
-  Building2,
-  Layers,
-  RotateCcw,
-  RotateCw,
-  ZoomIn,
-  ZoomOut,
-} from "lucide-react";
+import { Building2, ZoomIn, ZoomOut } from "lucide-react";
 import IndoorCanvas from "./IndoorCanvas.jsx";
 import { mapLibreAdapter } from "./adapters/mapLibreAdapter.js";
 
@@ -19,6 +12,19 @@ const FLOOR_IMAGE_SOURCE_ID = "campusnav-floor-image";
 const FLOOR_IMAGE_LAYER_ID = "campusnav-floor-image-layer";
 const FOCUS_BUILDING_SOURCE_ID = "campusnav-focus-building";
 const FOCUS_BUILDING_LAYER_ID = "campusnav-focus-building-layer";
+const KNOWN_ICON_IDS = [
+  "office",
+  "room",
+  "exit",
+  "info",
+  "stairs",
+  "elevator",
+  "dining",
+  "help",
+  "departments",
+  "retail",
+  "facility",
+];
 
 function createMarkerElement(color) {
   const marker = document.createElement("div");
@@ -29,6 +35,53 @@ function createMarkerElement(color) {
   marker.style.border = "3px solid white";
   marker.style.boxShadow = "0 8px 20px rgba(15,23,42,0.2)";
   return marker;
+}
+
+function fallbackIconColor(iconId = "") {
+  const normalized = String(iconId).toLowerCase();
+  if (normalized.includes("exit")) return "#16A34A";
+  if (normalized.includes("dining") || normalized.includes("food")) return "#F59E0B";
+  if (normalized.includes("office") || normalized.includes("room")) return "#2563EB";
+  if (normalized.includes("help") || normalized.includes("info")) return "#64748B";
+  return "#7C3AED";
+}
+
+function createFallbackIcon(iconId) {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 64;
+  const ctx = canvas.getContext("2d");
+  const color = fallbackIconColor(iconId);
+
+  ctx.clearRect(0, 0, 64, 64);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.arc(32, 32, 20, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 4;
+  ctx.strokeStyle = "#FFFFFF";
+  ctx.stroke();
+  ctx.fillStyle = "#FFFFFF";
+  ctx.font = "700 18px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillText(String(iconId || "i").slice(0, 1).toUpperCase(), 32, 33);
+
+  return canvas;
+}
+
+function registerFallbackIcons(map) {
+  const ensureIcon = (iconId) => {
+    if (!iconId || map.hasImage(iconId)) return;
+    map.addImage(iconId, createFallbackIcon(iconId), { pixelRatio: 2 });
+  };
+
+  KNOWN_ICON_IDS.forEach(ensureIcon);
+
+  const handleMissingImage = (event) => ensureIcon(event.id);
+  map.on("styleimagemissing", handleMissingImage);
+
+  return () => map.off("styleimagemissing", handleMissingImage);
 }
 
 function upsertGeoJsonLine(map, coordinates) {
@@ -79,8 +132,36 @@ function removeRouteLayer(map) {
   if (map.getSource(ROUTE_SOURCE_ID)) map.removeSource(ROUTE_SOURCE_ID);
 }
 
-function upsertFloorImageOverlay(map, imageUrl, bounds) {
-  const coordinates = mapLibreAdapter.getImageOverlayCoordinates(bounds);
+function normalizeOverlayCoordinates(bounds, corners) {
+  if (Array.isArray(corners) && corners.length >= 4) {
+    const ordered = ["nw", "ne", "se", "sw"]
+      .map((id) => corners.find((corner) => corner.id === id))
+      .filter(Boolean);
+    const usable = ordered.length === 4 ? ordered : corners.slice(0, 4);
+    if (usable.length === 4) {
+      return usable.map((corner) => [corner.lng, corner.lat]);
+    }
+  }
+
+  return bounds ? mapLibreAdapter.getImageOverlayCoordinates(bounds) : null;
+}
+
+function boundsFromCorners(corners) {
+  const usable = normalizeOverlayCoordinates(null, corners);
+  if (!usable?.length) return null;
+  const lngs = usable.map((point) => point[0]);
+  const lats = usable.map((point) => point[1]);
+  return {
+    north: Math.max(...lats),
+    south: Math.min(...lats),
+    east: Math.max(...lngs),
+    west: Math.min(...lngs),
+  };
+}
+
+function upsertFloorImageOverlay(map, imageUrl, bounds, corners) {
+  const coordinates = normalizeOverlayCoordinates(bounds, corners);
+  if (!coordinates) return;
   const existingSource = map.getSource(FLOOR_IMAGE_SOURCE_ID);
 
   if (existingSource?.updateImage) {
@@ -249,6 +330,18 @@ export default function MapLibreNavigationMap({
     () => (outdoorRoute || []).map(mapLibreAdapter.toLngLat),
     [outdoorRoute],
   );
+  const currentOverlayCorners = useMemo(() => {
+    const floorEntry =
+      floorData?.map_data?.floors?.find((entry) => entry.id === floorData?.id) ||
+      floorData?.map_data?.floors?.find((entry) => entry.level === floorData?.level) ||
+      floorData?.map_data?.floors?.[0] ||
+      null;
+    return floorEntry?.corners || floorData?.map_data?.georeference?.corners || null;
+  }, [floorData]);
+  const focusBuildingBounds = useMemo(
+    () => currentOverlayBounds || boundsFromCorners(currentOverlayCorners),
+    [currentOverlayBounds, currentOverlayCorners],
+  );
 
   useEffect(() => {
     if (!containerRef.current || mapRef.current || !entranceCenter) return undefined;
@@ -271,11 +364,13 @@ export default function MapLibreNavigationMap({
 
     const syncViewport = () => setMapZoom(map.getZoom());
     map.on("move", syncViewport);
+    const removeFallbackIcons = registerFallbackIcons(map);
 
     mapRef.current = map;
 
     return () => {
       map.off("move", syncViewport);
+      removeFallbackIcons();
       entranceMarkerRef.current?.remove();
       entranceMarkerRef.current = null;
       userMarkerRef.current?.remove();
@@ -297,6 +392,7 @@ export default function MapLibreNavigationMap({
         bounds.extend(mapLibreAdapter.toLngLat(point)),
       );
       map.fitBounds(bounds, { padding: 46, maxZoom: 20, duration: 800 });
+      map.easeTo({ pitch: 45, bearing: -17, duration: 0 });
       return;
     }
 
@@ -304,6 +400,8 @@ export default function MapLibreNavigationMap({
       map.easeTo({
         center: mapLibreAdapter.toLngLat(entranceCenter),
         zoom: 18,
+        pitch: 45,
+        bearing: -17,
         duration: 800,
       });
     }
@@ -316,7 +414,8 @@ export default function MapLibreNavigationMap({
     map.easeTo({
       center: mapLibreAdapter.toLngLat(entranceCenter),
       zoom: 19,
-      pitch: 55,
+      pitch: 0,
+      bearing: 0,
       duration: 900,
     });
   }, [entranceCenter, mapReady, mode]);
@@ -329,7 +428,8 @@ export default function MapLibreNavigationMap({
     map.easeTo({
       center: mapLibreAdapter.toLngLat(entranceCenter),
       zoom: 19,
-      pitch: 55,
+      pitch: 0,
+      bearing: 0,
       duration: 650,
     });
   }, [entranceCenter, mapReady, roomPickTarget]);
@@ -338,16 +438,13 @@ export default function MapLibreNavigationMap({
     const map = mapRef.current;
     if (!mapReady || !map) return;
 
-    if (!building?.entrance_lat || !building?.entrance_lng) {
+    if (!entranceCenter) {
       entranceMarkerRef.current?.remove();
       entranceMarkerRef.current = null;
       return;
     }
 
-    const lngLat = [
-      Number.parseFloat(building.entrance_lng),
-      Number.parseFloat(building.entrance_lat),
-    ];
+    const lngLat = mapLibreAdapter.toLngLat(entranceCenter);
 
     if (!entranceMarkerRef.current) {
       entranceMarkerRef.current = new maplibregl.Marker({
@@ -359,7 +456,7 @@ export default function MapLibreNavigationMap({
     }
 
     entranceMarkerRef.current.setLngLat(lngLat);
-  }, [building?.entrance_lat, building?.entrance_lng, mapReady]);
+  }, [entranceCenter, mapReady]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -399,8 +496,8 @@ export default function MapLibreNavigationMap({
   useEffect(() => {
     const map = mapRef.current;
     if (!mapReady || !map) return;
-    upsertFocusBuildingExtrusion(map, currentOverlayBounds, entranceCenter);
-  }, [currentOverlayBounds, entranceCenter, mapReady]);
+    upsertFocusBuildingExtrusion(map, focusBuildingBounds, entranceCenter);
+  }, [entranceCenter, focusBuildingBounds, mapReady]);
 
   useEffect(() => {
     const map = mapRef.current;
@@ -409,7 +506,7 @@ export default function MapLibreNavigationMap({
     const visible =
       indoorVisible &&
       shouldUseMapOverlay &&
-      Boolean(currentOverlayBounds) &&
+      Boolean(currentOverlayBounds || currentOverlayCorners) &&
       Boolean(floorImageUrl);
 
     if (!visible) {
@@ -417,9 +514,15 @@ export default function MapLibreNavigationMap({
       return;
     }
 
-    upsertFloorImageOverlay(map, floorImageUrl, currentOverlayBounds);
+    upsertFloorImageOverlay(
+      map,
+      floorImageUrl,
+      currentOverlayBounds,
+      currentOverlayCorners,
+    );
   }, [
     currentOverlayBounds,
+    currentOverlayCorners,
     floorImageUrl,
     mapReady,
     indoorVisible,
@@ -493,45 +596,6 @@ export default function MapLibreNavigationMap({
           >
             <ZoomOut className="h-4 w-4" />
           </button>
-          <button
-            type="button"
-            onClick={() =>
-              mapRef.current?.easeTo({
-                pitch: mapRef.current.getPitch() > 10 ? 0 : 55,
-                duration: 500,
-              })
-            }
-            className="btn-secondary px-3"
-            title="Toggle tilt"
-          >
-            <Layers className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() =>
-              mapRef.current?.easeTo({
-                bearing: (mapRef.current.getBearing() || 0) - 30,
-                duration: 400,
-              })
-            }
-            className="btn-secondary px-3"
-            title="Rotate left"
-          >
-            <RotateCcw className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() =>
-              mapRef.current?.easeTo({
-                bearing: (mapRef.current.getBearing() || 0) + 30,
-                duration: 400,
-              })
-            }
-            className="btn-secondary px-3"
-            title="Rotate right"
-          >
-            <RotateCw className="h-4 w-4" />
-          </button>
         </div>
       )}
 
@@ -564,6 +628,7 @@ export default function MapLibreNavigationMap({
             isDark={isDark}
             mapAdapter={mapBridge}
             overlayBounds={currentOverlayBounds}
+            overlayCorners={currentOverlayCorners}
             interactive={Boolean(roomPickTarget)}
             onRoomPick={roomPickTarget ? selectRoom : undefined}
             viewMode={viewMode}

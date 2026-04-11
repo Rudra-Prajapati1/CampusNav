@@ -17,6 +17,7 @@
     "react-hot-toast": "^2.4.1",
     "react-leaflet": "^4.2.1",
     "react-router-dom": "^6.21.0",
+    "three": "^0.174.0",
     "uuid": "^13.0.0",
     "zustand": "^4.4.7"
   },

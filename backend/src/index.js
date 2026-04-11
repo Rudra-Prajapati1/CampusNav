@@ -7,6 +7,7 @@ import roomsRouter from "./routes/rooms.js";
 import navigationRouter from "./routes/navigation.js";
 import qrRouter from "./routes/qr.js";
 import authRouter from "./routes/auth.js";
+import mapsRouter from "./routes/maps.js";
 
 dotenv.config();
 
@@ -29,6 +30,8 @@ app.use("/api/v1/floors", floorsRouter);
 app.use("/api/v1/rooms", roomsRouter);
 app.use("/api/v1/navigation", navigationRouter);
 app.use("/api/v1/qr", qrRouter);
+app.use("/api/v1/maps", mapsRouter);
+app.use("/api/maps", mapsRouter);
 
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", message: "CampusNav API running" });

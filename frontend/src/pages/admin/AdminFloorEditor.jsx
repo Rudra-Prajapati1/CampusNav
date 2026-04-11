@@ -1,6 +1,6 @@
 // CampusNav update — AdminFloorEditor.jsx
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft,
   Check,
@@ -58,6 +58,7 @@ function IconButton({ title, children, active = false, disabled = false, onClick
 
 export default function AdminFloorEditor() {
   const { buildingId, floorId } = useParams();
+  const location = useLocation();
   const navigate = useNavigate();
   const { isDark, toggleTheme } = useTheme();
   const editorRef = useRef(null);
@@ -139,9 +140,9 @@ export default function AdminFloorEditor() {
           rooms,
           waypoints,
           connections,
+          map_data,
           scale_pixels_per_meter,
         });
-        await api.floors.update(floorId, { map_data });
         setFloorData((current) =>
           current
             ? {
@@ -412,6 +413,7 @@ export default function AdminFloorEditor() {
           onStateChange={setEditorStatus}
           previewMode={previewMode}
           previewView={previewView}
+          autoOpenAiMapping={Boolean(location.state?.openAiMapping)}
         />
       </div>
 

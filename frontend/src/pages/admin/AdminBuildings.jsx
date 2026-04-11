@@ -108,8 +108,7 @@ function BuildingModal({ building, onClose, onSave }) {
     industry: building?.industry || "education",
     description: building?.description || "",
     address: building?.address || "",
-    entrance_lat: building?.entrance_lat || "",
-    entrance_lng: building?.entrance_lng || "",
+    logo_url: building?.logo_url || "",
   });
   const [saving, setSaving] = useState(false);
 
@@ -192,45 +191,19 @@ function BuildingModal({ building, onClose, onSave }) {
           />
         </div>
 
-        <div className="mt-4 grid gap-4 md:grid-cols-2">
-          <div>
-            <label className="field-label">Entrance Latitude</label>
-            <input
-              className="input"
-              type="number"
-              step="any"
-              value={form.entrance_lat}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  entrance_lat: event.target.value,
-                }))
-              }
-              placeholder="23.02887"
-            />
-            <p className="mt-2 text-xs subtle-text">
-              Used to anchor the indoor floor plan on the real-world map.
-            </p>
-          </div>
-          <div>
-            <label className="field-label">Entrance Longitude</label>
-            <input
-              className="input"
-              type="number"
-              step="any"
-              value={form.entrance_lng}
-              onChange={(event) =>
-                setForm((current) => ({
-                  ...current,
-                  entrance_lng: event.target.value,
-                }))
-              }
-              placeholder="72.55078"
-            />
-            <p className="mt-2 text-xs subtle-text">
-              Add the building entrance point to enable outdoor-to-indoor alignment.
-            </p>
-          </div>
+        <div className="mt-4">
+          <label className="field-label">Logo URL</label>
+          <input
+            className="input"
+            value={form.logo_url}
+            onChange={(event) =>
+              setForm((current) => ({ ...current, logo_url: event.target.value }))
+            }
+            placeholder="https://example.com/logo.png"
+          />
+          <p className="mt-2 text-xs subtle-text">
+            Building world placement is handled later in the georeference step.
+          </p>
         </div>
 
         <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
@@ -260,6 +233,8 @@ function FloorModal({ floor, buildingId, bulk = false, onClose, onSave }) {
 
     setSaving(true);
     try {
+      let nextWorldPositionFloorId = null;
+
       if (floor) {
         let payload = { ...form };
 
@@ -276,7 +251,9 @@ function FloorModal({ floor, buildingId, bulk = false, onClose, onSave }) {
           };
         }
 
-        await api.floors.update(floor.id, payload);
+        const updatedFloor = await api.floors.update(floor.id, payload);
+        nextWorldPositionFloorId =
+          payload.floor_plan_url || updatedFloor?.floor_plan_url ? floor.id : null;
         toast.success("Floor updated");
       } else {
         if (files.length > 1 || bulk) {
@@ -284,21 +261,22 @@ function FloorModal({ floor, buildingId, bulk = false, onClose, onSave }) {
             throw new Error("Select one or more floor plans to import.");
           }
 
-          await Promise.all(
-            files.map(async (file, index) => {
-              const path = buildFloorPlanPath(buildingId, file, index);
-              const url = await uploadFile(FLOOR_PLAN_BUCKET, path, file, true);
-              const dimensions = await getImageDimensions(file);
-              await api.floors.create({
-                building_id: buildingId,
-                name: floorNameFromFile(file, form.level + index),
-                level: form.level + index,
-                floor_plan_url: url,
-                floor_plan_width: dimensions.width,
-                floor_plan_height: dimensions.height,
-              });
-            }),
-          );
+          const createdFloors = [];
+          for (const [index, file] of files.entries()) {
+            const path = buildFloorPlanPath(buildingId, file, index);
+            const url = await uploadFile(FLOOR_PLAN_BUCKET, path, file, true);
+            const dimensions = await getImageDimensions(file);
+            const createdFloor = await api.floors.create({
+              building_id: buildingId,
+              name: floorNameFromFile(file, form.level + index),
+              level: form.level + index,
+              floor_plan_url: url,
+              floor_plan_width: dimensions.width,
+              floor_plan_height: dimensions.height,
+            });
+            createdFloors.push(createdFloor);
+          }
+          nextWorldPositionFloorId = createdFloors[0]?.id || null;
           toast.success(`${files.length} floor plans imported`);
         } else {
           let payload = { ...form, building_id: buildingId };
@@ -315,11 +293,18 @@ function FloorModal({ floor, buildingId, bulk = false, onClose, onSave }) {
             };
           }
 
-          await api.floors.create(payload);
+          const createdFloor = await api.floors.create(payload);
+          nextWorldPositionFloorId =
+            payload.floor_plan_url || createdFloor?.floor_plan_url
+              ? createdFloor.id
+              : null;
           toast.success("Floor created");
         }
       }
-      onSave();
+      onSave({
+        buildingId,
+        nextWorldPositionFloorId,
+      });
     } catch (error) {
       toast.error(error.message || "Unable to save floor");
     } finally {
@@ -382,7 +367,7 @@ function FloorModal({ floor, buildingId, bulk = false, onClose, onSave }) {
           <input
             className="input"
             type="file"
-            accept="image/*"
+            accept="image/*,.pdf"
             multiple={!floor}
             onChange={(event) => setFiles(Array.from(event.target.files || []))}
           />
@@ -822,6 +807,17 @@ export default function AdminBuildings() {
                             </button>
                             <button
                               onClick={() =>
+                                navigate(
+                                  `/admin/buildings/${building.id}/floors/${floor.id}/georeference`,
+                                )
+                              }
+                              className="btn-secondary"
+                            >
+                              <MapPin className="h-4 w-4" />
+                              Position on World
+                            </button>
+                            <button
+                              onClick={() =>
                                 navigate(`/admin/buildings/${building.id}/floors/${floor.id}/editor`)
                               }
                               className="btn-primary"
@@ -878,11 +874,16 @@ export default function AdminBuildings() {
           buildingId={modal.buildingId}
           bulk={Boolean(modal.bulk)}
           onClose={closeModal}
-          onSave={async () => {
-            const buildingId = modal.buildingId;
+          onSave={async ({ buildingId, nextWorldPositionFloorId } = {}) => {
+            const targetBuildingId = buildingId || modal.buildingId;
             closeModal();
-            await loadFloors(buildingId);
+            await loadFloors(targetBuildingId);
             await loadBuildings();
+            if (nextWorldPositionFloorId) {
+              navigate(
+                `/admin/buildings/${targetBuildingId}/floors/${nextWorldPositionFloorId}/georeference`,
+              );
+            }
           }}
         />
       )}

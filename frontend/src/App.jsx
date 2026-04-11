@@ -9,6 +9,7 @@ import NotFound from "./pages/NotFound.jsx";
 import AdminBuildings from "./pages/admin/AdminBuildings.jsx";
 import AdminDashboard from "./pages/admin/AdminDashboard.jsx";
 import AdminFloorEditor from "./pages/admin/AdminFloorEditor.jsx";
+import AdminFloorGeoreference from "./pages/admin/AdminFloorGeoreference.jsx";
 import AdminLayout from "./pages/admin/AdminLayout.jsx";
 import AdminLogin from "./pages/admin/AdminLogin.jsx";
 import NavigatePage from "./pages/user/NavigatePage.jsx";
@@ -80,6 +81,14 @@ function AppRoutes() {
         <Route path="/" element={<LandingPage />} />
         <Route path="/navigate/:buildingId" element={<NavigatePage />} />
         <Route path="/admin/login" element={<AdminLogin />} />
+        <Route
+          path="/admin/buildings/:buildingId/floors/:floorId/georeference"
+          element={
+            <ProtectedRoute>
+              <AdminFloorGeoreference />
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="/admin/buildings/:buildingId/floors/:floorId/editor"
           element={

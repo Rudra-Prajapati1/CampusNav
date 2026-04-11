@@ -256,3 +256,112 @@ BEGIN
     CREATE POLICY "public_read_connections" ON waypoint_connections FOR SELECT USING (true);
   END IF;
 END $$;
+
+-- ============================================
+-- HELPER: is_admin(uuid)
+-- ============================================
+CREATE OR REPLACE FUNCTION is_admin(uid UUID)
+RETURNS BOOLEAN AS $$
+  SELECT EXISTS (SELECT 1 FROM admins WHERE user_id = uid);
+$$ LANGUAGE sql SECURITY DEFINER STABLE;
+
+-- ============================================
+-- AI TRACE RESULTS
+-- ============================================
+CREATE TABLE IF NOT EXISTS map_ai_trace_results (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  floor_id UUID NOT NULL REFERENCES floors(id) ON DELETE CASCADE,
+  status TEXT NOT NULL DEFAULT 'completed',
+  options JSONB NOT NULL DEFAULT '{}'::jsonb,
+  result JSONB NOT NULL DEFAULT '{}'::jsonb,
+  confidence_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE map_ai_trace_results ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'map_ai_trace_results' AND policyname = 'public_read_map_ai_trace_results'
+  ) THEN
+    CREATE POLICY "public_read_map_ai_trace_results"
+      ON map_ai_trace_results FOR SELECT USING (true);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'map_ai_trace_results' AND policyname = 'admin_manage_map_ai_trace_results'
+  ) THEN
+    CREATE POLICY "admin_manage_map_ai_trace_results"
+      ON map_ai_trace_results
+      FOR ALL
+      USING (is_admin(auth.uid()))
+      WITH CHECK (is_admin(auth.uid()));
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_map_ai_trace_floor_id
+  ON map_ai_trace_results(floor_id);
+
+-- ============================================
+-- GEOREFERENCE DATA
+-- ============================================
+CREATE TABLE IF NOT EXISTS map_georeferences (
+  id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+  floor_id UUID NOT NULL UNIQUE REFERENCES floors(id) ON DELETE CASCADE,
+  anchor_lat DOUBLE PRECISION,
+  anchor_lng DOUBLE PRECISION,
+  rotation DOUBLE PRECISION DEFAULT 0,
+  scale_x DOUBLE PRECISION DEFAULT 1,
+  scale_y DOUBLE PRECISION DEFAULT 1,
+  level TEXT,
+  opacity DOUBLE PRECISION DEFAULT 0.55,
+  corners JSONB NOT NULL DEFAULT '[]'::jsonb,
+  control_points JSONB NOT NULL DEFAULT '[]'::jsonb,
+  transform JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_by UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+ALTER TABLE map_georeferences ENABLE ROW LEVEL SECURITY;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'map_georeferences' AND policyname = 'public_read_map_georeferences'
+  ) THEN
+    CREATE POLICY "public_read_map_georeferences"
+      ON map_georeferences FOR SELECT USING (true);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE tablename = 'map_georeferences' AND policyname = 'admin_manage_map_georeferences'
+  ) THEN
+    CREATE POLICY "admin_manage_map_georeferences"
+      ON map_georeferences
+      FOR ALL
+      USING (is_admin(auth.uid()))
+      WITH CHECK (is_admin(auth.uid()));
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_map_georeferences_floor_id
+  ON map_georeferences(floor_id);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_trigger
+    WHERE tgname = 'map_georeferences_updated_at'
+  ) THEN
+    CREATE TRIGGER map_georeferences_updated_at BEFORE UPDATE ON map_georeferences
+      FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  END IF;
+END $$;

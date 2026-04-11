@@ -7,7 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { v4 as uuidv4 } from "uuid";
+import { v4 as uuidv4, validate as uuidValidate } from "uuid";
 import toast from "react-hot-toast";
 import {
   Accessibility,
@@ -66,10 +66,20 @@ const LEFT_PANEL_MAX = 340;
 const WAYPOINTS = ["junction", "entrance", "destination"];
 const TRANSITIONS = ["none", "stairs", "elevator"];
 const ROOM_ALIASES = { toilet: "restroom", staircase: "stairs" };
-const REORDERABLE_KINDS = new Set(["room", "door", "beacon"]);
+const REORDERABLE_KINDS = new Set([
+  "room",
+  "wall",
+  "window",
+  "door",
+  "object",
+  "beacon",
+]);
 const DEFAULT_LAYER_INDEX = {
   room: 100,
+  wall: 140,
+  window: 160,
   door: 200,
+  object: 260,
   beacon: 300,
   waypoint: 900,
   path: 1000,
@@ -92,6 +102,141 @@ const ICON_PRESETS = [
   { id: "office", label: "Office" },
   { id: "info", label: "Info" },
 ];
+
+const AI_TRACE_STEPS = [
+  "Preprocessing",
+  "Detecting Walls",
+  "Detecting Rooms",
+  "Building Graph",
+  "Done",
+];
+
+function AiTraceModal({
+  open,
+  scope,
+  options,
+  running,
+  stepIndex,
+  onClose,
+  onScopeChange,
+  onToggleOption,
+  onRun,
+}) {
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-[860] flex items-center justify-center bg-slate-950/40 px-4 py-8">
+      <div className="card w-full max-w-2xl">
+        <div className="flex items-start justify-between gap-4">
+          <div>
+            <div className="section-label">AI Mapping</div>
+            <h2 className="mt-2 text-2xl font-bold tracking-[-0.03em]">
+              Run AI Mapping
+            </h2>
+            <p className="mt-2 text-sm subtle-text">
+              Detect editable walls, doors, windows, rooms, navigation edges, and
+              spatial objects from the uploaded floor plan.
+            </p>
+          </div>
+          <button type="button" onClick={onClose} className="btn-ghost px-3">
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="mt-6 flex items-center gap-2 rounded-xl border border-default bg-surface-alt p-1">
+          {[
+            { id: "current_floor", label: "Current Floor" },
+            { id: "all_floors", label: "All Floors" },
+          ].map((entry) => (
+            <button
+              key={entry.id}
+              type="button"
+              disabled={running}
+              onClick={() => onScopeChange(entry.id)}
+              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
+                scope === entry.id ? "bg-accent text-white" : "text-secondary"
+              }`}
+            >
+              {entry.label}
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-6 grid gap-3 md:grid-cols-2">
+          {[
+            ["walls", "Walls", false],
+            ["doors", "Doors", false],
+            ["windows", "Windows", false],
+            ["connections", "Navigation Edges", false],
+            ["objects", "AI Objects", true],
+            ["locationsOnRooms", "Locations on Rooms", false],
+            ["locationsOnObjects", "Locations on Objects", false],
+            ["locationsOnConnections", "Locations on Connections", false],
+          ].map(([key, label, beta]) => (
+            <label
+              key={key}
+              className="flex items-center justify-between gap-3 rounded-xl border border-default bg-surface px-4 py-3"
+            >
+              <span className="flex items-center gap-2 text-sm font-medium text-primary">
+                {label}
+                {beta ? (
+                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-amber-700">
+                    Beta
+                  </span>
+                ) : null}
+              </span>
+              <input
+                type="checkbox"
+                checked={Boolean(options[key])}
+                disabled={running}
+                onChange={() => onToggleOption(key)}
+              />
+            </label>
+          ))}
+        </div>
+
+        <div className="mt-6 rounded-2xl border border-default bg-surface-alt p-4">
+          <div className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+            Progress
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-5">
+            {AI_TRACE_STEPS.map((step, index) => (
+              <div
+                key={step}
+                className={`rounded-xl border px-3 py-2 text-sm ${
+                  index <= stepIndex
+                    ? "border-accent bg-accent-light text-accent"
+                    : "border-default bg-surface text-secondary"
+                }`}
+              >
+                {step}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+          <button
+            type="button"
+            disabled={running}
+            onClick={onClose}
+            className="btn-secondary"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            disabled={running}
+            onClick={onRun}
+            className="btn-primary"
+          >
+            {running ? "Running AI Mapping..." : "Run AI Mapping"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 const TOOLS = [
   { group: "Draw", id: "room", label: "Room", key: "R", icon: RectangleHorizontal },
@@ -117,6 +262,10 @@ const slugify = (value) =>
     .replace(/[^a-z0-9]+/g, "_")
     .replace(/^_+|_+$/g, "") || "custom";
 const dist = (a, b) => Math.hypot((a.x || 0) - (b.x || 0), (a.y || 0) - (b.y || 0));
+
+function ensureUuid(value) {
+  return typeof value === "string" && uuidValidate(value) ? value : uuidv4();
+}
 
 function estimatedOverlayBoundsFromEntrance(building) {
   const lat = Number.parseFloat(building?.entrance_lat);
@@ -215,6 +364,27 @@ function getBounds(element) {
       width: box.maxX - box.minX,
       height: box.maxY - box.minY,
     };
+  }
+  if (element.kind === "wall") {
+    return {
+      x: Math.min(element.x1, element.x2) - (element.thickness || 6) / 2,
+      y: Math.min(element.y1, element.y2) - (element.thickness || 6) / 2,
+      width:
+        Math.abs(element.x2 - element.x1) + (element.thickness || 6),
+      height:
+        Math.abs(element.y2 - element.y1) + (element.thickness || 6),
+    };
+  }
+  if (element.kind === "window") {
+    return {
+      x: element.x - element.width / 2,
+      y: element.y - 8,
+      width: element.width || 28,
+      height: 16,
+    };
+  }
+  if (element.kind === "object") {
+    return { x: element.x - 14, y: element.y - 14, width: 28, height: 28 };
   }
   if (element.kind === "door" || element.kind === "waypoint" || element.kind === "beacon") {
     return { x: element.x - 12, y: element.y - 12, width: 24, height: 24 };
@@ -583,6 +753,21 @@ function hit(point, element) {
   if (element.kind === "room") {
     return pointInPoly(point, roomPolygon(element));
   }
+  if (element.kind === "wall") {
+    return (
+      segDist(
+        point,
+        { x: element.x1, y: element.y1 },
+        { x: element.x2, y: element.y2 },
+      ) <= Math.max(8, (element.thickness || 6) / 2 + 4)
+    );
+  }
+  if (element.kind === "window") {
+    return (
+      Math.abs(point.x - element.x) <= (element.width || 28) / 2 + 4 &&
+      Math.abs(point.y - element.y) <= 10
+    );
+  }
   if (element.kind === "path") {
     return element.points.some((entry, index) => {
       if (!index) return false;
@@ -645,17 +830,23 @@ function cleanOverlayBounds(bounds) {
 function elementTitle(element, industryId) {
   if (!element) return "Selection";
   if (element.kind === "room") return element.name || roomLabel(element, industryId);
+  if (element.kind === "wall") return element.name || "Wall";
+  if (element.kind === "window") return element.name || "Window";
   if (element.kind === "door") return element.name || element.doorType || "Door";
   if (element.kind === "waypoint") {
     return element.name || formatRoomTypeLabel(element.waypointType || "waypoint");
   }
+  if (element.kind === "object") return element.label || element.objectType || "Object";
   return element.name || `Path ${element.points?.length || 0}`;
 }
 
 function iconForElement(element) {
   if (element.kind === "room") return RectangleHorizontal;
+  if (element.kind === "wall") return PencilRuler;
+  if (element.kind === "window") return GripVertical;
   if (element.kind === "door") return DoorOpen;
   if (element.kind === "waypoint") return MapPin;
+  if (element.kind === "object") return Sparkles;
   if (element.kind === "beacon") return Wifi;
   return Spline;
 }
@@ -674,7 +865,7 @@ function normalizeElement(element, industryId) {
     }));
     const box = shape === "polygon" && points.length ? boundsFromPoints(points) : null;
     return {
-      id: element.id || uuidv4(),
+      id: ensureUuid(element.id),
       kind: "room",
       type: shape === "polygon" ? "polygon" : "rect",
       shape,
@@ -703,7 +894,7 @@ function normalizeElement(element, industryId) {
   }
   if (kind === "door") {
     return {
-      id: element.id || uuidv4(),
+      id: ensureUuid(element.id),
       kind: "door",
       type: "door",
       x: element.x || 0,
@@ -723,9 +914,35 @@ function normalizeElement(element, industryId) {
       layerIndex: normalizeLayerIndex("door", element.layerIndex),
     };
   }
+  if (kind === "wall") {
+    return {
+      id: ensureUuid(element.id),
+      kind: "wall",
+      type: "wall",
+      x1: Number.parseFloat(element.x1) || 0,
+      y1: Number.parseFloat(element.y1) || 0,
+      x2: Number.parseFloat(element.x2) || 0,
+      y2: Number.parseFloat(element.y2) || 0,
+      thickness: Number.parseFloat(element.thickness) || 6,
+      name: element.name || "Wall",
+      layerIndex: normalizeLayerIndex("wall", element.layerIndex),
+    };
+  }
+  if (kind === "window") {
+    return {
+      id: ensureUuid(element.id),
+      kind: "window",
+      type: "window",
+      x: Number.parseFloat(element.x) || 0,
+      y: Number.parseFloat(element.y) || 0,
+      width: Number.parseFloat(element.width) || 28,
+      name: element.name || "Window",
+      layerIndex: normalizeLayerIndex("window", element.layerIndex),
+    };
+  }
   if (kind === "waypoint") {
     return {
-      id: element.id || uuidv4(),
+      id: ensureUuid(element.id),
       kind: "waypoint",
       type: "waypoint",
       x: element.x || 0,
@@ -762,7 +979,7 @@ function normalizeElement(element, industryId) {
   }
   if (kind === "beacon") {
     return {
-      id: element.id || uuidv4(),
+      id: ensureUuid(element.id),
       kind: "beacon",
       type: "beacon",
       x: element.x || 0,
@@ -775,9 +992,33 @@ function normalizeElement(element, industryId) {
       layerIndex: normalizeLayerIndex("beacon", element.layerIndex),
     };
   }
+  if (kind === "object") {
+    return {
+      id: ensureUuid(element.id),
+      kind: "object",
+      type: "object",
+      x: Number.parseFloat(element.x) || 0,
+      y: Number.parseFloat(element.y) || 0,
+      label: element.label || element.name || "Object",
+      name: element.name || element.label || "",
+      objectType: element.objectType || element.type || "poi",
+      description: element.description || "",
+      photoUrl: element.photoUrl || element.photo_url || "",
+      linkedRoomId:
+        element.linkedRoomId ||
+        element.linked_room_id ||
+        element.roomId ||
+        element.room_id ||
+        null,
+      iconPreset:
+        element.iconPreset ||
+        defaultIconPresetForType(element.objectType || element.type || "info"),
+      layerIndex: normalizeLayerIndex("object", element.layerIndex),
+    };
+  }
   if (kind === "path") {
     return {
-      id: element.id || uuidv4(),
+      id: ensureUuid(element.id),
       kind: "path",
       type: "path",
       points: (element.points || []).map((point) => ({ x: point.x, y: point.y })),
@@ -801,6 +1042,10 @@ function modelFromFloor(floorData, industryId) {
       showLabels: true,
       snapToGrid: true,
       overlayBounds: normalizeOverlayBounds(),
+      geo: {
+        corners: [],
+        georeference: null,
+      },
     };
   }
   const entry = floorEntry(floorData.map_data, floorData);
@@ -873,6 +1118,10 @@ function modelFromFloor(floorData, industryId) {
     showLabels: floorData.map_data?.showLabels ?? true,
     snapToGrid: floorData.map_data?.snapToGrid ?? true,
     overlayBounds: normalizeOverlayBounds(entry?.overlayBounds),
+    geo: {
+      corners: entry?.corners || floorData.map_data?.georeference?.corners || [],
+      georeference: entry?.georeference || floorData.map_data?.georeference || null,
+    },
     threeD: {
       extrusionHeight: entry?.threeD?.extrusionHeight ?? 3.2,
       wallHeight: entry?.threeD?.wallHeight ?? 3.2,
@@ -896,8 +1145,8 @@ function navigationIssues(model) {
   if (waypoints.length > 1 && !paths.length) {
     issues.push("Connect waypoints with at least one path.");
   }
-  if (!overlayBounds) {
-    issues.push("Add overlay bounds to anchor this floor on the live map.");
+  if (!overlayBounds && !model.geo?.corners?.length) {
+    issues.push("Complete world position before publishing this floor.");
   }
   if (!beacons.length) {
     issues.push("Place BLE beacons to prepare blue-dot positioning.");
@@ -1032,6 +1281,7 @@ function serialize(model, bgImage, industryId) {
       showGrid: model.showGrid,
       showLabels: model.showLabels,
       snapToGrid: model.snapToGrid,
+      georeference: model.geo?.georeference || null,
       floors: [
         {
           id: model.floor.id,
@@ -1042,6 +1292,8 @@ function serialize(model, bgImage, industryId) {
           backgroundDataUrl: model.floor.bg || null,
           bgImage: model.floor.bg || null,
           overlayBounds: cleanOverlayBounds(model.overlayBounds),
+          corners: Array.isArray(model.geo?.corners) ? model.geo.corners : [],
+          georeference: model.geo?.georeference || null,
           threeD: {
             extrusionHeight: Number.parseFloat(model.threeD?.extrusionHeight) || 3.2,
             wallHeight: Number.parseFloat(model.threeD?.wallHeight) || 3.2,
@@ -1124,8 +1376,21 @@ function serialize(model, bgImage, industryId) {
                 layerIndex: normalizeLayerIndex("beacon", element.layerIndex),
               };
             }
+            if (element.kind === "object") {
+              return {
+                ...element,
+                id: ensureUuid(element.id),
+                label: element.label || element.name || "Object",
+                name: element.name || element.label || "",
+                description: element.description || "",
+                photoUrl: element.photoUrl || "",
+                linkedRoomId: element.linkedRoomId || null,
+                layerIndex: normalizeLayerIndex(element.kind, element.layerIndex),
+              };
+            }
             return {
               ...element,
+              id: ensureUuid(element.id),
               layerIndex: normalizeLayerIndex(element.kind, element.layerIndex),
             };
           }),
@@ -1389,6 +1654,7 @@ const MapEditor = forwardRef(function MapEditor(
     onStateChange,
     previewMode = false,
     previewView = "2d",
+    autoOpenAiMapping = false,
   },
   ref,
 ) {
@@ -1426,6 +1692,20 @@ const MapEditor = forwardRef(function MapEditor(
   const [leftPanelWidth, setLeftPanelWidth] = useState(220);
   const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);
   const [draggedLayerId, setDraggedLayerId] = useState(null);
+  const [aiTraceModalOpen, setAiTraceModalOpen] = useState(false);
+  const [aiTraceScope, setAiTraceScope] = useState("current_floor");
+  const [aiTraceOptions, setAiTraceOptions] = useState({
+    walls: true,
+    doors: true,
+    windows: true,
+    connections: false,
+    objects: false,
+    locationsOnRooms: false,
+    locationsOnObjects: false,
+    locationsOnConnections: false,
+  });
+  const [aiTraceRunning, setAiTraceRunning] = useState(false);
+  const [aiTraceStep, setAiTraceStep] = useState(0);
   const [sections, setSections] = useState({
     draw: true,
     edit: true,
@@ -1440,6 +1720,12 @@ const MapEditor = forwardRef(function MapEditor(
       return !value || entry.label.toLowerCase().includes(value) || entry.id.includes(value);
     });
   }, [buildingIndustry, typeSearch]);
+
+  useEffect(() => {
+    if (autoOpenAiMapping) {
+      setAiTraceModalOpen(true);
+    }
+  }, [autoOpenAiMapping]);
 
   const visibleElements = useMemo(
     () =>
@@ -1710,14 +1996,14 @@ const MapEditor = forwardRef(function MapEditor(
   function prefillOverlayFromEntrance() {
     const estimate = estimatedOverlayBoundsFromEntrance(building);
     if (!estimate) {
-      toast.error("Add building entrance latitude and longitude first.");
+      toast.error("Use Position on World to georeference this floor.");
       return;
     }
 
     mutate((next) => {
       next.overlayBounds = estimate;
     }, false);
-    toast.success("Overlay bounds prefilled from the building entrance.");
+    toast.success("Approximate bounds added. Finish Position on World for accurate placement.");
   }
 
   function toggleVisibility(id) {
@@ -1839,7 +2125,152 @@ const MapEditor = forwardRef(function MapEditor(
     toast.success("Waypoints and paths generated.");
   }
 
-  async function autoTraceDraft() {
+  function applyAiTraceResult(traced) {
+    const nextRooms = (traced.rooms || []).map((entry, index) =>
+      normalizeElement(
+        {
+          id: entry.id,
+          kind: "room",
+          type: entry.polygon?.length >= 3 ? "polygon" : "rect",
+          shape: entry.polygon?.length >= 3 ? "polygon" : "rect",
+          x: entry.x,
+          y: entry.y,
+          width: entry.width,
+          height: entry.height,
+          points: entry.polygon || [],
+          name: entry.name || `Room ${index + 1}`,
+          roomType: entry.roomType || defaultRoomType(buildingIndustry),
+        },
+        buildingIndustry,
+      ),
+    );
+
+    const nodeMap = new Map();
+    const nextWaypoints = (traced.nodes || []).map((entry, index) => {
+      const waypoint = normalizeElement(
+        {
+          id: entry.id,
+          kind: "waypoint",
+          x: entry.x,
+          y: entry.y,
+          name: entry.roomId ? "" : entry.type || `Node ${index + 1}`,
+          waypointType: entry.type === "room" ? "destination" : "junction",
+          linkedRoomId: entry.roomId || null,
+        },
+        buildingIndustry,
+      );
+      nodeMap.set(entry.id, waypoint);
+      return waypoint;
+    });
+
+    const nextConnections = (traced.edges || [])
+      .map((entry) => {
+        const start = nodeMap.get(entry.from);
+        const end = nodeMap.get(entry.to);
+        if (!start || !end) return null;
+        return normalizeElement(
+          {
+            id: entry.id,
+            kind: "path",
+            points: [
+              { x: start.x, y: start.y },
+              { x: end.x, y: end.y },
+            ],
+            bidirectional: true,
+            accessible: false,
+            name: "",
+          },
+          buildingIndustry,
+        );
+      })
+      .filter(Boolean);
+
+    const nextDoors = (traced.doors || []).map((entry) =>
+      normalizeElement(
+        {
+          id: entry.id,
+          kind: "door",
+          x: entry.x,
+          y: entry.y,
+          name: "Door",
+          doorType: "main_entrance",
+        },
+        buildingIndustry,
+      ),
+    );
+
+    const nextWalls = (traced.walls || []).map((entry) =>
+      normalizeElement(
+        {
+          id: entry.id,
+          kind: "wall",
+          x1: entry.x1,
+          y1: entry.y1,
+          x2: entry.x2,
+          y2: entry.y2,
+          thickness: entry.thickness,
+        },
+        buildingIndustry,
+      ),
+    );
+
+    const nextWindows = (traced.windows || []).map((entry) =>
+      normalizeElement(
+        {
+          id: entry.id,
+          kind: "window",
+          x: entry.x,
+          y: entry.y,
+          width: entry.width,
+        },
+        buildingIndustry,
+      ),
+    );
+
+    const nextObjects = (traced.objects || []).map((entry) =>
+      normalizeElement(
+        {
+          id: entry.id,
+          kind: "object",
+          x: entry.x,
+          y: entry.y,
+          label: entry.label,
+          objectType: entry.type,
+          description: entry.description || "",
+          photoUrl: entry.photoUrl || entry.photo_url || "",
+          linkedRoomId: entry.roomId || entry.linkedRoomId || null,
+          iconPreset: defaultIconPresetForType(entry.type || "info"),
+        },
+        buildingIndustry,
+      ),
+    );
+
+    mutate((next) => {
+      next.elements = next.elements.filter(
+        (element) =>
+          ![
+            "room",
+            "wall",
+            "window",
+            "door",
+            "waypoint",
+            "path",
+            "object",
+          ].includes(element.kind),
+      );
+      next.elements.push(
+        ...nextWalls,
+        ...nextRooms,
+        ...nextWindows,
+        ...nextDoors,
+        ...nextWaypoints,
+        ...nextConnections,
+        ...nextObjects,
+      );
+    });
+  }
+
+  async function runAiTrace() {
     if (!floorData?.id) {
       toast.error("Save the floor record before running auto trace.");
       return;
@@ -1850,48 +2281,55 @@ const MapEditor = forwardRef(function MapEditor(
       !window.confirm(
         "Replace the current drafted rooms, doors, waypoints, and paths with a new auto-traced draft?",
       )
-    ) {
+      ) {
       return;
     }
 
+    let stepTimer = null;
     try {
-      const traced = await api.floors.autoTrace(floorData.id);
-      if (!traced?.rooms?.length) {
-        toast.error("No editable rooms were detected in the uploaded floor plan.");
+      setAiTraceRunning(true);
+      setAiTraceStep(0);
+      stepTimer = window.setInterval(() => {
+        setAiTraceStep((current) => Math.min(current + 1, AI_TRACE_STEPS.length - 2));
+      }, 550);
+
+      const formData = new FormData();
+      formData.append("floor_id", floorData.id);
+      formData.append("scope", aiTraceScope);
+      formData.append("options", JSON.stringify(aiTraceOptions));
+
+      const tracedPayload = await api.maps.aiTrace(formData);
+      window.clearInterval(stepTimer);
+      setAiTraceStep(AI_TRACE_STEPS.length - 1);
+
+      const traced = tracedPayload?.result || tracedPayload;
+      if (
+        !traced?.rooms?.length &&
+        !traced?.walls?.length &&
+        !traced?.doors?.length
+      ) {
+        toast.error(
+          "AI mapping could not detect enough floor geometry from this plan. Try georeferencing it first or upload a clearer plan.",
+        );
         return;
       }
 
-      mutate((next) => {
-        next.elements = next.elements.filter(
-          (element) => !["room", "door", "waypoint", "path"].includes(element.kind),
-        );
-
-        traced.rooms.forEach((entry, index) => {
-          const room = normalizeElement(
-            {
-              id: uuidv4(),
-              kind: "room",
-              type: "rect",
-              shape: "rect",
-              x: entry.x,
-              y: entry.y,
-              width: entry.width,
-              height: entry.height,
-              name: entry.name || `Room ${index + 1}`,
-              roomType: entry.roomType || defaultRoomType(buildingIndustry),
-            },
-            buildingIndustry,
-          );
-          next.elements.push(room, createRoomWaypoint(room, buildingIndustry));
-        });
-      });
-
+      applyAiTraceResult(traced);
+      setAiTraceModalOpen(false);
       toast.success(
-        `Drafted ${traced.rooms.length} spaces from the uploaded floor plan. Review and refine before publishing.`,
+        `AI mapping detected ${traced.rooms?.length || 0} rooms, ${traced.walls?.length || 0} walls, and ${traced.doors?.length || 0} doors. Review everything before publishing.`,
       );
     } catch (error) {
       toast.error(error.message || "Unable to auto trace this floor plan.");
+    } finally {
+      if (stepTimer) window.clearInterval(stepTimer);
+      setAiTraceRunning(false);
+      window.setTimeout(() => setAiTraceStep(0), 300);
     }
+  }
+
+  function openAiTraceModal() {
+    setAiTraceModalOpen(true);
   }
 
   async function downloadRoomQr(room) {
@@ -2487,6 +2925,36 @@ const MapEditor = forwardRef(function MapEditor(
     const warn = root.getPropertyValue("--color-warning").trim() || "#d97706";
     const success = root.getPropertyValue("--color-success").trim() || "#16a34a";
     const canvasBg = root.getPropertyValue("--color-bg").trim() || "#f8f9fa";
+    visibleElements.filter((element) => element.kind === "wall").forEach((wall) => {
+      ctx.beginPath();
+      ctx.moveTo(wall.x1, wall.y1);
+      ctx.lineTo(wall.x2, wall.y2);
+      ctx.strokeStyle = isDark ? "#64748B" : "#475569";
+      ctx.lineWidth = wall.thickness || 6;
+      ctx.lineCap = "round";
+      ctx.stroke();
+      if (selectionId === wall.id) {
+        ctx.beginPath();
+        ctx.moveTo(wall.x1, wall.y1);
+        ctx.lineTo(wall.x2, wall.y2);
+        ctx.strokeStyle = accent;
+        ctx.lineWidth = (wall.thickness || 6) + 3;
+        ctx.globalAlpha = 0.35;
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    });
+    visibleElements
+      .filter((element) => element.kind === "window")
+      .forEach((windowElement) => {
+        ctx.beginPath();
+        ctx.moveTo(windowElement.x - (windowElement.width || 28) / 2, windowElement.y);
+        ctx.lineTo(windowElement.x + (windowElement.width || 28) / 2, windowElement.y);
+        ctx.strokeStyle = "#06B6D4";
+        ctx.lineWidth = 4;
+        ctx.lineCap = "round";
+        ctx.stroke();
+      });
     visibleElements.filter((element) => element.kind === "path").forEach((path) => {
       if (!path.points.length) return;
       ctx.beginPath();
@@ -2599,6 +3067,36 @@ const MapEditor = forwardRef(function MapEditor(
       ctx.lineWidth = selectionId === beacon.id ? 2.5 : 2;
       ctx.strokeStyle = "#ffffff";
       ctx.stroke();
+    });
+    visibleElements.filter((element) => element.kind === "object").forEach((objectElement) => {
+      ctx.beginPath();
+      ctx.arc(objectElement.x, objectElement.y, 12, 0, Math.PI * 2);
+      ctx.fillStyle = objectElement.objectType === "exit" ? success : accent;
+      ctx.fill();
+      ctx.lineWidth = selectionId === objectElement.id ? 2.5 : 2;
+      ctx.strokeStyle = "#ffffff";
+      ctx.stroke();
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "700 9px Inter, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(
+        roomIconSymbol({
+          name: objectElement.label || objectElement.name || "POI",
+          iconPreset: objectElement.iconPreset || objectElement.objectType || "info",
+        }),
+        objectElement.x,
+        objectElement.y,
+      );
+      if (model.showLabels) {
+        ctx.fillStyle = text;
+        ctx.font = "600 10px Inter, sans-serif";
+        ctx.fillText(
+          objectElement.label || objectElement.name || "Object",
+          objectElement.x,
+          objectElement.y + 20,
+        );
+      }
     });
     if (selected) {
       const box = getBounds(selected);
@@ -3029,7 +3527,7 @@ const MapEditor = forwardRef(function MapEditor(
                 <button
                   type="button"
                   disabled={previewMode}
-                  onClick={autoTraceDraft}
+                  onClick={openAiTraceModal}
                   className="map-editor__mini-button"
                 >
                   <Sparkles className="h-4 w-4" />
@@ -3234,7 +3732,7 @@ const MapEditor = forwardRef(function MapEditor(
               <div>
                 <div className="section-label">Overlay Alignment</div>
                 <p className="mt-2 text-xs subtle-text">
-                  Add north, south, east, and west bounds to anchor this floor on the live map.
+                  World position is driven by the georeference step and saved back into this floor automatically.
                 </p>
                 <div className="mt-3 flex flex-wrap gap-2">
                   <button
@@ -3244,7 +3742,7 @@ const MapEditor = forwardRef(function MapEditor(
                     className="map-editor__mini-button"
                   >
                     <MapPin className="h-4 w-4" />
-                    Prefill From Entrance
+                    Approximate Bounds
                   </button>
                 </div>
                 <div className="mt-3 grid grid-cols-2 gap-2">
@@ -3263,6 +3761,11 @@ const MapEditor = forwardRef(function MapEditor(
                     </div>
                   ))}
                 </div>
+                {!cleanOverlayBounds(model.overlayBounds) && !model.geo?.corners?.length && (
+                  <div className="mt-3 rounded-lg border border-default bg-surface-alt px-3 py-2 text-xs text-secondary">
+                    Complete "Position on World" for this floor before publishing navigation.
+                  </div>
+                )}
               </div>
 
               <div className="map-editor__divider" />
@@ -3780,6 +4283,253 @@ const MapEditor = forwardRef(function MapEditor(
                   </div>
                 </>
               )}
+              {selected.kind === "wall" && (
+                <>
+                  <div className="section-label">Wall Properties</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="field-label">Start X</label>
+                      <input
+                        className="input"
+                        type="number"
+                        disabled={previewMode}
+                        value={Math.round(selected.x1 || 0)}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.x1 = Number.parseFloat(event.target.value) || 0;
+                          })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="field-label">Start Y</label>
+                      <input
+                        className="input"
+                        type="number"
+                        disabled={previewMode}
+                        value={Math.round(selected.y1 || 0)}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.y1 = Number.parseFloat(event.target.value) || 0;
+                          })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="field-label">End X</label>
+                      <input
+                        className="input"
+                        type="number"
+                        disabled={previewMode}
+                        value={Math.round(selected.x2 || 0)}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.x2 = Number.parseFloat(event.target.value) || 0;
+                          })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="field-label">End Y</label>
+                      <input
+                        className="input"
+                        type="number"
+                        disabled={previewMode}
+                        value={Math.round(selected.y2 || 0)}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.y2 = Number.parseFloat(event.target.value) || 0;
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="field-label">Thickness</label>
+                    <input
+                      className="input"
+                      type="number"
+                      step="1"
+                      min="2"
+                      disabled={previewMode}
+                      value={selected.thickness || 6}
+                      onChange={(event) =>
+                        updateElement(selected.id, (element) => {
+                          element.thickness =
+                            Math.max(2, Number.parseFloat(event.target.value) || 6);
+                        })
+                      }
+                    />
+                  </div>
+                </>
+              )}
+              {selected.kind === "window" && (
+                <>
+                  <div className="section-label">Window Properties</div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="field-label">X</label>
+                      <input
+                        className="input"
+                        type="number"
+                        disabled={previewMode}
+                        value={Math.round(selected.x || 0)}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.x = Number.parseFloat(event.target.value) || 0;
+                          })
+                        }
+                      />
+                    </div>
+                    <div>
+                      <label className="field-label">Y</label>
+                      <input
+                        className="input"
+                        type="number"
+                        disabled={previewMode}
+                        value={Math.round(selected.y || 0)}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.y = Number.parseFloat(event.target.value) || 0;
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+                  <div>
+                    <label className="field-label">Width</label>
+                    <input
+                      className="input"
+                      type="number"
+                      step="1"
+                      min="8"
+                      disabled={previewMode}
+                      value={selected.width || 28}
+                      onChange={(event) =>
+                        updateElement(selected.id, (element) => {
+                          element.width =
+                            Math.max(8, Number.parseFloat(event.target.value) || 28);
+                        })
+                      }
+                    />
+                  </div>
+                </>
+              )}
+              {selected.kind === "object" && (
+                <>
+                <div className="section-label">Object Properties</div>
+                <div>
+                  <label className="field-label">Label</label>
+                    <input
+                      className="input"
+                      disabled={previewMode}
+                      value={selected.label || ""}
+                      onChange={(event) =>
+                        updateElement(selected.id, (element) => {
+                          element.label = event.target.value;
+                          element.name = event.target.value;
+                        })
+                      }
+                      placeholder="Elevator"
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="field-label">Type</label>
+                      <select
+                        className="select"
+                        disabled={previewMode}
+                        value={selected.objectType || "poi"}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.objectType = event.target.value;
+                            element.iconPreset =
+                              event.target.value === "exit" ? "exit" : "info";
+                          })
+                        }
+                      >
+                        <option value="poi">POI</option>
+                        <option value="stairs">Stairs</option>
+                        <option value="elevator">Elevator</option>
+                        <option value="restroom">Restroom</option>
+                        <option value="exit">Exit</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="field-label">Icon</label>
+                      <select
+                        className="select"
+                        disabled={previewMode}
+                        value={selected.iconPreset || "info"}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.iconPreset = event.target.value;
+                          })
+                        }
+                      >
+                        {ICON_PRESETS.map((entry) => (
+                          <option key={entry.id} value={entry.id}>
+                            {entry.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  </div>
+                  <div className="mt-2">
+                    <label className="field-label">Description</label>
+                    <textarea
+                      className="textarea"
+                      rows={2}
+                      disabled={previewMode}
+                      value={selected.description || ""}
+                      onChange={(event) =>
+                        updateElement(selected.id, (element) => {
+                          element.description = event.target.value;
+                        })
+                      }
+                      placeholder="Helpful details shown in destination cards."
+                    />
+                  </div>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <div>
+                      <label className="field-label">Photo URL</label>
+                      <input
+                        className="input"
+                        disabled={previewMode}
+                        value={selected.photoUrl || ""}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.photoUrl = event.target.value;
+                          })
+                        }
+                        placeholder="https://example.com/photo.jpg"
+                      />
+                    </div>
+                    <div>
+                      <label className="field-label">Route Room</label>
+                      <select
+                        className="select"
+                        disabled={previewMode}
+                        value={selected.linkedRoomId || ""}
+                        onChange={(event) =>
+                          updateElement(selected.id, (element) => {
+                            element.linkedRoomId = event.target.value || null;
+                          })
+                        }
+                      >
+                        <option value="">Nearest waypoint</option>
+                        {model.elements
+                          .filter((element) => element.kind === "room")
+                          .map((room) => (
+                            <option key={room.id} value={room.id}>
+                              {room.name || "Unnamed room"}
+                            </option>
+                          ))}
+                      </select>
+                    </div>
+                  </div>
+                </>
+              )}
               <div className="map-editor__divider" />
               <div className="section-label">Actions</div>
               <div className="map-editor__utility-row">
@@ -3832,6 +4582,25 @@ const MapEditor = forwardRef(function MapEditor(
         </section>
         )}
       </aside>
+
+      <AiTraceModal
+        open={aiTraceModalOpen}
+        scope={aiTraceScope}
+        options={aiTraceOptions}
+        running={aiTraceRunning}
+        stepIndex={aiTraceStep}
+        onClose={() => {
+          if (!aiTraceRunning) {
+            setAiTraceModalOpen(false);
+            setAiTraceStep(0);
+          }
+        }}
+        onScopeChange={setAiTraceScope}
+        onToggleOption={(key) =>
+          setAiTraceOptions((current) => ({ ...current, [key]: !current[key] }))
+        }
+        onRun={runAiTrace}
+      />
 
       <input ref={bgInputRef} type="file" accept="image/*" className="hidden" onChange={uploadBackground} />
       <input ref={jsonInputRef} type="file" accept=".json,application/json" className="hidden" onChange={importJson} />

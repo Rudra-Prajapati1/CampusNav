@@ -138,6 +138,67 @@ async function request(method, path, body = null) {
   }
 }
 
+async function requestFormData(path, formData) {
+  const headers = {
+    ...(await getAuthHeaders()),
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+
+  try {
+    const res = await fetch(`${BASE_URL}${path}`, {
+      method: "POST",
+      headers,
+      body: formData,
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    let data;
+    const contentType = res.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      try {
+        data = await res.json();
+      } catch {
+        data = { error: "Invalid JSON response from server" };
+      }
+    } else {
+      const text = await res.text().catch(() => "");
+      data = { error: text || `Server returned status ${res.status}` };
+    }
+
+    if (!res.ok) {
+      const message =
+        data?.error ||
+        data?.message ||
+        `Request failed with status ${res.status}`;
+      const error = new Error(message);
+      error.status = res.status;
+      error.code = data?.code || null;
+      error.data = data;
+      throw error;
+    }
+
+    return data;
+  } catch (err) {
+    clearTimeout(timeoutId);
+
+    if (err.name === "AbortError") {
+      throw new Error(
+        "Request timed out. Please check your connection and try again.",
+      );
+    }
+
+    if (err instanceof TypeError && err.message === "Failed to fetch") {
+      throw new Error("Network error. Please check your internet connection.");
+    }
+
+    throw err;
+  }
+}
+
 /**
  * API client with methods matching all backend endpoints exactly.
  * Every path here corresponds to a route in the backend under /api/v1.
@@ -200,5 +261,10 @@ export const api = {
   qr: {
     room: (roomId) => api.get(`/qr/room/${roomId}`),
     floor: (floorId) => api.get(`/qr/floor/${floorId}/batch`),
+  },
+
+  maps: {
+    aiTrace: (formData) => requestFormData("/maps/ai-trace", formData),
+    saveGeoreference: (data) => api.post("/maps/georeference", data),
   },
 };

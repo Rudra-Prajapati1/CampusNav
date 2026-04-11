@@ -6,6 +6,7 @@ import {
   getIndoorOverlayBounds,
 } from "./indoorMapModel.js";
 import { buildLeafletProjectionBridge } from "./adapters/leafletAdapter.js";
+import IndoorThreeScene from "./IndoorThreeScene.jsx";
 
 const MIN_ZOOM = 0.28;
 const MAX_ZOOM = 7;
@@ -248,6 +249,90 @@ function fitTransform(bounds, viewport, padding = 56) {
   };
 }
 
+function solveLinear3(matrix, vector) {
+  const augmented = matrix.map((row, index) => [...row, vector[index]]);
+
+  for (let pivot = 0; pivot < 3; pivot += 1) {
+    let maxRow = pivot;
+    for (let row = pivot + 1; row < 3; row += 1) {
+      if (Math.abs(augmented[row][pivot]) > Math.abs(augmented[maxRow][pivot])) {
+        maxRow = row;
+      }
+    }
+
+    if (Math.abs(augmented[maxRow][pivot]) < 1e-10) return null;
+
+    if (maxRow !== pivot) {
+      [augmented[pivot], augmented[maxRow]] = [augmented[maxRow], augmented[pivot]];
+    }
+
+    const divisor = augmented[pivot][pivot];
+    for (let col = pivot; col < 4; col += 1) {
+      augmented[pivot][col] /= divisor;
+    }
+
+    for (let row = 0; row < 3; row += 1) {
+      if (row === pivot) continue;
+      const factor = augmented[row][pivot];
+      for (let col = pivot; col < 4; col += 1) {
+        augmented[row][col] -= factor * augmented[pivot][col];
+      }
+    }
+  }
+
+  return augmented.map((row) => row[3]);
+}
+
+function orderedOverlayCorners(corners = []) {
+  const byId = new Map(corners.map((corner) => [corner.id, corner]));
+  const ordered = ["nw", "ne", "se", "sw"]
+    .map((id) => byId.get(id))
+    .filter(Boolean);
+  return ordered.length === 4 ? ordered : corners.slice(0, 4);
+}
+
+function solveAffineTransform(sourcePoints, targetPoints) {
+  if (sourcePoints.length < 3 || targetPoints.length < 3) return null;
+
+  const matrix = sourcePoints.slice(0, 3).map((point) => [point.x, point.y, 1]);
+  const solveX = solveLinear3(matrix, targetPoints.slice(0, 3).map((point) => point.x));
+  const solveY = solveLinear3(matrix, targetPoints.slice(0, 3).map((point) => point.y));
+
+  if (!solveX || !solveY) return null;
+
+  return {
+    a: solveX[0],
+    b: solveY[0],
+    c: solveX[1],
+    d: solveY[1],
+    e: solveX[2],
+    f: solveY[2],
+  };
+}
+
+function invertAffineTransform(transform) {
+  if (!transform) return null;
+  const determinant = transform.a * transform.d - transform.b * transform.c;
+  if (Math.abs(determinant) < 1e-10) return null;
+
+  return {
+    a: transform.d / determinant,
+    b: -transform.b / determinant,
+    c: -transform.c / determinant,
+    d: transform.a / determinant,
+    e: (transform.c * transform.f - transform.d * transform.e) / determinant,
+    f: (transform.b * transform.e - transform.a * transform.f) / determinant,
+  };
+}
+
+function applyAffineTransform(transform, point) {
+  if (!transform) return point;
+  return {
+    x: transform.a * point.x + transform.c * point.y + transform.e,
+    y: transform.b * point.x + transform.d * point.y + transform.f,
+  };
+}
+
 function drawRoom(ctx, room, colors, routeState, showLabels = true) {
   const roomBounds = getRoomBounds(room);
   const width = roomBounds.maxX - roomBounds.minX;
@@ -436,6 +521,12 @@ function findRoomAtPoint(rooms, point) {
   });
 }
 
+function findObjectAtPoint(objects, point) {
+  return (objects || []).find(
+    (entry) => Math.hypot((entry.x || 0) - point.x, (entry.y || 0) - point.y) <= 16,
+  );
+}
+
 export default function IndoorCanvas({
   floorData,
   floorImage,
@@ -447,6 +538,7 @@ export default function IndoorCanvas({
   mapInstance = null,
   mapAdapter = null,
   overlayBounds = null,
+  overlayCorners = null,
   interactive = false,
   onRoomPick,
   viewMode = "2d",
@@ -467,6 +559,10 @@ export default function IndoorCanvas({
   const indoorMap = useMemo(() => buildCanonicalIndoorMap(floorData), [floorData]);
   const floorBounds = useMemo(() => getFloorBounds(floorData, indoorMap.rooms), [floorData, indoorMap.rooms]);
   const resolvedOverlayBounds = overlayBounds || getIndoorOverlayBounds(floorData);
+  const resolvedOverlayCorners = useMemo(
+    () => orderedOverlayCorners(overlayCorners || indoorMap.floor.corners || []),
+    [indoorMap.floor.corners, overlayCorners],
+  );
   const mapElements = indoorMap.raw.elements;
   const projectionBridge = useMemo(() => {
     if (mapAdapter) return mapAdapter;
@@ -474,12 +570,16 @@ export default function IndoorCanvas({
   }, [mapAdapter, mapInstance]);
   const overlayMode =
     Boolean(projectionBridge) &&
-    Boolean(resolvedOverlayBounds) &&
-    Object.values(resolvedOverlayBounds || {}).every((value) => Number.isFinite(value));
-  const is3D = viewMode === "3d";
+    (
+      resolvedOverlayCorners.length >= 4 ||
+      (
+        Boolean(resolvedOverlayBounds) &&
+        Object.values(resolvedOverlayBounds || {}).every((value) => Number.isFinite(value))
+      )
+    );
+  const is3D = viewMode !== "2d";
 
   useEffect(() => {
-    if (overlayMode) return undefined;
     if (!containerRef.current) return undefined;
 
     const observer = new ResizeObserver((entries) => {
@@ -493,10 +593,36 @@ export default function IndoorCanvas({
 
     observer.observe(containerRef.current);
     return () => observer.disconnect();
-  }, [overlayMode]);
+  }, []);
+
+  const overlayAffine = useMemo(() => {
+    if (!projectionBridge || resolvedOverlayCorners.length < 4) return null;
+
+    const projected = resolvedOverlayCorners.map((corner) =>
+      projectionBridge.latLngToContainerPoint([corner.lat, corner.lng]),
+    );
+
+    return solveAffineTransform(
+      [
+        { x: floorBounds.minX, y: floorBounds.minY },
+        { x: floorBounds.maxX, y: floorBounds.minY },
+        { x: floorBounds.minX, y: floorBounds.maxY },
+      ],
+      [
+        projected[0],
+        projected[1],
+        projected[3],
+      ],
+    );
+  }, [floorBounds.maxX, floorBounds.maxY, floorBounds.minX, floorBounds.minY, projectionBridge, resolvedOverlayCorners]);
+
+  const inverseOverlayAffine = useMemo(
+    () => invertAffineTransform(overlayAffine),
+    [overlayAffine],
+  );
 
   useEffect(() => {
-    if (!overlayMode || !projectionBridge || !resolvedOverlayBounds) return undefined;
+    if (!overlayMode || !projectionBridge || !resolvedOverlayBounds || overlayAffine) return undefined;
 
     const updateFrame = () => {
       const northWest = projectionBridge.latLngToContainerPoint([
@@ -518,7 +644,7 @@ export default function IndoorCanvas({
 
     updateFrame();
     return projectionBridge.subscribeViewportChange(updateFrame);
-  }, [overlayMode, projectionBridge, resolvedOverlayBounds]);
+  }, [overlayAffine, overlayMode, projectionBridge, resolvedOverlayBounds]);
 
   const fitView = useCallback(
     (focusRoute = true) => {
@@ -566,8 +692,16 @@ export default function IndoorCanvas({
     const canvas = canvasRef.current;
     if (!canvas || !floorData) return;
 
-    const width = overlayMode ? geoFrame.width : viewport.width;
-    const height = overlayMode ? geoFrame.height : viewport.height;
+    const width = overlayMode
+      ? overlayAffine
+        ? viewport.width
+        : geoFrame.width
+      : viewport.width;
+    const height = overlayMode
+      ? overlayAffine
+        ? viewport.height
+        : geoFrame.height
+      : viewport.height;
     if (!width || !height) return;
 
     const colors = getThemeColors(isDark, overlayMode);
@@ -587,6 +721,16 @@ export default function IndoorCanvas({
       ctx.save();
       ctx.translate(transform.x, transform.y);
       ctx.scale(transform.zoom, transform.zoom);
+    } else if (overlayAffine) {
+      ctx.save();
+      ctx.transform(
+        overlayAffine.a,
+        overlayAffine.b,
+        overlayAffine.c,
+        overlayAffine.d,
+        overlayAffine.e,
+        overlayAffine.f,
+      );
     } else {
       const scaleX = width / Math.max(1, floorBounds.maxX - floorBounds.minX);
       const scaleY = height / Math.max(1, floorBounds.maxY - floorBounds.minY);
@@ -611,6 +755,34 @@ export default function IndoorCanvas({
       (pathPoints || []).map((point) => point.room_id).filter(Boolean),
     );
     const roomsById = new Map(indoorMap.rooms.map((room) => [room.id, room]));
+
+    indoorMap.walls?.forEach((wall) => {
+      const offset = is3D ? { x: 6, y: -6 } : { x: 0, y: 0 };
+      ctx.beginPath();
+      ctx.moveTo(wall.x1 + offset.x, wall.y1 + offset.y);
+      ctx.lineTo(wall.x2 + offset.x, wall.y2 + offset.y);
+      ctx.strokeStyle = isDark ? "#64748B" : "#6B7280";
+      ctx.lineWidth = wall.thickness || 6;
+      ctx.lineCap = "round";
+      ctx.stroke();
+    });
+
+    indoorMap.windows?.forEach((windowElement) => {
+      const offset = is3D ? { x: 6, y: -6 } : { x: 0, y: 0 };
+      ctx.beginPath();
+      ctx.moveTo(
+        windowElement.x - (windowElement.width || 28) / 2 + offset.x,
+        windowElement.y + offset.y,
+      );
+      ctx.lineTo(
+        windowElement.x + (windowElement.width || 28) / 2 + offset.x,
+        windowElement.y + offset.y,
+      );
+      ctx.strokeStyle = "#06B6D4";
+      ctx.lineWidth = 4;
+      ctx.lineCap = "round";
+      ctx.stroke();
+    });
 
     indoorMap.rooms.forEach((room) => {
       let roomState = null;
@@ -679,6 +851,38 @@ export default function IndoorCanvas({
       });
     }
 
+    indoorMap.objects?.forEach((objectElement) => {
+      ctx.beginPath();
+      ctx.arc(objectElement.x, objectElement.y, 12, 0, Math.PI * 2);
+      ctx.fillStyle =
+        objectElement.objectType === "exit" ? "#16A34A" : colors.route;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = colors.waypointStroke;
+      ctx.stroke();
+      ctx.fillStyle = "#FFFFFF";
+      ctx.font = "700 9px Inter, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(
+        roomIconSymbol({
+          name: objectElement.label || objectElement.name || "POI",
+          iconPreset: objectElement.iconPreset || objectElement.objectType || "info",
+        }),
+        objectElement.x,
+        objectElement.y,
+      );
+      if (indoorMap.metadata.showLabels) {
+        ctx.fillStyle = colors.label;
+        ctx.font = "600 10px Inter, sans-serif";
+        ctx.fillText(
+          objectElement.label || objectElement.name || "Object",
+          objectElement.x,
+          objectElement.y + 22,
+        );
+      }
+    });
+
     drawUserDot(ctx, sensorPosition, colors);
 
     mapElements
@@ -705,11 +909,15 @@ export default function IndoorCanvas({
     indoorMap.metadata.showLabels,
     indoorMap.rooms,
     indoorMap.waypoints,
+    indoorMap.walls,
+    indoorMap.windows,
     indoorMap.beacons,
+    indoorMap.objects,
     indoorMap.metadata.pixelsPerMeter,
     isDark,
     is3D,
     mapElements,
+    overlayAffine,
     overlayMode,
     pathOffset,
     pathPoints,
@@ -753,7 +961,7 @@ export default function IndoorCanvas({
   }, [applyZoom, overlayMode]);
 
   const handleRoomPick = (event) => {
-    if (!interactive || !onRoomPick || !indoorMap.rooms.length) return;
+    if (!interactive || !onRoomPick || (!indoorMap.rooms.length && !indoorMap.objects.length)) return;
     const canvas = canvasRef.current;
     if (!canvas) return;
 
@@ -762,7 +970,12 @@ export default function IndoorCanvas({
     const localY = event.clientY - rect.top;
 
     let worldPoint;
-    if (overlayMode) {
+    if (overlayMode && inverseOverlayAffine) {
+      worldPoint = applyAffineTransform(inverseOverlayAffine, {
+        x: localX,
+        y: localY,
+      });
+    } else if (overlayMode) {
       const scaleX = (floorBounds.maxX - floorBounds.minX) / Math.max(rect.width, 1);
       const scaleY = (floorBounds.maxY - floorBounds.minY) / Math.max(rect.height, 1);
       worldPoint = {
@@ -776,20 +989,64 @@ export default function IndoorCanvas({
       };
     }
 
+    const objectElement = findObjectAtPoint(indoorMap.objects, worldPoint);
+    if (objectElement) {
+      onRoomPick(objectElement);
+      return;
+    }
+
     const room = findRoomAtPoint(indoorMap.rooms, worldPoint);
     if (room) onRoomPick(room);
   };
 
   const containerStyle = overlayMode
     ? {
-        left: geoFrame.left,
-        top: geoFrame.top,
-        width: geoFrame.width,
-        height: geoFrame.height,
+        left: overlayAffine ? 0 : geoFrame.left,
+        top: overlayAffine ? 0 : geoFrame.top,
+        width: overlayAffine ? "100%" : geoFrame.width,
+        height: overlayAffine ? "100%" : geoFrame.height,
         pointerEvents: interactive ? "auto" : "none",
         ...style,
       }
     : style;
+
+  const useThreeScene = viewMode !== "2d" && !interactive && !overlayMode;
+
+  if (useThreeScene) {
+    return (
+      <div
+        ref={containerRef}
+        className={`${overlayMode ? "absolute z-[520]" : "relative h-full min-h-[360px]"} ${className}`}
+        style={containerStyle}
+      >
+        <div className="relative h-full w-full overflow-hidden rounded-none">
+          <IndoorThreeScene
+            indoorMap={indoorMap}
+            pathPoints={pathPoints}
+            sensorPosition={sensorPosition}
+            showBeacons={showBeacons}
+            isDark={isDark}
+            viewMode={viewMode === "3d" ? "3d" : "isometric"}
+            className="h-full w-full"
+          />
+          {!overlayMode && (
+            <div className="pointer-events-none absolute left-4 top-4 flex flex-wrap gap-2">
+              <span className="badge-neutral">
+                <Layers className="h-3.5 w-3.5" />
+                {viewMode === "3d" ? "3D scene" : "2.5D isometric"}
+              </span>
+              {pathPoints?.length > 0 && (
+                <span className="badge-neutral">
+                  <Navigation className="h-3.5 w-3.5" />
+                  Active route
+                </span>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div

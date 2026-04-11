@@ -3,6 +3,7 @@ import { supabase } from "../utils/supabase.js";
 import { requireAdmin } from "../middleware/auth.js";
 import graphCache from "../cache/graphCache.js";
 import { autoTraceFloorPlan } from "../services/floorPlanAutoTrace.js";
+import { normalizeSaveMapPayload } from "../utils/mapPersistence.js";
 
 const router = express.Router();
 
@@ -123,86 +124,100 @@ router.delete("/:id", requireAdmin, async (req, res) => {
 // Admin: Save entire floor map (rooms + waypoints + connections in one call)
 router.post("/:id/save-map", requireAdmin, async (req, res) => {
   const { id: floorId } = req.params;
-  const {
-    rooms = [],
-    waypoints = [],
-    connections = [],
-    scale_pixels_per_meter,
-  } = req.body;
 
   try {
+    const { data: existingFloor, error: floorError } = await supabase
+      .from("floors")
+      .select("id, building_id, map_data, scale_pixels_per_meter")
+      .eq("id", floorId)
+      .single();
+
+    if (floorError || !existingFloor) {
+      return res.status(404).json({ error: "Floor not found" });
+    }
+
+    const normalized = normalizeSaveMapPayload(floorId, req.body || {});
+
     await supabase.from("waypoint_connections").delete().eq("floor_id", floorId);
     await supabase.from("waypoints").delete().eq("floor_id", floorId);
     await supabase.from("rooms").delete().eq("floor_id", floorId);
 
-    if (rooms.length > 0) {
+    if (normalized.rooms.length > 0) {
       const { error } = await supabase.from("rooms").insert(
-        rooms.map((r) => ({
-          id: r.id,
-          floor_id: floorId,
-          name: r.name || "Unnamed",
-          type: r.type || "other",
-          x: r.x,
-          y: r.y,
-          width: r.width,
-          height: r.height,
-          color: r.color || null,
-          description: r.description || "",
-          polygon_points: r.polygon_points || null,
+        normalized.rooms.map((room) => ({
+          id: room.id,
+          floor_id: room.floor_id,
+          name: room.name,
+          type: room.type,
+          x: room.x,
+          y: room.y,
+          width: room.width,
+          height: room.height,
+          color: room.color,
+          description: room.description,
+          polygon_points: room.polygon_points,
         })),
       );
       if (error) throw error;
     }
 
-    if (waypoints.length > 0) {
+    if (normalized.waypoints.length > 0) {
       const { error } = await supabase.from("waypoints").insert(
-        waypoints.map((w) => ({
-          id: w.id,
-          floor_id: floorId,
-          room_id: w.room_id || null,
-          x: w.x,
-          y: w.y,
-          type: w.type || "room_center",
-          name: w.name || "",
-          linked_floor_id: w.linked_floor_id || null,
+        normalized.waypoints.map((waypoint) => ({
+          id: waypoint.id,
+          floor_id: waypoint.floor_id,
+          room_id: waypoint.room_id,
+          x: waypoint.x,
+          y: waypoint.y,
+          type: waypoint.type,
+          name: waypoint.name,
+          linked_floor_id: waypoint.linked_floor_id,
         })),
       );
       if (error) throw error;
     }
 
-    if (connections.length > 0) {
+    if (normalized.connections.length > 0) {
       const { error } = await supabase.from("waypoint_connections").insert(
-        connections.map((c) => ({
-          id: c.id,
-          floor_id: floorId,
-          waypoint_a_id: c.waypoint_a_id,
-          waypoint_b_id: c.waypoint_b_id,
+        normalized.connections.map((connection) => ({
+          id: connection.id,
+          floor_id: connection.floor_id,
+          waypoint_a_id: connection.waypoint_a_id,
+          waypoint_b_id: connection.waypoint_b_id,
         })),
       );
       if (error) throw error;
     }
 
-    if (scale_pixels_per_meter) {
-      const { error } = await supabase
-        .from("floors")
-        .update({ scale_pixels_per_meter })
-        .eq("id", floorId);
-      if (error) throw error;
+    const floorUpdates = {};
+    if ("map_data" in (req.body || {})) {
+      floorUpdates.map_data = normalized.map_data;
+    }
+    if ("scale_pixels_per_meter" in (req.body || {})) {
+      floorUpdates.scale_pixels_per_meter = normalized.scale_pixels_per_meter;
     }
 
-    const { data: floor } = await supabase
-      .from("floors")
-      .select("building_id")
-      .eq("id", floorId)
-      .single();
+    let updatedFloor = existingFloor;
+    if (Object.keys(floorUpdates).length > 0) {
+      const { data, error } = await supabase
+        .from("floors")
+        .update(floorUpdates)
+        .eq("id", floorId)
+        .select("*")
+        .single();
 
-    if (floor?.building_id) graphCache.invalidate(floor.building_id);
+      if (error) throw error;
+      updatedFloor = data;
+    }
+
+    if (existingFloor?.building_id) graphCache.invalidate(existingFloor.building_id);
 
     res.json({
       success: true,
-      rooms: rooms.length,
-      waypoints: waypoints.length,
-      connections: connections.length,
+      floor: updatedFloor,
+      rooms: normalized.rooms.length,
+      waypoints: normalized.waypoints.length,
+      connections: normalized.connections.length,
     });
   } catch (err) {
     console.error("save-map error:", err);
