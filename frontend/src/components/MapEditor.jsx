@@ -126,7 +126,7 @@ function AiTraceModal({
 
   return (
     <div className="fixed inset-0 z-[860] flex items-center justify-center bg-slate-950/40 px-4 py-8">
-      <div className="card w-full max-w-2xl">
+      <div className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
         <div className="flex items-start justify-between gap-4">
           <div>
             <div className="section-label">AI Mapping</div>
@@ -143,7 +143,7 @@ function AiTraceModal({
           </button>
         </div>
 
-        <div className="mt-6 flex items-center gap-2 rounded-xl border border-default bg-surface-alt p-1">
+        <div className="mt-6 flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-100 p-1">
           {[
             { id: "current_floor", label: "Current Floor" },
             { id: "all_floors", label: "All Floors" },
@@ -154,7 +154,7 @@ function AiTraceModal({
               disabled={running}
               onClick={() => onScopeChange(entry.id)}
               className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-                scope === entry.id ? "bg-accent text-white" : "text-secondary"
+                scope === entry.id ? "bg-blue-600 text-white" : "text-secondary"
               }`}
             >
               {entry.label}
@@ -175,7 +175,7 @@ function AiTraceModal({
           ].map(([key, label, beta]) => (
             <label
               key={key}
-              className="flex items-center justify-between gap-3 rounded-xl border border-default bg-surface px-4 py-3"
+              className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3"
             >
               <span className="flex items-center gap-2 text-sm font-medium text-primary">
                 {label}
@@ -228,7 +228,7 @@ function AiTraceModal({
             type="button"
             disabled={running}
             onClick={onRun}
-            className="btn-primary"
+            className="inline-flex h-10 items-center justify-center rounded-lg bg-blue-600 px-4 font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60"
           >
             {running ? "Running AI Mapping..." : "Run AI Mapping"}
           </button>
@@ -1667,6 +1667,7 @@ const MapEditor = forwardRef(function MapEditor(
   const historyRef = useRef([]);
   const futureRef = useRef([]);
   const didFitRef = useRef(false);
+  const lastLoadedAiFloorRef = useRef(null);
   const spaceDownRef = useRef(false);
   const [model, setModel] = useState(() => modelFromFloor(floorData, buildingIndustry));
   const modelRef = useRef(model);
@@ -1761,11 +1762,30 @@ const MapEditor = forwardRef(function MapEditor(
     setUndoCount(0);
     setRedoCount(0);
     didFitRef.current = false;
+    lastLoadedAiFloorRef.current = null;
   }, [buildingIndustry, floorData]);
 
   useEffect(() => {
     modelRef.current = model;
   }, [model]);
+
+  useEffect(() => {
+    if (!floorData?.id || lastLoadedAiFloorRef.current === floorData.id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const payload = await api.maps.latestAiTrace(floorData.id);
+        if (cancelled || !payload?.result) return;
+        applyAiTraceResult(payload.result, { silent: true });
+        lastLoadedAiFloorRef.current = floorData.id;
+      } catch {
+        lastLoadedAiFloorRef.current = floorData.id;
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [floorData?.id]);
 
   useEffect(() => {
     function handlePointerMove(event) {
@@ -2125,7 +2145,7 @@ const MapEditor = forwardRef(function MapEditor(
     toast.success("Waypoints and paths generated.");
   }
 
-  function applyAiTraceResult(traced) {
+  function applyAiTraceResult(traced, { silent = false } = {}) {
     const nextRooms = (traced.rooms || []).map((entry, index) =>
       normalizeElement(
         {
@@ -2140,6 +2160,7 @@ const MapEditor = forwardRef(function MapEditor(
           points: entry.polygon || [],
           name: entry.name || `Room ${index + 1}`,
           roomType: entry.roomType || defaultRoomType(buildingIndustry),
+          aiGenerated: true,
         },
         buildingIndustry,
       ),
@@ -2156,6 +2177,7 @@ const MapEditor = forwardRef(function MapEditor(
           name: entry.roomId ? "" : entry.type || `Node ${index + 1}`,
           waypointType: entry.type === "room" ? "destination" : "junction",
           linkedRoomId: entry.roomId || null,
+          aiGenerated: true,
         },
         buildingIndustry,
       );
@@ -2179,6 +2201,7 @@ const MapEditor = forwardRef(function MapEditor(
             bidirectional: true,
             accessible: false,
             name: "",
+            aiGenerated: true,
           },
           buildingIndustry,
         );
@@ -2194,6 +2217,9 @@ const MapEditor = forwardRef(function MapEditor(
           y: entry.y,
           name: "Door",
           doorType: "main_entrance",
+          angle: Number(entry.angle) || 0,
+          width: Number(entry.width) || 22,
+          aiGenerated: true,
         },
         buildingIndustry,
       ),
@@ -2209,6 +2235,7 @@ const MapEditor = forwardRef(function MapEditor(
           x2: entry.x2,
           y2: entry.y2,
           thickness: entry.thickness,
+          aiGenerated: true,
         },
         buildingIndustry,
       ),
@@ -2222,6 +2249,8 @@ const MapEditor = forwardRef(function MapEditor(
           x: entry.x,
           y: entry.y,
           width: entry.width,
+          angle: Number(entry.angle) || 0,
+          aiGenerated: true,
         },
         buildingIndustry,
       ),
@@ -2240,6 +2269,7 @@ const MapEditor = forwardRef(function MapEditor(
           photoUrl: entry.photoUrl || entry.photo_url || "",
           linkedRoomId: entry.roomId || entry.linkedRoomId || null,
           iconPreset: defaultIconPresetForType(entry.type || "info"),
+          aiGenerated: true,
         },
         buildingIndustry,
       ),
@@ -2267,7 +2297,7 @@ const MapEditor = forwardRef(function MapEditor(
         ...nextConnections,
         ...nextObjects,
       );
-    });
+    }, silent);
   }
 
   async function runAiTrace() {
@@ -2303,6 +2333,7 @@ const MapEditor = forwardRef(function MapEditor(
       setAiTraceStep(AI_TRACE_STEPS.length - 1);
 
       const traced = tracedPayload?.result || tracedPayload;
+      const resultSet = tracedPayload?.results || [];
       if (
         !traced?.rooms?.length &&
         !traced?.walls?.length &&
@@ -2315,6 +2346,11 @@ const MapEditor = forwardRef(function MapEditor(
       }
 
       applyAiTraceResult(traced);
+      if (aiTraceScope === "all_floors" && resultSet.length > 1) {
+        toast.success(
+          `AI mapping completed for ${resultSet.length} floors. Loaded results for the current floor.`,
+        );
+      }
       setAiTraceModalOpen(false);
       toast.success(
         `AI mapping detected ${traced.rooms?.length || 0} rooms, ${traced.walls?.length || 0} walls, and ${traced.doors?.length || 0} doors. Review everything before publishing.`,
@@ -2583,8 +2619,7 @@ const MapEditor = forwardRef(function MapEditor(
     const world = { x: point.worldX, y: point.worldY };
     const snapped = { x: point.x, y: point.y };
     const match = hitElement(world);
-    const handle =
-      selected?.kind === "room"
+      const handle = selected
         ? handlePoints(selected).find((entry) => dist(world, entry) <= 12 / zoom + 4)
         : null;
     if (event.button === 1 || spaceDownRef.current) {
@@ -2834,6 +2869,33 @@ const MapEditor = forwardRef(function MapEditor(
       const next = clone(modelRef.current);
       const target = next.elements.find((element) => element.id === action.original.id);
       if (!target) return;
+      if (target.kind === "wall") {
+        const sx = box.width / Math.max(start.width, 1);
+        const sy = box.height / Math.max(start.height, 1);
+        target.x1 = box.x + (action.original.x1 - start.x) * sx;
+        target.y1 = box.y + (action.original.y1 - start.y) * sy;
+        target.x2 = box.x + (action.original.x2 - start.x) * sx;
+        target.y2 = box.y + (action.original.y2 - start.y) * sy;
+      } else if (target.kind === "path") {
+        const sx = box.width / Math.max(start.width, 1);
+        const sy = box.height / Math.max(start.height, 1);
+        target.points = action.original.points.map((entry) => ({
+          x: box.x + (entry.x - start.x) * sx,
+          y: box.y + (entry.y - start.y) * sy,
+        }));
+      } else if (target.kind === "door" || target.kind === "window") {
+        target.x = box.x + box.width / 2;
+        target.y = box.y + box.height / 2;
+        if (target.kind === "window") {
+          target.width = Math.max(12, box.width);
+        }
+        if (target.kind === "door") {
+          target.width = Math.max(12, box.width);
+        }
+      } else if (target.kind === "waypoint") {
+        target.x = box.x + box.width / 2;
+        target.y = box.y + box.height / 2;
+      }
       if (target.shape === "polygon") {
         const sx = box.width / start.width;
         const sy = box.height / start.height;
@@ -2871,6 +2933,15 @@ const MapEditor = forwardRef(function MapEditor(
 
   function dbl() {
     if (previewMode) return;
+    if (selected?.kind === "room") {
+      const nextName = window.prompt("Rename room", selected.name || "");
+      if (nextName !== null) {
+        updateElement(selected.id, (element) => {
+          element.name = nextName.trim();
+        });
+      }
+      return;
+    }
     if (tool === "room" && shape === "polygon" && polyDraft.length >= 3) {
       const box = boundsFromPoints(polyDraft);
       saveRoom(
@@ -2929,8 +3000,10 @@ const MapEditor = forwardRef(function MapEditor(
       ctx.beginPath();
       ctx.moveTo(wall.x1, wall.y1);
       ctx.lineTo(wall.x2, wall.y2);
-      ctx.strokeStyle = isDark ? "#64748B" : "#475569";
-      ctx.lineWidth = wall.thickness || 6;
+      ctx.strokeStyle = wall.aiGenerated ? "#444444" : isDark ? "#64748B" : "#475569";
+      ctx.lineWidth = wall.aiGenerated
+        ? clamp(Number(wall.thickness) || 3, 2, 4)
+        : wall.thickness || 6;
       ctx.lineCap = "round";
       ctx.stroke();
       if (selectionId === wall.id) {
@@ -2947,30 +3020,38 @@ const MapEditor = forwardRef(function MapEditor(
     visibleElements
       .filter((element) => element.kind === "window")
       .forEach((windowElement) => {
+        const half = (windowElement.width || 28) / 2;
+        const angle = toRadians(windowElement.angle || 0);
+        const dx = Math.cos(angle) * half;
+        const dy = Math.sin(angle) * half;
+        const normalX = -Math.sin(angle) * 2;
+        const normalY = Math.cos(angle) * 2;
         ctx.beginPath();
-        ctx.moveTo(windowElement.x - (windowElement.width || 28) / 2, windowElement.y);
-        ctx.lineTo(windowElement.x + (windowElement.width || 28) / 2, windowElement.y);
+        ctx.moveTo(windowElement.x - dx - normalX, windowElement.y - dy - normalY);
+        ctx.lineTo(windowElement.x + dx - normalX, windowElement.y + dy - normalY);
+        ctx.moveTo(windowElement.x - dx + normalX, windowElement.y - dy + normalY);
+        ctx.lineTo(windowElement.x + dx + normalX, windowElement.y + dy + normalY);
         ctx.strokeStyle = "#06B6D4";
-        ctx.lineWidth = 4;
+        ctx.lineWidth = 2;
         ctx.lineCap = "round";
         ctx.stroke();
       });
-    visibleElements.filter((element) => element.kind === "path").forEach((path) => {
+    !previewMode && visibleElements.filter((element) => element.kind === "path").forEach((path) => {
       if (!path.points.length) return;
       ctx.beginPath();
       ctx.moveTo(path.points[0].x, path.points[0].y);
       path.points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
-      ctx.strokeStyle = path.accessible ? success : accent;
+      ctx.strokeStyle = "#22C55E";
       ctx.lineWidth = selectionId === path.id ? 3 : previewMode ? 3 : 2;
       ctx.lineCap = "round";
       ctx.lineJoin = "round";
-      if (!path.bidirectional) ctx.setLineDash([10, 6]);
+      ctx.setLineDash([8, 6]);
       ctx.stroke();
       ctx.setLineDash([]);
       path.points.forEach((point) => {
         ctx.beginPath();
         ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
-        ctx.fillStyle = accent;
+        ctx.fillStyle = "#22C55E";
         ctx.fill();
       });
     });
@@ -2980,7 +3061,7 @@ const MapEditor = forwardRef(function MapEditor(
       );
       const roomFill = previewMode
         ? room.color || (isDark ? "rgba(30, 58, 95, 0.76)" : "rgba(255, 255, 255, 0.78)")
-        : room.color || accentLight;
+        : room.color || (room.aiGenerated ? "rgba(147, 112, 219, 0.3)" : accentLight);
       const extrusionDepth =
         (Number.parseFloat(model.threeD?.extrusionHeight) || 3.2) * 3;
       if (previewMode && previewView === "3d") {
@@ -2998,6 +3079,9 @@ const MapEditor = forwardRef(function MapEditor(
         ctx.fillStyle = roomFill;
         ctx.fill();
         ctx.strokeStyle = room.color || accent;
+        if (room.aiGenerated && !room.color) {
+          ctx.strokeStyle = "#6644aa";
+        }
         ctx.lineWidth = selectionId === room.id ? 2.5 : 1.5;
         ctx.stroke();
       }
@@ -3037,20 +3121,24 @@ const MapEditor = forwardRef(function MapEditor(
     });
     visibleElements.filter((element) => element.kind === "door").forEach((door) => {
       if (door.roomId) return;
+      const half = (door.width || 22) / 2;
+      const angle = toRadians(door.angle || 90);
+      const dx = Math.cos(angle) * half;
+      const dy = Math.sin(angle) * half;
       ctx.beginPath();
-      ctx.arc(door.x, door.y, 6, 0, Math.PI * 2);
-      ctx.fillStyle = warn;
-      ctx.fill();
-      ctx.lineWidth = 2;
-      ctx.strokeStyle = "#ffffff";
+      ctx.moveTo(door.x - dx, door.y - dy);
+      ctx.lineTo(door.x + dx, door.y + dy);
+      ctx.lineWidth = Math.max(2, Math.min(5, (door.width || 22) / 8));
+      ctx.strokeStyle = "#2196F3";
+      ctx.lineCap = "round";
       ctx.stroke();
     });
-    visibleElements.filter((element) => element.kind === "waypoint").forEach((waypoint) => {
+    !previewMode && visibleElements.filter((element) => element.kind === "waypoint").forEach((waypoint) => {
       ctx.beginPath();
-      ctx.arc(waypoint.x, waypoint.y, 8, 0, Math.PI * 2);
-      ctx.fillStyle = accent;
+      ctx.arc(waypoint.x, waypoint.y, 4, 0, Math.PI * 2);
+      ctx.fillStyle = "#22C55E";
       ctx.fill();
-      ctx.lineWidth = selectionId === waypoint.id ? 2.5 : 2;
+      ctx.lineWidth = selectionId === waypoint.id ? 2 : 1.5;
       ctx.strokeStyle = "#ffffff";
       ctx.stroke();
     });
@@ -3103,7 +3191,10 @@ const MapEditor = forwardRef(function MapEditor(
       ctx.strokeStyle = accent;
       ctx.lineWidth = 2;
       ctx.strokeRect(box.x - 6, box.y - 6, box.width + 12, box.height + 12);
-      if (selected.kind === "room" && !previewMode) {
+      if (
+        ["room", "wall", "door", "window", "waypoint", "path"].includes(selected.kind) &&
+        !previewMode
+      ) {
         handlePoints(selected).forEach((entry) => {
           ctx.fillStyle = "#ffffff";
           ctx.fillRect(entry.x - 2, entry.y - 2, 4, 4);

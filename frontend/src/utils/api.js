@@ -199,6 +199,45 @@ async function requestFormData(path, formData) {
   }
 }
 
+async function requestBlob(path) {
+  const headers = {
+    ...(await getAuthHeaders()),
+  };
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+  try {
+    const res = await fetch(`${BASE_URL}${path}`, {
+      method: "GET",
+      headers,
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!res.ok) {
+      let message = `Request failed with status ${res.status}`;
+      try {
+        const payload = await res.json();
+        message = payload?.error || payload?.message || message;
+      } catch {
+        const text = await res.text().catch(() => "");
+        if (text) message = text;
+      }
+      throw new Error(message);
+    }
+    return await res.blob();
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err.name === "AbortError") {
+      throw new Error(
+        "Request timed out. Please check your connection and try again.",
+      );
+    }
+    if (err instanceof TypeError && err.message === "Failed to fetch") {
+      throw new Error("Network error. Please check your internet connection.");
+    }
+    throw err;
+  }
+}
+
 /**
  * API client with methods matching all backend endpoints exactly.
  * Every path here corresponds to a route in the backend under /api/v1.
@@ -260,11 +299,12 @@ export const api = {
   // QR Codes: /api/v1/qr
   qr: {
     room: (roomId) => api.get(`/qr/room/${roomId}`),
-    floor: (floorId) => api.get(`/qr/floor/${floorId}/batch`),
+    floorZip: (floorId) => requestBlob(`/qr/floor/${floorId}/batch`),
   },
 
   maps: {
     aiTrace: (formData) => requestFormData("/maps/ai-trace", formData),
+    latestAiTrace: (floorId) => api.get(`/maps/ai-trace/latest/${floorId}`),
     saveGeoreference: (data) => api.post("/maps/georeference", data),
   },
 };

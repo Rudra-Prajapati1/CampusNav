@@ -46,39 +46,55 @@ function fallbackIconColor(iconId = "") {
   return "#7C3AED";
 }
 
-function createFallbackIcon(iconId) {
-  const canvas = document.createElement("canvas");
-  canvas.width = 64;
-  canvas.height = 64;
-  const ctx = canvas.getContext("2d");
+async function createFallbackIconImageData(iconId) {
   const color = fallbackIconColor(iconId);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><circle cx="32" cy="32" r="20" fill="${color}" stroke="#FFFFFF" stroke-width="4" /></svg>`;
+  const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
+  const objectUrl = URL.createObjectURL(blob);
 
-  ctx.clearRect(0, 0, 64, 64);
-  ctx.fillStyle = color;
-  ctx.beginPath();
-  ctx.arc(32, 32, 20, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.lineWidth = 4;
-  ctx.strokeStyle = "#FFFFFF";
-  ctx.stroke();
-  ctx.fillStyle = "#FFFFFF";
-  ctx.font = "700 18px sans-serif";
-  ctx.textAlign = "center";
-  ctx.textBaseline = "middle";
-  ctx.fillText(String(iconId || "i").slice(0, 1).toUpperCase(), 32, 33);
-
-  return canvas;
+  try {
+    const image = await new Promise((resolve, reject) => {
+      const nextImage = new Image();
+      nextImage.onload = () => resolve(nextImage);
+      nextImage.onerror = () => reject(new Error("Unable to load fallback icon SVG."));
+      nextImage.src = objectUrl;
+    });
+    const canvas = document.createElement("canvas");
+    canvas.width = 64;
+    canvas.height = 64;
+    const ctx = canvas.getContext("2d");
+    ctx.clearRect(0, 0, 64, 64);
+    ctx.drawImage(image, 0, 0, 64, 64);
+    return ctx.getImageData(0, 0, 64, 64);
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
 }
 
 function registerFallbackIcons(map) {
-  const ensureIcon = (iconId) => {
-    if (!iconId || map.hasImage(iconId)) return;
-    map.addImage(iconId, createFallbackIcon(iconId), { pixelRatio: 2 });
+  const pending = new Set();
+  const ensureIcon = async (iconId) => {
+    if (!iconId || map.hasImage(iconId) || pending.has(iconId)) return;
+    pending.add(iconId);
+    try {
+      const imageData = await createFallbackIconImageData(iconId);
+      if (!map.hasImage(iconId)) {
+        map.addImage(iconId, imageData);
+      }
+    } catch (error) {
+      console.warn(`Unable to register fallback icon "${iconId}":`, error);
+    } finally {
+      pending.delete(iconId);
+    }
   };
 
-  KNOWN_ICON_IDS.forEach(ensureIcon);
+  KNOWN_ICON_IDS.forEach((iconId) => {
+    void ensureIcon(iconId);
+  });
 
-  const handleMissingImage = (event) => ensureIcon(event.id);
+  const handleMissingImage = (event) => {
+    void ensureIcon(event.id);
+  };
   map.on("styleimagemissing", handleMissingImage);
 
   return () => map.off("styleimagemissing", handleMissingImage);
@@ -356,7 +372,9 @@ export default function MapLibreNavigationMap({
       "bottom-left",
     );
 
+    let removeFallbackIcons = () => {};
     map.on("load", () => {
+      removeFallbackIcons = registerFallbackIcons(map);
       setMapReady(true);
       setMapBridge(mapLibreAdapter.buildProjectionBridge(map));
       setMapZoom(map.getZoom());
@@ -364,8 +382,6 @@ export default function MapLibreNavigationMap({
 
     const syncViewport = () => setMapZoom(map.getZoom());
     map.on("move", syncViewport);
-    const removeFallbackIcons = registerFallbackIcons(map);
-
     mapRef.current = map;
 
     return () => {

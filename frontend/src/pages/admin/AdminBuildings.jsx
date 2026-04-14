@@ -20,7 +20,7 @@ import toast from "react-hot-toast";
 import { getIndustry, INDUSTRY_TYPES, resolvePoiIcon } from "../../config/poiTypes.js";
 import { api } from "../../utils/api.js";
 import { uploadFile } from "../../utils/supabase.js";
-import { downloadQrBatchZip, sanitizeFilename } from "../../utils/zipDownload.js";
+import { downloadBlob, sanitizeFilename } from "../../utils/zipDownload.js";
 
 const FLOOR_PLAN_BUCKET =
   import.meta.env.VITE_SUPABASE_FLOOR_PLAN_BUCKET || "floor-plans";
@@ -111,6 +111,24 @@ function BuildingModal({ building, onClose, onSave }) {
     logo_url: building?.logo_url || "",
   });
   const [saving, setSaving] = useState(false);
+  const [uploadingLogo, setUploadingLogo] = useState(false);
+
+  const handleLogoUpload = async (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    setUploadingLogo(true);
+    try {
+      const path = `buildings/logos/${Date.now()}-${sanitizeFilename(file.name, "logo")}`;
+      const url = await uploadFile(FLOOR_PLAN_BUCKET, path, file, true);
+      setForm((current) => ({ ...current, logo_url: url }));
+      toast.success("Logo uploaded and URL filled.");
+    } catch (error) {
+      toast.error(error.message || "Unable to upload logo");
+    } finally {
+      setUploadingLogo(false);
+    }
+  };
 
   const handleSubmit = async (event) => {
     event.preventDefault();
@@ -202,8 +220,21 @@ function BuildingModal({ building, onClose, onSave }) {
             placeholder="https://example.com/logo.png"
           />
           <p className="mt-2 text-xs subtle-text">
-            Building world placement is handled later in the georeference step.
+            Enter a public URL to your building's logo image (e.g. from Google Drive, Imgur, or your website). Leave blank to use default.
           </p>
+          <div className="mt-3">
+            <label className="field-label">Or Upload Logo (optional)</label>
+            <input
+              className="input"
+              type="file"
+              accept="image/*"
+              disabled={uploadingLogo}
+              onChange={handleLogoUpload}
+            />
+            {uploadingLogo ? (
+              <p className="mt-2 text-xs subtle-text">Uploading logo...</p>
+            ) : null}
+          </div>
         </div>
 
         <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
@@ -524,13 +555,9 @@ export default function AdminBuildings() {
 
   const downloadFloorQrZip = async (building, floor) => {
     try {
-      const entries = await api.qr.floor(floor.id);
-      if (!entries?.length) {
-        toast.error("No room QR codes are available for this floor yet.");
-        return;
-      }
-      downloadQrBatchZip(
-        entries,
+      const zipBlob = await api.qr.floorZip(floor.id);
+      downloadBlob(
+        zipBlob,
         `${sanitizeFilename(building.name || "building")}-${sanitizeFilename(floor.name || "floor")}-qr.zip`,
       );
       toast.success("QR ZIP downloaded");

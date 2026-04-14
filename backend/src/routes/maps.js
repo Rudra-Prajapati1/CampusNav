@@ -341,6 +341,27 @@ router.post(
   },
 );
 
+router.get("/ai-trace/latest/:floorId", requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("map_ai_trace_results")
+      .select("*")
+      .eq("floor_id", req.params.floorId)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (error) {
+      throw error;
+    }
+    if (!data) {
+      return res.status(404).json({ error: "No AI trace result found for this floor." });
+    }
+    return res.json(data);
+  } catch (error) {
+    return res.status(400).json({ error: error.message || "Unable to load AI trace result." });
+  }
+});
+
 router.post("/georeference", requireAdmin, async (req, res) => {
   try {
     const {
