@@ -2,7 +2,7 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from pipeline import trace_floor_plan
+from pipeline import trace_floor_plan, warmup_model
 
 app = FastAPI(title="CampusNav AI Trace Service", version="1.0.0")
 
@@ -20,6 +20,11 @@ async def health():
     return {"status": "ok", "service": "campusnav-ai-trace"}
 
 
+@app.on_event("startup")
+async def startup_event():
+    warmup_model()
+
+
 @app.post("/trace")
 async def trace(
     file: UploadFile = File(...),
@@ -35,12 +40,11 @@ async def trace(
             content={
                 "error": "AI trace failed",
                 "message": str(exc),
-                "walls": [],
-                "doors": [],
-                "windows": [],
-                "rooms": [],
-                "nodes": [],
-                "edges": [],
-                "objects": [],
+                "spaces": {"type": "FeatureCollection", "features": []},
+                "obstructions": {"type": "FeatureCollection", "features": []},
+                "openings": {"type": "FeatureCollection", "features": []},
+                "nodes": {"type": "FeatureCollection", "features": []},
+                "objects": {"type": "FeatureCollection", "features": []},
+                "meta": {},
             },
         )

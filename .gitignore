@@ -10,3 +10,24 @@ errors.txt
 
 sample images/
 temp/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env
+.env
+
+# VS Code
+.vscode/
+
+# Logs
+*.log

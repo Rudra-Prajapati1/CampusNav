@@ -17,15 +17,60 @@ function ensureArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
-function confidenceSummary(result) {
+function emptyCollection() {
+  return { type: "FeatureCollection", features: [] };
+}
+
+function emptyMvf() {
   return {
-    walls: result.walls.length,
-    rooms: result.rooms.length,
-    doors: result.doors.length,
-    windows: result.windows.length,
-    objects: result.objects.length,
-    nodes: result.nodes.length,
-    edges: result.edges.length,
+    spaces: emptyCollection(),
+    obstructions: emptyCollection(),
+    openings: emptyCollection(),
+    nodes: emptyCollection(),
+    objects: emptyCollection(),
+    meta: {},
+  };
+}
+
+function normalizeCollection(value) {
+  return {
+    type: "FeatureCollection",
+    features: Array.isArray(value?.features) ? value.features : [],
+  };
+}
+
+function normalizeMvf(value) {
+  if (!value || typeof value !== "object") return emptyMvf();
+  return {
+    spaces: normalizeCollection(value.spaces),
+    obstructions: normalizeCollection(value.obstructions),
+    openings: normalizeCollection(value.openings),
+    nodes: normalizeCollection(value.nodes),
+    objects: normalizeCollection(value.objects),
+    meta: value.meta && typeof value.meta === "object" ? value.meta : {},
+  };
+}
+
+function confidenceSummary(mvf) {
+  const normalized = normalizeMvf(mvf);
+  const openingFeatures = normalized.openings.features;
+
+  return {
+    walls: normalized.obstructions.features.length,
+    rooms: normalized.spaces.features.filter(
+      (feature) => feature?.properties?.kind === "room",
+    ).length,
+    corridors: normalized.spaces.features.filter(
+      (feature) => feature?.properties?.kind === "corridor",
+    ).length,
+    doors: openingFeatures.filter(
+      (feature) => feature?.properties?.kind === "door",
+    ).length,
+    windows: openingFeatures.filter(
+      (feature) => feature?.properties?.kind === "window",
+    ).length,
+    objects: normalized.objects.features.length,
+    nodes: normalized.nodes.features.length,
   };
 }
 
@@ -171,14 +216,13 @@ function canonicalFloorId(floors = []) {
   const exactGround = floors.find((floor) => Number(floor.level) === 0);
   if (exactGround) return exactGround.id;
 
-  return [...floors]
-    .sort((left, right) => {
-      const leftLevel = toNumber(left.level, 0);
-      const rightLevel = toNumber(right.level, 0);
-      const distance = Math.abs(leftLevel) - Math.abs(rightLevel);
-      if (distance !== 0) return distance;
-      return leftLevel - rightLevel;
-    })[0]?.id;
+  return [...floors].sort((left, right) => {
+    const leftLevel = toNumber(left.level, 0);
+    const rightLevel = toNumber(right.level, 0);
+    const distance = Math.abs(leftLevel) - Math.abs(rightLevel);
+    if (distance !== 0) return distance;
+    return leftLevel - rightLevel;
+  })[0]?.id;
 }
 
 async function syncBuildingAnchorFromGeoreference(floor, georeference) {
@@ -222,7 +266,8 @@ router.post(
   async (req, res) => {
     try {
       const floorId = req.body.floor_id;
-      const scope = req.body.scope === "all_floors" ? "all_floors" : "current_floor";
+      const scope =
+        req.body.scope === "all_floors" ? "all_floors" : "current_floor";
       const options =
         typeof req.body.options === "string"
           ? JSON.parse(req.body.options || "{}")
@@ -282,23 +327,17 @@ router.post(
             floor_name: floor.name,
             status: "skipped",
             message: "No floor plan asset was attached to this floor.",
-            result: {
-              walls: [],
-              doors: [],
-              windows: [],
-              rooms: [],
-              nodes: [],
-              edges: [],
-              objects: [],
-            },
+            result: emptyMvf(),
           });
           continue;
         }
 
-        const trace = await callAiTraceService({
-          file: currentFile,
-          options,
-        });
+        const trace = normalizeMvf(
+          await callAiTraceService({
+            file: currentFile,
+            options,
+          }),
+        );
 
         await insertAiTraceRecord({
           floor_id: floor.id,
@@ -323,15 +362,7 @@ router.post(
         scope,
         floor_plan_url: uploadedUrl || targetFloor.floor_plan_url || null,
         results,
-        result: results[0]?.result || {
-          walls: [],
-          doors: [],
-          windows: [],
-          rooms: [],
-          nodes: [],
-          edges: [],
-          objects: [],
-        },
+        result: results[0]?.result || emptyMvf(),
       });
     } catch (error) {
       return res.status(400).json({
@@ -354,11 +385,15 @@ router.get("/ai-trace/latest/:floorId", requireAdmin, async (req, res) => {
       throw error;
     }
     if (!data) {
-      return res.status(404).json({ error: "No AI trace result found for this floor." });
+      return res
+        .status(404)
+        .json({ error: "No AI trace result found for this floor." });
     }
     return res.json(data);
   } catch (error) {
-    return res.status(400).json({ error: error.message || "Unable to load AI trace result." });
+    return res
+      .status(400)
+      .json({ error: error.message || "Unable to load AI trace result." });
   }
 });
 
@@ -396,7 +431,9 @@ router.post("/georeference", requireAdmin, async (req, res) => {
 
     const normalizedCorners = normalizeCorners(corners);
     if (normalizedCorners.length < 4) {
-      return res.status(400).json({ error: "At least four corners are required." });
+      return res
+        .status(400)
+        .json({ error: "At least four corners are required." });
     }
 
     const overlayBounds = overlayBoundsFromCorners(normalizedCorners);

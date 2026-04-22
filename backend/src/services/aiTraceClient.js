@@ -2,7 +2,43 @@ import path from "path";
 import { randomUUID } from "crypto";
 
 const AI_TRACE_SERVICE_URL =
-  process.env.AI_TRACE_SERVICE_URL || "http://localhost:8001";
+  process.env.AI_TRACE_SERVICE_URL || "http://localhost:8000";
+
+function emptyCollection() {
+  return { type: "FeatureCollection", features: [] };
+}
+
+function emptyMvf() {
+  return {
+    spaces: emptyCollection(),
+    obstructions: emptyCollection(),
+    openings: emptyCollection(),
+    nodes: emptyCollection(),
+    objects: emptyCollection(),
+    meta: {},
+  };
+}
+
+function normalizeCollection(collection) {
+  if (!collection || typeof collection !== "object") return emptyCollection();
+  return {
+    type: "FeatureCollection",
+    features: Array.isArray(collection.features) ? collection.features : [],
+  };
+}
+
+function normalizeMvf(payload) {
+  if (!payload || typeof payload !== "object") return emptyMvf();
+
+  return {
+    spaces: normalizeCollection(payload.spaces),
+    obstructions: normalizeCollection(payload.obstructions),
+    openings: normalizeCollection(payload.openings),
+    nodes: normalizeCollection(payload.nodes),
+    objects: normalizeCollection(payload.objects),
+    meta: payload.meta && typeof payload.meta === "object" ? payload.meta : {},
+  };
+}
 
 function ensureOk(response, message) {
   if (response.ok) return response;
@@ -42,15 +78,7 @@ export async function callAiTraceService({ file, options = {} }) {
   ensureOk(response, "AI trace service request failed");
   const data = await response.json();
 
-  return {
-    walls: Array.isArray(data.walls) ? data.walls : [],
-    doors: Array.isArray(data.doors) ? data.doors : [],
-    windows: Array.isArray(data.windows) ? data.windows : [],
-    rooms: Array.isArray(data.rooms) ? data.rooms : [],
-    nodes: Array.isArray(data.nodes) ? data.nodes : [],
-    edges: Array.isArray(data.edges) ? data.edges : [],
-    objects: Array.isArray(data.objects) ? data.objects : [],
-  };
+  return normalizeMvf(data);
 }
 
 export function createUploadedFilePayload(file) {

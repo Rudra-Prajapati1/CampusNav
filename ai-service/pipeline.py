@@ -1,50 +1,97 @@
 import json
+import logging
 import math
+import os
+import tempfile
+import threading
+import urllib.request
 import uuid
+from dataclasses import dataclass
 from io import BytesIO
-from typing import Dict, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 import cv2
 import fitz
 import numpy as np
 from PIL import Image
 
-try:  # pragma: no cover - optional at runtime, but required by requirements.txt
+try:
+    import torch
+    from detectron2 import model_zoo
+    from detectron2.config import get_cfg
+    from detectron2.engine import DefaultPredictor
+
+    DETECTRON_AVAILABLE = True
+except Exception:  # pragma: no cover - import is optional at runtime
+    DETECTRON_AVAILABLE = False
+    torch = None
+    model_zoo = None
+    get_cfg = None
+    DefaultPredictor = None
+
+try:
     from skimage.morphology import skeletonize as skimage_skeletonize
 except Exception:  # pragma: no cover
     skimage_skeletonize = None
 
 
-Point = Tuple[int, int]
+LOGGER = logging.getLogger("campusnav.pipeline")
+
+Point = Tuple[float, float]
 Line = Tuple[int, int, int, int]
+
+
+CLASS_INDEX = {
+    "background": 0,
+    "outer_wall": 1,
+    "inner_wall": 2,
+    "window": 3,
+    "door": 4,
+    "room": 5,
+    "corridor": 6,
+    "railing": 7,
+    "stairs": 8,
+    "elevator": 9,
+}
+
+MODEL_LOCK = threading.Lock()
+MODEL_STATE = {
+    "attempted": False,
+    "predictor": None,
+    "error": None,
+}
+
+
+@dataclass
+class ImageBundle:
+    image_bgr: np.ndarray
+    width: int
+    height: int
 
 
 def make_uuid() -> str:
     return str(uuid.uuid4())
 
 
-def empty_result() -> Dict:
-    return {
-        "walls": [],
-        "doors": [],
-        "windows": [],
-        "rooms": [],
-        "nodes": [],
-        "edges": [],
-        "objects": [],
-    }
+def feature_collection() -> Dict:
+    return {"type": "FeatureCollection", "features": []}
 
 
-def parse_options(raw_options: str) -> Dict:
+def parse_options(raw_options: object) -> Dict:
+    if isinstance(raw_options, dict):
+        return raw_options
+    if not raw_options:
+        return {}
     try:
-        options = json.loads(raw_options or "{}")
-        return options if isinstance(options, dict) else {}
+        parsed = json.loads(raw_options)
+        return parsed if isinstance(parsed, dict) else {}
     except Exception:
         return {}
 
 
-def load_image_from_bytes(content: bytes, filename: str) -> np.ndarray:
-    lower = filename.lower()
+def load_image_from_bytes(content: bytes, filename: str) -> ImageBundle:
+    lower = (filename or "upload.png").lower()
     if lower.endswith(".pdf"):
         doc = fitz.open(stream=content, filetype="pdf")
         if doc.page_count == 0:
@@ -52,18 +99,47 @@ def load_image_from_bytes(content: bytes, filename: str) -> np.ndarray:
         page = doc.load_page(0)
         pix = page.get_pixmap(alpha=False, dpi=220)
         image = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-        return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        return ImageBundle(image_bgr=bgr, width=bgr.shape[1], height=bgr.shape[0])
 
     image = Image.open(BytesIO(content)).convert("RGB")
-    return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    bgr = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+    return ImageBundle(image_bgr=bgr, width=bgr.shape[1], height=bgr.shape[0])
 
 
-def to_point(point: Sequence[int]) -> Dict[str, int]:
-    return {"x": int(point[0]), "y": int(point[1])}
+def closed_polygon(points: Sequence[Sequence[float]]) -> List[List[float]]:
+    if not points:
+        return []
+    coords = [[float(p[0]), float(p[1])] for p in points]
+    if coords[0] != coords[-1]:
+        coords.append([coords[0][0], coords[0][1]])
+    return coords
 
 
-def clamp(value: float, low: float, high: float) -> float:
-    return max(low, min(high, value))
+def polygon_centroid(points: Sequence[Sequence[float]]) -> Point:
+    arr = np.array(points, dtype=np.float32)
+    if arr.size == 0:
+        return (0.0, 0.0)
+    return (float(np.mean(arr[:, 0])), float(np.mean(arr[:, 1])))
+
+
+def clamp(value: float, minimum: float, maximum: float) -> float:
+    return max(minimum, min(maximum, value))
+
+
+def euclidean(a: Point, b: Point) -> float:
+    return math.hypot(a[0] - b[0], a[1] - b[1])
+
+
+def line_orientation(line: Line) -> str:
+    x1, y1, x2, y2 = line
+    dx = x2 - x1
+    dy = y2 - y1
+    if abs(dy) <= abs(dx) * 0.35:
+        return "horizontal"
+    if abs(dx) <= abs(dy) * 0.35:
+        return "vertical"
+    return "other"
 
 
 def line_length(line: Line) -> float:
@@ -78,90 +154,11 @@ def normalize_line(raw_line: Sequence[int]) -> Line:
     return (x1, y1, x2, y2) if y1 <= y2 else (x2, y2, x1, y1)
 
 
-def line_orientation(line: Line) -> str:
-    x1, y1, x2, y2 = line
-    dx = x2 - x1
-    dy = y2 - y1
-    if abs(dy) <= abs(dx) * 0.35:
-        return "horizontal"
-    if abs(dx) <= abs(dy) * 0.35:
-        return "vertical"
-    return "other"
-
-
-def point_distance(a: Point, b: Point) -> float:
-    return math.hypot(a[0] - b[0], a[1] - b[1])
-
-
-def preprocess(image: np.ndarray) -> Dict[str, np.ndarray]:
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    filtered = cv2.bilateralFilter(gray, 9, 35, 35)
-    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8)).apply(filtered)
-    binary = cv2.adaptiveThreshold(
-        clahe,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        35,
-        11,
-    )
-
-    if float(np.mean(binary < 128)) > 0.45:
-        binary = cv2.bitwise_not(binary)
-
-    wall_mask = cv2.bitwise_not(binary)
-    wall_mask = cv2.morphologyEx(
-        wall_mask,
-        cv2.MORPH_CLOSE,
-        np.ones((3, 3), np.uint8),
-        iterations=2,
-    )
-    processed = cv2.bitwise_not(wall_mask)
-
-    return {
-        "gray": gray,
-        "filtered": filtered,
-        "enhanced": clahe,
-        "processed": processed,
-        "wall_mask": wall_mask,
-    }
-
-
-def interior_space_mask(wall_mask: np.ndarray) -> np.ndarray:
-    walkable = cv2.bitwise_not(wall_mask)
-    walkable = cv2.morphologyEx(
-        walkable,
-        cv2.MORPH_CLOSE,
-        np.ones((7, 7), np.uint8),
-        iterations=2,
-    )
-
-    component_count, labels, stats, _ = cv2.connectedComponentsWithStats(walkable, 8)
-    interior = np.zeros_like(walkable)
-    height, width = walkable.shape
-
-    for label in range(1, component_count):
-        left = stats[label, cv2.CC_STAT_LEFT]
-        top = stats[label, cv2.CC_STAT_TOP]
-        component_width = stats[label, cv2.CC_STAT_WIDTH]
-        component_height = stats[label, cv2.CC_STAT_HEIGHT]
-        touches_border = (
-            left <= 0
-            or top <= 0
-            or left + component_width >= width - 1
-            or top + component_height >= height - 1
-        )
-        if not touches_border:
-            interior[labels == label] = 255
-
-    return interior
-
-
 def merge_parallel_lines(lines: List[Line], orientation: str) -> List[Line]:
     if not lines:
         return []
 
-    normalized = [normalize_line(line) for line in lines if line_length(line) >= 30]
+    normalized = [normalize_line(line) for line in lines if line_length(line) >= 24]
     if not normalized:
         return []
 
@@ -183,7 +180,7 @@ def merge_parallel_lines(lines: List[Line], orientation: str) -> List[Line]:
             prev_start, prev_end = sorted((prev[0], prev[2]))
             line_start, line_end = sorted((line[0], line[2]))
             gap = line_start - prev_end
-            if abs(prev_y - line_y) <= 5 and gap <= 8:
+            if abs(prev_y - line_y) <= 8 and gap <= 14:
                 merged[-1] = (
                     min(prev_start, line_start),
                     int(round((prev_y + line_y) / 2)),
@@ -198,7 +195,7 @@ def merge_parallel_lines(lines: List[Line], orientation: str) -> List[Line]:
             prev_start, prev_end = sorted((prev[1], prev[3]))
             line_start, line_end = sorted((line[1], line[3]))
             gap = line_start - prev_end
-            if abs(prev_x - line_x) <= 5 and gap <= 8:
+            if abs(prev_x - line_x) <= 8 and gap <= 14:
                 merged[-1] = (
                     int(round((prev_x + line_x) / 2)),
                     min(prev_start, line_start),
@@ -211,398 +208,13 @@ def merge_parallel_lines(lines: List[Line], orientation: str) -> List[Line]:
     return merged
 
 
-def estimate_wall_thickness(wall_mask: np.ndarray, line: Line) -> int:
-    x1, y1, x2, y2 = line
-    mid_x = int(round((x1 + x2) / 2))
-    mid_y = int(round((y1 + y2) / 2))
-    height, width = wall_mask.shape
-    orientation = line_orientation(line)
-
-    def measure_span(axis: str) -> int:
-        span = 1
-        for direction in (-1, 1):
-            delta = 1
-            while delta < 24:
-                sample_x = mid_x + (delta * direction if axis == "x" else 0)
-                sample_y = mid_y + (delta * direction if axis == "y" else 0)
-                if not (0 <= sample_x < width and 0 <= sample_y < height):
-                    break
-                if wall_mask[sample_y, sample_x] < 128:
-                    break
-                span += 1
-                delta += 1
-        return span
-
-    if orientation == "horizontal":
-        return max(4, measure_span("y"))
-    if orientation == "vertical":
-        return max(4, measure_span("x"))
-    return 4
-
-
-def detect_walls(processed: np.ndarray, wall_mask: np.ndarray) -> Tuple[List[Dict], List[Line]]:
-    edges = cv2.Canny(processed, 30, 100)
-    raw_lines = cv2.HoughLinesP(
-        edges,
-        1,
-        np.pi / 180,
-        threshold=80,
-        minLineLength=30,
-        maxLineGap=8,
-    )
-
-    if raw_lines is None:
-        return [], []
-
-    normalized_lines = [normalize_line(line[0]) for line in raw_lines]
-    horizontal = [line for line in normalized_lines if line_orientation(line) == "horizontal"]
-    vertical = [line for line in normalized_lines if line_orientation(line) == "vertical"]
-    diagonal = [line for line in normalized_lines if line_orientation(line) == "other"]
-
-    merged_lines = (
-        merge_parallel_lines(horizontal, "horizontal")
-        + merge_parallel_lines(vertical, "vertical")
-        + [line for line in diagonal if line_length(line) >= 40]
-    )
-
-    walls = []
-    for line in merged_lines:
-        walls.append(
-            {
-                "id": make_uuid(),
-                "x1": int(line[0]),
-                "y1": int(line[1]),
-                "x2": int(line[2]),
-                "y2": int(line[3]),
-                "thickness": estimate_wall_thickness(wall_mask, line),
-            }
-        )
-
-    return walls, normalized_lines
-
-
-def contour_moments_center(contour: np.ndarray) -> Point:
-    moments = cv2.moments(contour)
-    if moments["m00"] == 0:
-        x, y, width, height = cv2.boundingRect(contour)
-        return (int(x + width / 2), int(y + height / 2))
-    return (
-        int(moments["m10"] / moments["m00"]),
-        int(moments["m01"] / moments["m00"]),
-    )
-
-
-def polygon_from_contour(contour: np.ndarray) -> List[Dict[str, int]]:
-    epsilon = 0.01 * cv2.arcLength(contour, True)
-    approx = cv2.approxPolyDP(contour, epsilon, True)
-    if len(approx) < 3:
-        approx = contour
-    return [to_point(point[0]) for point in approx]
-
-
-def detect_rooms(interior_mask: np.ndarray) -> List[Dict]:
-    closed = cv2.morphologyEx(
-        interior_mask,
-        cv2.MORPH_CLOSE,
-        np.ones((9, 9), np.uint8),
-        iterations=2,
-    )
-    contours, hierarchy = cv2.findContours(
-        closed,
-        cv2.RETR_CCOMP,
-        cv2.CHAIN_APPROX_SIMPLE,
-    )
-
-    if hierarchy is None:
-        return []
-
-    rooms: List[Dict] = []
-    total_area = interior_mask.shape[0] * interior_mask.shape[1]
-
-    for contour in sorted(contours, key=cv2.contourArea, reverse=True):
-        area = cv2.contourArea(contour)
-        if area < 3000 or area > total_area * 0.8:
-            continue
-
-        x, y, width, height = cv2.boundingRect(contour)
-        if x <= 0 or y <= 0 or x + width >= interior_mask.shape[1] - 1 or y + height >= interior_mask.shape[0] - 1:
-            continue
-
-        center = contour_moments_center(contour)
-        polygon = polygon_from_contour(contour)
-        if len(polygon) < 3:
-            continue
-
-        rooms.append(
-            {
-                "id": make_uuid(),
-                "name": f"Room {len(rooms) + 1}",
-                "type": "other",
-                "x": int(x),
-                "y": int(y),
-                "width": int(width),
-                "height": int(height),
-                "center": to_point(center),
-                "polygon": polygon,
-                "_area": float(area),
-            }
-        )
-
-    return rooms
-
-
-def build_region_labels(interior_mask: np.ndarray) -> np.ndarray:
-    _, labels = cv2.connectedComponents((interior_mask > 0).astype(np.uint8), 8)
-    return labels
-
-
-def sample_labels_around_point(region_labels: np.ndarray, x: int, y: int, orientation: str) -> Tuple[int, int]:
-    height, width = region_labels.shape
-    if orientation == "vertical":
-        offsets = [(-8, 0), (8, 0), (-12, 0), (12, 0)]
-    else:
-        offsets = [(0, -8), (0, 8), (0, -12), (0, 12)]
-
-    side_a = 0
-    side_b = 0
-    for offset_x, offset_y in offsets[:2]:
-        sample_x = int(clamp(x + offset_x, 0, width - 1))
-        sample_y = int(clamp(y + offset_y, 0, height - 1))
-        label = int(region_labels[sample_y, sample_x])
-        if label:
-            if not side_a:
-                side_a = label
-            elif label != side_a and not side_b:
-                side_b = label
-
-    for offset_x, offset_y in offsets[2:]:
-        sample_x = int(clamp(x + offset_x, 0, width - 1))
-        sample_y = int(clamp(y + offset_y, 0, height - 1))
-        label = int(region_labels[sample_y, sample_x])
-        if label and label != side_a and not side_b:
-            side_b = label
-
-    return side_a, side_b
-
-
-def nearest_wall_id(walls: List[Dict], point: Point, orientation: Optional[str] = None) -> Optional[str]:
-    best_id = None
-    best_distance = 18.0
-    for wall in walls:
-        wall_orientation = line_orientation((wall["x1"], wall["y1"], wall["x2"], wall["y2"]))
-        if orientation and wall_orientation != orientation:
-            continue
-
-        if wall_orientation == "horizontal":
-            distance = abs(point[1] - wall["y1"])
-        elif wall_orientation == "vertical":
-            distance = abs(point[0] - wall["x1"])
-        else:
-            distance = min(
-                point_distance(point, (wall["x1"], wall["y1"])),
-                point_distance(point, (wall["x2"], wall["y2"])),
-            )
-
-        if distance < best_distance:
-            best_distance = distance
-            best_id = wall["id"]
-
-    return best_id
-
-
-def scan_wall_gap_candidates(wall_mask: np.ndarray, wall: Dict, region_labels: np.ndarray) -> List[Dict]:
-    orientation = line_orientation((wall["x1"], wall["y1"], wall["x2"], wall["y2"]))
-    if orientation not in {"horizontal", "vertical"}:
-        return []
-
-    candidates = []
-    if orientation == "horizontal":
-        y = int(round((wall["y1"] + wall["y2"]) / 2))
-        x_start, x_end = sorted((wall["x1"], wall["x2"]))
-        values = wall_mask[y, x_start : x_end + 1] > 0
-    else:
-        x = int(round((wall["x1"] + wall["x2"]) / 2))
-        y_start, y_end = sorted((wall["y1"], wall["y2"]))
-        values = wall_mask[y_start : y_end + 1, x] > 0
-
-    run_start = None
-    for index, active in enumerate(values.tolist() + [True]):
-        if not active and run_start is None:
-            run_start = index
-        elif active and run_start is not None:
-            gap_length = index - run_start
-            if 20 <= gap_length <= 80:
-                if orientation == "horizontal":
-                    center_x = x_start + run_start + gap_length // 2
-                    center_y = y
-                else:
-                    center_x = x
-                    center_y = y_start + run_start + gap_length // 2
-
-                label_a, label_b = sample_labels_around_point(
-                    region_labels,
-                    center_x,
-                    center_y,
-                    orientation,
-                )
-                if label_a and label_b and label_a != label_b:
-                    candidates.append(
-                        {
-                            "id": make_uuid(),
-                            "x": int(center_x),
-                            "y": int(center_y),
-                            "width": int(gap_length),
-                            "rotation": 0 if orientation == "horizontal" else 90,
-                            "wallId": wall["id"],
-                        }
-                    )
-            run_start = None
-
-    return candidates
-
-
-def detect_arc_doors(processed: np.ndarray, walls: List[Dict]) -> List[Dict]:
-    edges = cv2.Canny(processed, 30, 100)
-    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    arc_candidates: List[Dict] = []
-
-    for contour in contours:
-        area = cv2.contourArea(contour)
-        if area < 40 or area > 2500:
-            continue
-
-        perimeter = cv2.arcLength(contour, False)
-        if perimeter <= 0:
-            continue
-
-        circularity = (4 * math.pi * area) / (perimeter * perimeter)
-        if circularity < 0.1 or circularity > 0.9:
-            continue
-
-        x, y, width, height = cv2.boundingRect(contour)
-        if not (20 <= max(width, height) <= 80):
-            continue
-
-        center = contour_moments_center(contour)
-        wall_id = nearest_wall_id(walls, center)
-        if not wall_id:
-            continue
-
-        arc_candidates.append(
-            {
-                "id": make_uuid(),
-                "x": int(center[0]),
-                "y": int(center[1]),
-                "width": int(max(width, height)),
-                "rotation": 0,
-                "wallId": wall_id,
-            }
-        )
-
-    return arc_candidates
-
-
-def dedupe_by_distance(entries: List[Dict], threshold: float = 18.0) -> List[Dict]:
-    deduped: List[Dict] = []
-    for entry in entries:
-        if any(
-            math.hypot(entry["x"] - current["x"], entry["y"] - current["y"]) < threshold
-            for current in deduped
-        ):
-            continue
-        deduped.append(entry)
-    return deduped
-
-
-def detect_doors(processed: np.ndarray, wall_mask: np.ndarray, walls: List[Dict], region_labels: np.ndarray) -> List[Dict]:
-    candidates = []
-    for wall in walls:
-        candidates.extend(scan_wall_gap_candidates(wall_mask, wall, region_labels))
-    candidates.extend(detect_arc_doors(processed, walls))
-    return dedupe_by_distance(candidates, 18.0)
-
-
-def detect_windows(raw_lines: List[Line], walls: List[Dict], region_labels: np.ndarray) -> List[Dict]:
-    windows: List[Dict] = []
-    normalized = [line for line in raw_lines if 20 <= line_length(line) <= 60]
-
-    for index, left in enumerate(normalized):
-        left_orientation = line_orientation(left)
-        if left_orientation not in {"horizontal", "vertical"}:
-            continue
-
-        for right in normalized[index + 1 :]:
-            right_orientation = line_orientation(right)
-            if right_orientation != left_orientation:
-                continue
-
-            if left_orientation == "horizontal":
-                left_y = int(round((left[1] + left[3]) / 2))
-                right_y = int(round((right[1] + right[3]) / 2))
-                if not (4 <= abs(left_y - right_y) <= 18):
-                    continue
-                left_start, left_end = sorted((left[0], left[2]))
-                right_start, right_end = sorted((right[0], right[2]))
-                overlap = min(left_end, right_end) - max(left_start, right_start)
-                if overlap < 16:
-                    continue
-                center = (int((max(left_start, right_start) + min(left_end, right_end)) / 2), int((left_y + right_y) / 2))
-                width = int(overlap)
-            else:
-                left_x = int(round((left[0] + left[2]) / 2))
-                right_x = int(round((right[0] + right[2]) / 2))
-                if not (4 <= abs(left_x - right_x) <= 18):
-                    continue
-                left_start, left_end = sorted((left[1], left[3]))
-                right_start, right_end = sorted((right[1], right[3]))
-                overlap = min(left_end, right_end) - max(left_start, right_start)
-                if overlap < 16:
-                    continue
-                center = (int((left_x + right_x) / 2), int((max(left_start, right_start) + min(left_end, right_end)) / 2))
-                width = int(overlap)
-
-            label_a, label_b = sample_labels_around_point(region_labels, center[0], center[1], left_orientation)
-            if bool(label_a) == bool(label_b):
-                continue
-
-            wall_id = nearest_wall_id(walls, center, left_orientation)
-            if not wall_id:
-                continue
-
-            windows.append(
-                {
-                    "id": make_uuid(),
-                    "x": int(center[0]),
-                    "y": int(center[1]),
-                    "width": int(width),
-                    "wallId": wall_id,
-                }
-            )
-
-    return dedupe_by_distance(windows, 14.0)
-
-
-def polygon_mask(shape: Tuple[int, int], polygon: List[Dict]) -> np.ndarray:
-    mask = np.zeros(shape, dtype=np.uint8)
-    points = np.array([[[point["x"], point["y"]]] for point in polygon], dtype=np.int32)
-    cv2.fillPoly(mask, [points], 255)
-    return mask
-
-
-def is_corridor_room(room: Dict) -> bool:
-    width = max(room["width"], 1)
-    height = max(room["height"], 1)
-    ratio = max(width / height, height / width)
-    area = room.get("_area", width * height)
-    polygon = room.get("polygon", [])
-    fill_ratio = area / max(width * height, 1)
-    return area >= 12000 and (ratio >= 2.0 or fill_ratio <= 0.62 or len(polygon) >= 8)
-
-
 def skeletonize_mask(mask: np.ndarray) -> np.ndarray:
     if skimage_skeletonize is not None:
         skeleton = skimage_skeletonize(mask > 0)
         return (skeleton.astype(np.uint8)) * 255
+
+    if hasattr(cv2, "ximgproc") and hasattr(cv2.ximgproc, "thinning"):
+        return cv2.ximgproc.thinning(mask)
 
     skeleton = np.zeros_like(mask)
     working = (mask > 0).astype(np.uint8) * 255
@@ -620,324 +232,609 @@ def skeletonize_mask(mask: np.ndarray) -> np.ndarray:
     return skeleton
 
 
-def line_samples(a: Point, b: Point, count: int) -> List[Point]:
-    xs = np.linspace(a[0], b[0], count)
-    ys = np.linspace(a[1], b[1], count)
-    return [(int(round(x)), int(round(y))) for x, y in zip(xs, ys)]
+def binary_mask(class_map: np.ndarray, classes: Iterable[int]) -> np.ndarray:
+    arr = np.isin(class_map, list(classes)).astype(np.uint8)
+    return arr * 255
 
 
-def line_pass_ratio(mask: np.ndarray, a: Point, b: Point) -> float:
-    sample_count = max(12, int(point_distance(a, b) / 6))
-    samples = line_samples(a, b, sample_count)
-    inside = 0
-    height, width = mask.shape
-    for x, y in samples:
-        x = int(clamp(x, 0, width - 1))
-        y = int(clamp(y, 0, height - 1))
-        if mask[y, x] > 0:
-            inside += 1
-    return inside / max(sample_count, 1)
+def connected_components_centroids(mask: np.ndarray, min_area: int = 20) -> List[Tuple[int, int, int, int]]:
+    components: List[Tuple[int, int, int, int]] = []
+    count, labels, stats, centroids = cv2.connectedComponentsWithStats((mask > 0).astype(np.uint8), 8)
+    for label in range(1, count):
+        area = int(stats[label, cv2.CC_STAT_AREA])
+        if area < min_area:
+            continue
+        x = int(centroids[label][0])
+        y = int(centroids[label][1])
+        w = int(stats[label, cv2.CC_STAT_WIDTH])
+        h = int(stats[label, cv2.CC_STAT_HEIGHT])
+        components.append((x, y, w, h))
+    return components
 
 
-def clear_of_walls(wall_mask: np.ndarray, a: Point, b: Point) -> bool:
-    sample_count = max(12, int(point_distance(a, b) / 5))
-    samples = line_samples(a, b, sample_count)
-    height, width = wall_mask.shape
-    hits = 0
-    for x, y in samples:
-        x = int(clamp(x, 0, width - 1))
-        y = int(clamp(y, 0, height - 1))
-        if wall_mask[y, x] > 0:
-            hits += 1
-    return hits / max(sample_count, 1) <= 0.08
+def nearest_wall(line_segments: List[Line], point: Point) -> Optional[Tuple[Line, float]]:
+    if not line_segments:
+        return None
+    best_line = None
+    best_distance = float("inf")
+    for line in line_segments:
+        x1, y1, x2, y2 = line
+        if line_orientation(line) == "horizontal":
+            distance = abs(point[1] - y1)
+        elif line_orientation(line) == "vertical":
+            distance = abs(point[0] - x1)
+        else:
+            distance = min(euclidean(point, (x1, y1)), euclidean(point, (x2, y2)))
+        if distance < best_distance:
+            best_distance = distance
+            best_line = line
+    if best_line is None:
+        return None
+    return best_line, best_distance
 
 
-def detect_corridor_nodes(corridor_mask: np.ndarray) -> List[Point]:
-    skeleton = skeletonize_mask(corridor_mask)
-    if cv2.countNonZero(skeleton) == 0:
+def walkable_ratio(mask: np.ndarray, a: Point, b: Point, samples: int = 30) -> float:
+    xs = np.linspace(a[0], b[0], samples)
+    ys = np.linspace(a[1], b[1], samples)
+    h, w = mask.shape
+    walkable = 0
+    for x, y in zip(xs, ys):
+        xi = int(clamp(round(float(x)), 0, w - 1))
+        yi = int(clamp(round(float(y)), 0, h - 1))
+        if mask[yi, xi] > 0:
+            walkable += 1
+    return walkable / max(samples, 1)
+
+
+def resize_for_model(image_bgr: np.ndarray, max_side: int = 1024) -> Tuple[np.ndarray, float]:
+    h, w = image_bgr.shape[:2]
+    if max(h, w) <= max_side:
+        return image_bgr.copy(), 1.0
+    scale = max_side / float(max(h, w))
+    resized = cv2.resize(image_bgr, (int(round(w * scale)), int(round(h * scale))), interpolation=cv2.INTER_AREA)
+    return resized, scale
+
+
+def get_weights_path() -> Path:
+    default_dir = Path(os.getenv("CAMPUSNAV_MODEL_DIR", str(Path.home() / ".campusnav" / "models")))
+    default_dir.mkdir(parents=True, exist_ok=True)
+    return default_dir / "cubicasa5k_detectron2.pth"
+
+
+def ensure_weights_downloaded() -> Path:
+    weights_path = get_weights_path()
+    if weights_path.exists():
+        return weights_path
+
+    candidate_urls = [
+        os.getenv("CUBICASA_DETECTRON2_WEIGHTS_URL", "").strip(),
+        "https://github.com/CubiCasa/CubiCasa5k/releases/download/v1.0/cubicasa5k_detectron2.pth",
+        "https://raw.githubusercontent.com/CubiCasa/CubiCasa5k/master/models/cubicasa5k_detectron2.pth",
+    ]
+
+    errors = []
+    for url in [value for value in candidate_urls if value]:
+        try:
+            LOGGER.info("Downloading CubiCasa5k weights from %s", url)
+            with urllib.request.urlopen(url, timeout=90) as response:
+                payload = response.read()
+            if len(payload) < 1024:
+                raise RuntimeError("Downloaded model file is unexpectedly small.")
+            with open(weights_path, "wb") as handle:
+                handle.write(payload)
+            LOGGER.info("Saved CubiCasa5k weights to %s", weights_path)
+            return weights_path
+        except Exception as exc:  # pragma: no cover - network conditions vary
+            errors.append(f"{url}: {exc}")
+
+    raise RuntimeError("Unable to download CubiCasa5k weights. " + " | ".join(errors))
+
+
+def load_cubicasa_model() -> Optional[DefaultPredictor]:
+    with MODEL_LOCK:
+        if MODEL_STATE["predictor"] is not None:
+            return MODEL_STATE["predictor"]
+        if MODEL_STATE["attempted"]:
+            return None
+
+        MODEL_STATE["attempted"] = True
+
+        if not DETECTRON_AVAILABLE:
+            MODEL_STATE["error"] = "Detectron2 is not available in this environment."
+            LOGGER.warning("Detectron2 unavailable, enabling OpenCV fallback.")
+            return None
+
+        try:
+            weights_path = ensure_weights_downloaded()
+            cfg = get_cfg()
+            config_name = os.getenv(
+                "CUBICASA_DETECTRON2_CONFIG",
+                "COCO-PanopticSegmentation/panoptic_fpn_R_50_3x.yaml",
+            )
+            cfg.merge_from_file(model_zoo.get_config_file(config_name))
+            cfg.MODEL.DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+            cfg.MODEL.WEIGHTS = str(weights_path)
+            cfg.MODEL.ROI_HEADS.SCORE_THRESH_TEST = 0.2
+            cfg.MODEL.ROI_HEADS.NUM_CLASSES = 10
+            cfg.MODEL.SEM_SEG_HEAD.NUM_CLASSES = 10
+            cfg.MODEL.PANOPTIC_FPN.COMBINE.INSTANCES_CONFIDENCE_THRESH = 0.2
+            cfg.freeze()
+
+            predictor = DefaultPredictor(cfg)
+            MODEL_STATE["predictor"] = predictor
+            MODEL_STATE["error"] = None
+            LOGGER.info("Loaded CubiCasa5k Detectron2 model on %s", cfg.MODEL.DEVICE)
+            return predictor
+        except Exception as exc:  # pragma: no cover - runtime environment dependent
+            MODEL_STATE["error"] = str(exc)
+            LOGGER.warning("Detectron2 model load failed. Falling back to OpenCV. %s", exc)
+            return None
+
+
+def warmup_model() -> bool:
+    return load_cubicasa_model() is not None
+
+
+def inference_semantic_map(image_bgr: np.ndarray) -> np.ndarray:
+    predictor = load_cubicasa_model()
+    if predictor is None:
+        raise RuntimeError(MODEL_STATE["error"] or "Detectron2 model is unavailable.")
+
+    resized, scale = resize_for_model(image_bgr, max_side=1024)
+    outputs = predictor(resized)
+
+    if "sem_seg" in outputs:
+        sem_seg = outputs["sem_seg"].to("cpu")
+        class_map_small = sem_seg.argmax(dim=0).numpy().astype(np.uint8)
+    elif "instances" in outputs:
+        instances = outputs["instances"].to("cpu")
+        h, w = resized.shape[:2]
+        class_map_small = np.zeros((h, w), dtype=np.uint8)
+        if hasattr(instances, "pred_masks") and hasattr(instances, "pred_classes"):
+            masks = instances.pred_masks.numpy()
+            classes = instances.pred_classes.numpy()
+            for cls_idx, mask in zip(classes, masks):
+                class_map_small[mask.astype(bool)] = int(cls_idx)
+    else:
+        raise RuntimeError("Detectron2 output did not contain semantic segmentation data.")
+
+    original_h, original_w = image_bgr.shape[:2]
+    if scale != 1.0:
+        class_map = cv2.resize(class_map_small, (original_w, original_h), interpolation=cv2.INTER_NEAREST)
+    else:
+        class_map = class_map_small
+
+    return class_map.astype(np.uint8)
+
+
+def walls_from_mask(wall_mask: np.ndarray) -> Tuple[List[Dict], List[Line]]:
+    cleaned = cv2.morphologyEx(wall_mask, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8), iterations=1)
+    skeleton = skeletonize_mask(cleaned)
+    lines_raw = cv2.HoughLinesP(skeleton, 1, np.pi / 180, threshold=35, minLineLength=20, maxLineGap=12)
+
+    if lines_raw is None:
+        return [], []
+
+    normalized_lines = [normalize_line(line[0]) for line in lines_raw]
+    horizontal = [line for line in normalized_lines if line_orientation(line) == "horizontal"]
+    vertical = [line for line in normalized_lines if line_orientation(line) == "vertical"]
+    diagonal = [line for line in normalized_lines if line_orientation(line) == "other"]
+
+    merged_lines = merge_parallel_lines(horizontal, "horizontal") + merge_parallel_lines(vertical, "vertical")
+    merged_lines.extend([line for line in diagonal if line_length(line) > 32])
+
+    features = []
+    for line in merged_lines:
+        x1, y1, x2, y2 = line
+        features.append(
+            {
+                "type": "Feature",
+                "id": make_uuid(),
+                "properties": {"kind": "wall", "thickness": 4},
+                "geometry": {
+                    "type": "LineString",
+                    "coordinates": [[float(x1), float(y1)], [float(x2), float(y2)]],
+                },
+            }
+        )
+
+    return features, merged_lines
+
+
+def polygons_from_class(mask: np.ndarray, min_area: float = 3000.0) -> List[Tuple[List[List[float]], Point]]:
+    contours, _ = cv2.findContours(mask, cv2.RETR_CCOMP, cv2.CHAIN_APPROX_SIMPLE)
+    polygons: List[Tuple[List[List[float]], Point]] = []
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area < min_area:
+            continue
+        epsilon = 0.008 * cv2.arcLength(contour, True)
+        approx = cv2.approxPolyDP(contour, epsilon, True)
+        if len(approx) < 3:
+            continue
+        points = [[float(point[0][0]), float(point[0][1])] for point in approx]
+        center = polygon_centroid(points)
+        polygons.append((closed_polygon(points), center))
+    return polygons
+
+
+def spaces_from_masks(room_mask: np.ndarray, corridor_mask: np.ndarray) -> Tuple[List[Dict], List[Tuple[str, Point, str]]]:
+    features: List[Dict] = []
+    centroids: List[Tuple[str, Point, str]] = []
+
+    room_polygons = polygons_from_class(room_mask, min_area=3000.0)
+    corridor_polygons = polygons_from_class(corridor_mask, min_area=2500.0)
+
+    def add_polygon_set(polygons: List[Tuple[List[List[float]], Point]], kind: str, color: str):
+        for index, (polygon, center) in enumerate(polygons, start=1):
+            fid = make_uuid()
+            name = f"{kind.title()} {index}"
+            features.append(
+                {
+                    "type": "Feature",
+                    "id": fid,
+                    "properties": {
+                        "kind": kind,
+                        "name": name,
+                        "category": kind,
+                        "color": color,
+                        "entrances": [],
+                    },
+                    "geometry": {
+                        "type": "Polygon",
+                        "coordinates": [polygon],
+                    },
+                }
+            )
+            centroids.append((fid, center, kind))
+
+    add_polygon_set(room_polygons, "room", "#9370DB")
+    add_polygon_set(corridor_polygons, "corridor", "#D3D3D3")
+    return features, centroids
+
+
+def openings_from_masks(
+    door_mask: np.ndarray,
+    window_mask: np.ndarray,
+    wall_lines: List[Line],
+) -> Tuple[List[Dict], Dict[str, List[str]]]:
+    features: List[Dict] = []
+    wall_to_openings: Dict[str, List[str]] = {}
+
+    def add_components(mask: np.ndarray, kind: str, min_area: int, default_width: float):
+        components = connected_components_centroids(mask, min_area=min_area)
+        for x, y, w, h in components:
+            nearest = nearest_wall(wall_lines, (x, y))
+            rotation = 0.0
+            width = default_width
+            if nearest is not None:
+                line, _ = nearest
+                x1, y1, x2, y2 = line
+                rotation = math.degrees(math.atan2(y2 - y1, x2 - x1))
+                width = max(default_width, float(max(w, h)))
+
+            feature_id = make_uuid()
+            features.append(
+                {
+                    "type": "Feature",
+                    "id": feature_id,
+                    "properties": {
+                        "kind": kind,
+                        "width": float(width),
+                        "rotation": float(rotation),
+                    },
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [float(x), float(y)],
+                    },
+                }
+            )
+
+    add_components(door_mask, "door", min_area=12, default_width=36.0)
+    add_components(window_mask, "window", min_area=10, default_width=30.0)
+    return features, wall_to_openings
+
+
+def objects_from_masks(stairs_mask: np.ndarray, elevator_mask: np.ndarray) -> List[Dict]:
+    features: List[Dict] = []
+    for kind, mask in (("stairs", stairs_mask), ("elevator", elevator_mask)):
+        for x, y, _, _ in connected_components_centroids(mask, min_area=80):
+            features.append(
+                {
+                    "type": "Feature",
+                    "id": make_uuid(),
+                    "properties": {
+                        "kind": kind,
+                        "label": "Stairs" if kind == "stairs" else "Elevator",
+                    },
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [float(x), float(y)],
+                    },
+                }
+            )
+    return features
+
+
+def skeleton_nodes(mask: np.ndarray, min_distance: float = 16.0) -> List[Point]:
+    if cv2.countNonZero(mask) == 0:
+        return []
+    skeleton = skeletonize_mask(mask)
+    binary = (skeleton > 0).astype(np.uint8)
+    if np.count_nonzero(binary) == 0:
         return []
 
-    skeleton_bool = (skeleton > 0).astype(np.uint8)
-    kernel = np.array(
-        [[1, 1, 1], [1, 10, 1], [1, 1, 1]],
-        dtype=np.uint8,
-    )
-    neighbor_map = cv2.filter2D(skeleton_bool, -1, kernel)
-    node_mask = np.zeros_like(skeleton_bool)
-    ys, xs = np.where(skeleton_bool > 0)
+    kernel = np.array([[1, 1, 1], [1, 10, 1], [1, 1, 1]], dtype=np.uint8)
+    neighbor_map = cv2.filter2D(binary, -1, kernel)
 
-    for y, x in zip(ys, xs):
+    y_coords, x_coords = np.where(binary > 0)
+    points: List[Point] = []
+    for y, x in zip(y_coords, x_coords):
         neighbors = int(neighbor_map[y, x]) - 10
         if neighbors != 2:
-            node_mask[y, x] = 255
-
-    component_count, labels, stats, centroids = cv2.connectedComponentsWithStats(node_mask, 8)
-    nodes: List[Point] = []
-    for label in range(1, component_count):
-        if stats[label, cv2.CC_STAT_AREA] <= 0:
-            continue
-        nodes.append((int(centroids[label][0]), int(centroids[label][1])))
-
-    segment_mask = cv2.bitwise_and(skeleton, cv2.bitwise_not(node_mask))
-    component_count, labels, stats, centroids = cv2.connectedComponentsWithStats(segment_mask, 8)
-    for label in range(1, component_count):
-        if stats[label, cv2.CC_STAT_AREA] < 28:
-            continue
-        nodes.append((int(centroids[label][0]), int(centroids[label][1])))
+            points.append((float(x), float(y)))
 
     deduped: List[Point] = []
-    for node in nodes:
-        if any(point_distance(node, existing) < 18 for existing in deduped):
+    for point in points:
+        if any(euclidean(point, existing) < min_distance for existing in deduped):
             continue
-        deduped.append(node)
+        deduped.append(point)
+
     return deduped
 
 
-def corridor_graph_nodes(
+def nodes_from_spaces(
+    spaces: List[Dict],
     corridor_mask: np.ndarray,
-    wall_mask: np.ndarray,
-    room_nodes: List[Dict],
-) -> Tuple[List[Dict], List[Dict]]:
-    corridor_points = detect_corridor_nodes(corridor_mask)
-    corridor_nodes = [
-        {
-            "id": make_uuid(),
-            "x": int(point[0]),
-            "y": int(point[1]),
-            "type": "corridor",
-            "roomId": None,
-        }
-        for point in corridor_points
-    ]
+    walkable_mask: np.ndarray,
+) -> List[Dict]:
+    node_candidates: List[Dict] = []
 
-    nodes = list(room_nodes) + corridor_nodes
-    edges: List[Dict] = []
-    edge_keys = set()
+    for feature in spaces:
+        coords = feature.get("geometry", {}).get("coordinates", [[]])[0]
+        center = polygon_centroid(coords)
+        node_candidates.append(
+            {
+                "id": make_uuid(),
+                "kind": "waypoint",
+                "point": center,
+                "spaceId": feature.get("id"),
+            }
+        )
 
-    for room_node in room_nodes:
-        ordered = sorted(
-            corridor_nodes,
-            key=lambda node: point_distance(
-                (room_node["x"], room_node["y"]),
-                (node["x"], node["y"]),
-            ),
-        )[:4]
-        for corridor_node in ordered:
-            start = (room_node["x"], room_node["y"])
-            end = (corridor_node["x"], corridor_node["y"])
-            if line_pass_ratio(corridor_mask, start, end) < 0.42 and line_pass_ratio(
-                cv2.bitwise_not(wall_mask), start, end
-            ) < 0.9:
-                continue
-            if not clear_of_walls(wall_mask, start, end):
-                continue
-            key = tuple(sorted((room_node["id"], corridor_node["id"])))
-            if key in edge_keys:
-                continue
-            edge_keys.add(key)
-            edges.append(
-                {
-                    "id": make_uuid(),
-                    "from": room_node["id"],
-                    "to": corridor_node["id"],
-                    "weight": int(round(point_distance(start, end))),
-                }
-            )
-            break
+    for point in skeleton_nodes(corridor_mask, min_distance=14.0):
+        node_candidates.append(
+            {
+                "id": make_uuid(),
+                "kind": "waypoint",
+                "point": point,
+                "spaceId": None,
+            }
+        )
 
-    for index, node in enumerate(corridor_nodes):
-        neighbors = sorted(
-            corridor_nodes[:index] + corridor_nodes[index + 1 :],
-            key=lambda other: point_distance(
-                (node["x"], node["y"]),
-                (other["x"], other["y"]),
-            ),
+    if not node_candidates:
+        return []
+
+    points = [entry["point"] for entry in node_candidates]
+    edges: List[Tuple[int, int, float]] = []
+    for index, source in enumerate(points):
+        nearest_candidates = sorted(
+            [(other_index, euclidean(source, target)) for other_index, target in enumerate(points) if other_index != index],
+            key=lambda item: item[1],
         )[:6]
-        added = 0
-        for neighbor in neighbors:
-            start = (node["x"], node["y"])
-            end = (neighbor["x"], neighbor["y"])
-            if point_distance(start, end) < 18 or point_distance(start, end) > 180:
+        links = 0
+        for target_index, distance in nearest_candidates:
+            if distance < 8 or distance > 260:
                 continue
-            if line_pass_ratio(corridor_mask, start, end) < 0.7:
+            ratio = walkable_ratio(walkable_mask, source, points[target_index], samples=36)
+            if ratio < 0.72:
                 continue
-            if not clear_of_walls(wall_mask, start, end):
+            a, b = sorted((index, target_index))
+            if any(existing_a == a and existing_b == b for existing_a, existing_b, _ in edges):
                 continue
-
-            key = tuple(sorted((node["id"], neighbor["id"])))
-            if key in edge_keys:
-                continue
-            edge_keys.add(key)
-            edges.append(
-                {
-                    "id": make_uuid(),
-                    "from": node["id"],
-                    "to": neighbor["id"],
-                    "weight": int(round(point_distance(start, end))),
-                }
-            )
-            added += 1
-            if added >= 3:
+            edges.append((a, b, distance))
+            links += 1
+            if links >= 3:
                 break
 
-    if not corridor_nodes:
-        for index, node in enumerate(room_nodes):
-            neighbors = sorted(
-                room_nodes[:index] + room_nodes[index + 1 :],
-                key=lambda other: point_distance(
-                    (node["x"], node["y"]),
-                    (other["x"], other["y"]),
-                ),
-            )[:3]
-            for neighbor in neighbors:
-                start = (node["x"], node["y"])
-                end = (neighbor["x"], neighbor["y"])
-                if not clear_of_walls(wall_mask, start, end):
-                    continue
-                key = tuple(sorted((node["id"], neighbor["id"])))
-                if key in edge_keys:
-                    continue
-                edge_keys.add(key)
-                edges.append(
-                    {
-                        "id": make_uuid(),
-                        "from": node["id"],
-                        "to": neighbor["id"],
-                        "weight": int(round(point_distance(start, end))),
-                    }
-                )
+    neighbors_map: Dict[str, List[Dict]] = {entry["id"]: [] for entry in node_candidates}
+    for a, b, weight in edges:
+        id_a = node_candidates[a]["id"]
+        id_b = node_candidates[b]["id"]
+        distance = float(round(weight, 2))
+        neighbors_map[id_a].append({"id": id_b, "weight": distance})
+        neighbors_map[id_b].append({"id": id_a, "weight": distance})
 
-    return nodes, edges
-
-
-def detect_navigation_graph(rooms: List[Dict], interior_mask: np.ndarray, wall_mask: np.ndarray) -> Tuple[List[Dict], List[Dict]]:
-    room_nodes = [
-        {
-            "id": make_uuid(),
-            "x": int(room["center"]["x"]),
-            "y": int(room["center"]["y"]),
-            "type": "room",
-            "roomId": room["id"],
-        }
-        for room in rooms
-    ]
-
-    corridor_mask = np.zeros_like(interior_mask)
-    for room in rooms:
-        if is_corridor_room(room):
-            corridor_mask = cv2.bitwise_or(
-                corridor_mask,
-                polygon_mask(interior_mask.shape, room["polygon"]),
-            )
-
-    if cv2.countNonZero(corridor_mask) == 0:
-        corridor_mask = cv2.morphologyEx(
-            interior_mask,
-            cv2.MORPH_OPEN,
-            np.ones((7, 7), np.uint8),
-            iterations=1,
+    features = []
+    for entry in node_candidates:
+        x, y = entry["point"]
+        features.append(
+            {
+                "type": "Feature",
+                "id": entry["id"],
+                "properties": {
+                    "kind": entry["kind"],
+                    "spaceId": entry["spaceId"],
+                    "neighbors": neighbors_map.get(entry["id"], []),
+                },
+                "geometry": {
+                    "type": "Point",
+                    "coordinates": [float(x), float(y)],
+                },
+            }
         )
 
-    return corridor_graph_nodes(corridor_mask, wall_mask, room_nodes)
+    return features
 
 
-def detect_objects(rooms: List[Dict], doors: List[Dict], region_labels: np.ndarray) -> List[Dict]:
-    objects: List[Dict] = []
+def apply_options(mvf: Dict, options: Dict) -> Dict:
+    include_walls = options.get("walls", True)
+    include_doors = options.get("doors", True)
+    include_windows = options.get("windows", True)
+    include_nav = options.get("connections", True)
+    include_objects = options.get("objects", True)
 
-    for door in doors:
-        label_a, label_b = sample_labels_around_point(
-            region_labels,
-            int(door["x"]),
-            int(door["y"]),
-            "vertical" if door["rotation"] == 90 else "horizontal",
-        )
-        if bool(label_a) != bool(label_b):
-            objects.append(
-                {
-                    "id": make_uuid(),
-                    "type": "exit",
-                    "x": int(door["x"]),
-                    "y": int(door["y"]),
-                    "label": "Exit",
-                }
-            )
+    if not include_walls:
+        mvf["obstructions"]["features"] = []
 
-    for room in rooms:
-        area = room.get("_area", room["width"] * room["height"])
-        ratio = max(room["width"] / max(room["height"], 1), room["height"] / max(room["width"], 1))
+    if not include_doors or not include_windows:
+        filtered = []
+        for feature in mvf["openings"]["features"]:
+            kind = feature.get("properties", {}).get("kind")
+            if kind == "door" and not include_doors:
+                continue
+            if kind == "window" and not include_windows:
+                continue
+            filtered.append(feature)
+        mvf["openings"]["features"] = filtered
 
-        if 2500 <= area <= 15000 and ratio <= 1.4:
-            objects.append(
-                {
-                    "id": make_uuid(),
-                    "type": "elevator",
-                    "x": int(room["center"]["x"]),
-                    "y": int(room["center"]["y"]),
-                    "label": "Elevator",
-                }
-            )
-        elif area >= 18000 and ratio <= 1.6:
-            objects.append(
-                {
-                    "id": make_uuid(),
-                    "type": "stairs",
-                    "x": int(room["center"]["x"]),
-                    "y": int(room["center"]["y"]),
-                    "label": "Stairs",
-                }
-            )
+    if not include_nav:
+        mvf["nodes"]["features"] = []
 
-    deduped: List[Dict] = []
-    for entry in objects:
-        if any(
-            entry["type"] == current["type"]
-            and point_distance((entry["x"], entry["y"]), (current["x"], current["y"])) < 22
-            for current in deduped
-        ):
-            continue
-        deduped.append(entry)
+    if not include_objects:
+        mvf["objects"]["features"] = []
 
-    return deduped
+    return mvf
 
 
-def trace_floor_plan(content: bytes, filename: str, raw_options: str = "{}") -> Dict:
-    options = parse_options(raw_options)
-    image = load_image_from_bytes(content, filename)
-    preprocessed = preprocess(image)
-    processed = preprocessed["processed"]
-    wall_mask = preprocessed["wall_mask"]
-    interior_mask = interior_space_mask(wall_mask)
-
-    walls, raw_lines = detect_walls(processed, wall_mask)
-    rooms = detect_rooms(interior_mask)
-    region_labels = build_region_labels(interior_mask)
-
-    doors = detect_doors(processed, wall_mask, walls, region_labels)
-    windows = detect_windows(raw_lines, walls, region_labels)
-    nodes, edges = detect_navigation_graph(rooms, interior_mask, wall_mask)
-    objects = detect_objects(rooms, doors, region_labels)
-
-    if options.get("walls") is False:
-        walls = []
-    if options.get("doors") is False:
-        doors = []
-    if options.get("windows") is False:
-        windows = []
-    if options.get("connections") is False:
-        nodes = []
-        edges = []
-    if options.get("objects") is False:
-        objects = []
-
-    for room in rooms:
-        room.pop("_area", None)
-
+def build_meta(width: int, height: int, options: Dict) -> Dict:
+    ppm = options.get("pixelsPerMeter", options.get("pixels_per_meter", 20))
+    floor_label = options.get("floorLabel", options.get("floor_label", "Floor"))
     return {
-        "walls": walls,
-        "doors": doors,
-        "windows": windows,
-        "rooms": rooms,
-        "nodes": nodes,
-        "edges": edges,
-        "objects": objects,
+        "imageWidth": int(width),
+        "imageHeight": int(height),
+        "pixelsPerMeter": float(ppm) if ppm is not None else 20.0,
+        "floorLabel": str(floor_label),
     }
+
+
+def build_mvf(
+    width: int,
+    height: int,
+    options: Dict,
+    spaces: List[Dict],
+    obstructions: List[Dict],
+    openings: List[Dict],
+    nodes: List[Dict],
+    objects: List[Dict],
+) -> Dict:
+    mvf = {
+        "spaces": feature_collection(),
+        "obstructions": feature_collection(),
+        "openings": feature_collection(),
+        "nodes": feature_collection(),
+        "objects": feature_collection(),
+        "meta": build_meta(width, height, options),
+    }
+    mvf["spaces"]["features"] = spaces
+    mvf["obstructions"]["features"] = obstructions
+    mvf["openings"]["features"] = openings
+    mvf["nodes"]["features"] = nodes
+    mvf["objects"]["features"] = objects
+    return apply_options(mvf, options)
+
+
+def detectron_to_mvf(bundle: ImageBundle, options: Dict) -> Dict:
+    class_map = inference_semantic_map(bundle.image_bgr)
+
+    wall_mask = binary_mask(class_map, [CLASS_INDEX["outer_wall"], CLASS_INDEX["inner_wall"]])
+    room_mask = binary_mask(class_map, [CLASS_INDEX["room"]])
+    corridor_mask = binary_mask(class_map, [CLASS_INDEX["corridor"]])
+    door_mask = binary_mask(class_map, [CLASS_INDEX["door"]])
+    window_mask = binary_mask(class_map, [CLASS_INDEX["window"]])
+    stairs_mask = binary_mask(class_map, [CLASS_INDEX["stairs"]])
+    elevator_mask = binary_mask(class_map, [CLASS_INDEX["elevator"]])
+
+    obstructions, wall_lines = walls_from_mask(wall_mask)
+    spaces, _ = spaces_from_masks(room_mask, corridor_mask)
+    openings, _ = openings_from_masks(door_mask, window_mask, wall_lines)
+    objects = objects_from_masks(stairs_mask, elevator_mask)
+
+    walkable_mask = cv2.bitwise_not(wall_mask)
+    walkable_mask = cv2.morphologyEx(walkable_mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    nodes = nodes_from_spaces(spaces, corridor_mask, walkable_mask)
+
+    return build_mvf(
+        bundle.width,
+        bundle.height,
+        options,
+        spaces=spaces,
+        obstructions=obstructions,
+        openings=openings,
+        nodes=nodes,
+        objects=objects,
+    )
+
+
+def fallback_opencv_mvf(bundle: ImageBundle, options: Dict) -> Dict:
+    gray = cv2.cvtColor(bundle.image_bgr, cv2.COLOR_BGR2GRAY)
+    filtered = cv2.bilateralFilter(gray, 9, 35, 35)
+    edges = cv2.Canny(filtered, 40, 120)
+
+    wall_mask = cv2.dilate(edges, np.ones((3, 3), np.uint8), iterations=1)
+    room_binary = cv2.adaptiveThreshold(
+        filtered,
+        255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV,
+        31,
+        8,
+    )
+    room_binary = cv2.morphologyEx(room_binary, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    room_binary = cv2.morphologyEx(room_binary, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8), iterations=2)
+
+    obstructions, wall_lines = walls_from_mask(wall_mask)
+    spaces, _ = spaces_from_masks(room_binary, np.zeros_like(room_binary))
+
+    door_mask = cv2.morphologyEx(cv2.subtract(room_binary, cv2.erode(room_binary, np.ones((5, 5), np.uint8), iterations=1)), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8), iterations=1)
+    window_mask = cv2.morphologyEx(edges, cv2.MORPH_OPEN, np.ones((2, 2), np.uint8), iterations=1)
+    openings, _ = openings_from_masks(door_mask, window_mask, wall_lines)
+
+    objects = []
+    for feature in spaces:
+        polygon = feature.get("geometry", {}).get("coordinates", [[]])[0]
+        cx, cy = polygon_centroid(polygon)
+        area = cv2.contourArea(np.array(polygon, dtype=np.float32)) if polygon else 0
+        if area > 14000:
+            objects.append(
+                {
+                    "type": "Feature",
+                    "id": make_uuid(),
+                    "properties": {"kind": "stairs", "label": "Stairs"},
+                    "geometry": {"type": "Point", "coordinates": [float(cx), float(cy)]},
+                }
+            )
+
+    walkable_mask = cv2.bitwise_not(wall_mask)
+    nodes = nodes_from_spaces(spaces, np.zeros_like(room_binary), walkable_mask)
+
+    return build_mvf(
+        bundle.width,
+        bundle.height,
+        options,
+        spaces=spaces,
+        obstructions=obstructions,
+        openings=openings,
+        nodes=nodes,
+        objects=objects,
+    )
+
+
+def trace_floor_plan(content: bytes, filename: str, raw_options: object = "{}") -> Dict:
+    options = parse_options(raw_options)
+    bundle = load_image_from_bytes(content, filename)
+
+    try:
+        mvf = detectron_to_mvf(bundle, options)
+        mvf.setdefault("meta", {}).update({"pipeline": "detectron2-cubicasa5k"})
+        return mvf
+    except Exception as exc:
+        LOGGER.warning("Detectron2 tracing failed. Falling back to OpenCV pipeline. %s", exc)
+        mvf = fallback_opencv_mvf(bundle, options)
+        mvf.setdefault("meta", {}).update(
+            {
+                "pipeline": "opencv-fallback",
+                "warning": "Detectron2 unavailable or inference failed; OpenCV fallback used.",
+            }
+        )
+        return mvf

@@ -1,1139 +1,394 @@
-// CampusNav redesign — NavigatePage.jsx — updated
+import { useEffect, useMemo, useState } from "react";
+import { useParams } from "react-router-dom";
 import {
-  startTransition,
-  useCallback,
-  useDeferredValue,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
-import {
-  ArrowUpDown,
-  Compass,
-  Crosshair,
-  DoorOpen,
-  Info,
-  LifeBuoy,
-  Moon,
-  Navigation,
   Search,
+  Utensils,
+  UserCircle,
   Star,
-  Sun,
-  UtensilsCrossed,
+  DoorOpen,
+  ArrowUpDown,
+  Navigation,
 } from "lucide-react";
-import NavigationMapRenderer from "../../components/navigation/NavigationMapRenderer.jsx";
-import { buildCanonicalIndoorMap } from "../../components/navigation/indoorMapModel.js";
-import { resolveNavigationAdapter } from "../../components/navigation/adapters/adapterRegistry.js";
-import { MAP_PROVIDER } from "../../components/navigation/mapProviderConfig.js";
-import { useSensorFusion } from "../../hooks/useSensorFusion.js";
-import { useAuthStore } from "../../stores/authStore.js";
+import MapLibreNavigationMap from "../../components/navigation/MapLibreNavigationMap.jsx";
 import { api } from "../../utils/api.js";
-import { useTheme } from "../../context/themeContext.jsx";
 
-function roomCenter(room) {
-  if (!room) return null;
-  if (Array.isArray(room.polygon_points) && room.polygon_points.length > 0) {
-    const xs = room.polygon_points.map((point) => point.x);
-    const ys = room.polygon_points.map((point) => point.y);
-    return {
-      x: (Math.min(...xs) + Math.max(...xs)) / 2,
-      y: (Math.min(...ys) + Math.max(...ys)) / 2,
-    };
-  }
-
-  return {
-    x: room.x + room.width / 2,
-    y: room.y + room.height / 2,
-  };
+function ensureArray(value) {
+  return Array.isArray(value) ? value : [];
 }
 
-function pointDistance(a, b) {
-  return Math.hypot((a?.x || 0) - (b?.x || 0), (a?.y || 0) - (b?.y || 0));
+function extractPois(mapData) {
+  const spaces = ensureArray(mapData?.spaces?.features);
+  const objects = ensureArray(mapData?.objects?.features);
+
+  return [
+    ...spaces.map((feature) => ({
+      id: feature.id,
+      name: feature.properties?.name || "Room",
+      category: feature.properties?.kind || "facility",
+      type: "space",
+      roomId: feature.id,
+    })),
+    ...objects.map((feature) => ({
+      id: feature.id,
+      name: feature.properties?.label || feature.properties?.kind || "POI",
+      category: feature.properties?.kind || "facility",
+      type: "object",
+      roomId: null,
+    })),
+  ];
 }
 
-function SearchField({
-  label,
-  room,
-  active,
-  accent,
+function routePathForFloor(route, floorId) {
+  if (!route?.path) return [];
+  return route.path.filter((point) => {
+    if (!point.floor_id) return true;
+    return point.floor_id === floorId;
+  });
+}
+
+function Panel({
   query,
-  loading = false,
-  results = [],
-  mapPicking = false,
-  onFocus,
-  onQueryChange,
-  onPickOnMap,
-  onSelectRoom,
+  onQuery,
+  results,
+  onSelectResult,
+  fromQuery,
+  toQuery,
+  onFromQuery,
+  onToQuery,
+  onSwap,
+  routingMode,
+  onStartRouting,
+  onEndRouting,
+  onRoute,
+  loadingRoute,
+  mobile,
 }) {
+  const className = mobile
+    ? "absolute bottom-0 left-0 right-0 z-[730] rounded-t-2xl bg-white p-4 shadow-2xl"
+    : "absolute left-4 top-4 z-[730] w-[min(380px,92vw)] rounded-2xl bg-white p-4 shadow-lg";
+
   return (
-    <div
-      className={`rounded-xl border px-4 py-4 transition-colors ${
-        active ? "border-accent bg-accent-light" : "border-default bg-surface"
-      }`}
-    >
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <span className={`h-2.5 w-2.5 rounded-full ${accent}`} />
-          <span className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">
-            {label}
-          </span>
-        </div>
-        <button
-          type="button"
-          onClick={onPickOnMap}
-          className={`rounded-full border px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.12em] ${
-            mapPicking
-              ? "border-accent bg-accent text-white"
-              : "border-default bg-surface-alt text-secondary"
-          }`}
-        >
-          Pick on map
-        </button>
-      </div>
-
-      <div className="map-editor__search mt-3">
-        <Search className="h-4 w-4 text-muted" />
-        <input
-          value={query}
-          onFocus={onFocus}
-          onChange={(event) => onQueryChange(event.target.value)}
-          placeholder={`Type a ${label.toLowerCase()} room or POI`}
-        />
-      </div>
-
-      <div className="mt-2 text-xs subtle-text">
-        {mapPicking
-          ? "Click directly on the map to choose this location."
-          : room?.kind === "poi"
-            ? `${room.type || "poi"}${room.floor_name ? ` • ${room.floor_name}` : ""}`
-            : room?.type || "Search by room name or point of interest"}
-      </div>
-
-      {active && (query.trim() || loading) && (
-        <div className="mt-3 max-h-52 space-y-2 overflow-y-auto">
-          {loading ? (
-            <div className="rounded-xl border border-default bg-surface px-4 py-3 text-sm subtle-text">
-              Searching available rooms...
+    <div className={className}>
+      {!routingMode ? (
+        <>
+          <div className="rounded-xl border border-slate-200 px-3 py-2">
+            <div className="flex items-center gap-2">
+              <Search className="h-4 w-4 text-slate-500" />
+              <input
+                value={query}
+                onChange={(event) => onQuery(event.target.value)}
+                placeholder="Search here..."
+                className="w-full bg-transparent text-sm outline-none"
+              />
             </div>
-          ) : results.length === 0 ? (
-            <div className="rounded-xl border border-default bg-surface px-4 py-3 text-sm subtle-text">
-              No matching rooms found yet.
-            </div>
-          ) : (
-            results.map((result) => (
+          </div>
+
+          <div className="mt-3 grid grid-cols-4 gap-2 text-center text-[11px]">
+            <button
+              type="button"
+              onClick={() => onQuery("dining")}
+              className="rounded-xl border border-slate-200 py-2"
+            >
+              <Utensils className="mx-auto h-4 w-4" />
+              Dining
+            </button>
+            <button
+              type="button"
+              onClick={() => onQuery("help")}
+              className="rounded-xl border border-slate-200 py-2"
+            >
+              <UserCircle className="mx-auto h-4 w-4" />
+              Help
+            </button>
+            <button
+              type="button"
+              onClick={() => onQuery("department")}
+              className="rounded-xl border border-slate-200 py-2"
+            >
+              <Star className="mx-auto h-4 w-4" />
+              Depts
+            </button>
+            <button
+              type="button"
+              onClick={() => onQuery("exit")}
+              className="rounded-xl border border-slate-200 py-2"
+            >
+              <DoorOpen className="mx-auto h-4 w-4" />
+              Exits
+            </button>
+          </div>
+
+          <div className="mt-3 max-h-72 space-y-2 overflow-auto">
+            {results.map((result) => (
               <button
                 key={result.id}
                 type="button"
-                onClick={() => onSelectRoom(result)}
-                className="w-full rounded-xl border border-default bg-surface px-4 py-3 text-left transition-colors hover:bg-surface-alt"
+                onClick={() => onSelectResult(result)}
+                className="block w-full rounded-lg border border-slate-200 px-3 py-2 text-left text-sm"
               >
-                <div className="font-medium text-primary">{result.name}</div>
-                <div className="mt-1 text-sm subtle-text">
-                  {result.kind === "poi"
-                    ? `${result.type || "POI"}${result.floor_name ? ` • ${result.floor_name}` : ""}`
-                    : result.type}
+                <div className="font-medium text-slate-900">{result.name}</div>
+                <div className="text-xs text-slate-500">
+                  {result.category || result.type}
                 </div>
               </button>
-            ))
-          )}
-        </div>
+            ))}
+            {!results.length && query.trim() && (
+              <div className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-500">
+                No results found.
+              </div>
+            )}
+          </div>
+
+          <button
+            type="button"
+            onClick={onStartRouting}
+            className="mt-3 w-full rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white"
+          >
+            Start routing
+          </button>
+        </>
+      ) : (
+        <>
+          <div className="space-y-2">
+            <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+              From
+            </label>
+            <input
+              value={fromQuery}
+              onChange={(event) => onFromQuery(event.target.value)}
+              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+            <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
+              To
+            </label>
+            <input
+              value={toQuery}
+              onChange={(event) => onToQuery(event.target.value)}
+              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+            />
+          </div>
+
+          <div className="mt-3 flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onSwap}
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            >
+              <ArrowUpDown className="h-4 w-4" />
+            </button>
+            <button
+              type="button"
+              onClick={onRoute}
+              disabled={loadingRoute}
+              className="flex-1 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white"
+            >
+              <Navigation className="mr-1 inline h-4 w-4" />
+              {loadingRoute ? "Routing..." : "Get Directions"}
+            </button>
+            <button
+              type="button"
+              onClick={onEndRouting}
+              className="rounded-md border border-slate-300 px-3 py-2 text-sm"
+            >
+              End
+            </button>
+          </div>
+        </>
       )}
     </div>
   );
 }
 
 export default function NavigatePage() {
-  const navigate = useNavigate();
   const { buildingId } = useParams();
-  const [searchParams] = useSearchParams();
-  const fromRoomId = searchParams.get("from");
-  const { isDark, toggleTheme } = useTheme();
-  const isAdmin = useAuthStore((store) => store.isAdmin);
-  const [sensorFusionEnabled] = useState(true);
-  const sensorFusion = useSensorFusion(sensorFusionEnabled);
-
-  const [mode, setMode] = useState(fromRoomId ? "indoor" : "outdoor");
   const [building, setBuilding] = useState(null);
-  const [buildingOptions, setBuildingOptions] = useState([]);
   const [floors, setFloors] = useState([]);
-  const [currentFloor, setCurrentFloor] = useState(null);
-  const [floorData, setFloorData] = useState(null);
-  const [floorImage, setFloorImage] = useState(null);
-  const [selectingFor, setSelectingFor] = useState("from");
-  const [roomPickTarget, setRoomPickTarget] = useState(null);
+  const [currentFloorId, setCurrentFloorId] = useState(null);
+  const [floorMapData, setFloorMapData] = useState(null);
+  const [georeference, setGeoreference] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const [query, setQuery] = useState("");
+  const [routingMode, setRoutingMode] = useState(false);
   const [fromQuery, setFromQuery] = useState("");
   const [toQuery, setToQuery] = useState("");
-  const [searchResults, setSearchResults] = useState([]);
-  const [searchLoading, setSearchLoading] = useState(false);
   const [fromRoom, setFromRoom] = useState(null);
   const [toRoom, setToRoom] = useState(null);
-  const [indoorRoute, setIndoorRoute] = useState(null);
+  const [route, setRoute] = useState(null);
   const [routeLoading, setRouteLoading] = useState(false);
-  const [userLocation, setUserLocation] = useState(null);
-  const [locationLoading, setLocationLoading] = useState(false);
-  const [outdoorRoute, setOutdoorRoute] = useState(null);
-  const [outdoorRouteMessage, setOutdoorRouteMessage] = useState("");
-  const [mobileSheetExpanded, setMobileSheetExpanded] = useState(false);
-  const [overlayVisible, setOverlayVisible] = useState(false);
-  const [indoorViewMode, setIndoorViewMode] = useState("isometric");
-  const [sensorPosition, setSensorPosition] = useState(null);
-  const dragStartRef = useRef(null);
-  const lastStepCountRef = useRef(0);
 
-  const activeSearchQuery = selectingFor === "from" ? fromQuery : toQuery;
-  const deferredSearchQuery = useDeferredValue(activeSearchQuery.trim());
-  const entranceCenter = useMemo(() => {
-    const lat = Number.parseFloat(building?.entrance_lat);
-    const lng = Number.parseFloat(building?.entrance_lng);
+  const mobile = window.innerWidth < 768;
 
-    if (Number.isFinite(lat) && Number.isFinite(lng)) {
-      return [lat, lng];
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoading(true);
+      try {
+        const [buildingData, floorsData] = await Promise.all([
+          api.buildings.get(buildingId),
+          api.floors.byBuilding(buildingId),
+        ]);
+        if (cancelled) return;
+
+        const orderedFloors = [...(floorsData || [])].sort(
+          (a, b) => Number(b.level || 0) - Number(a.level || 0),
+        );
+
+        setBuilding(buildingData);
+        setFloors(orderedFloors);
+        setCurrentFloorId((current) => current || orderedFloors[0]?.id || null);
+      } catch (error) {
+        console.error(error);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
     }
 
-    const anchor =
-      floorData?.map_data?.georeference ||
-      floorData?.map_data?.floors?.find((entry) => entry.id === floorData?.id)?.georeference ||
-      null;
-
-    const fallbackLat = Number.parseFloat(anchor?.anchorLat || anchor?.anchor_lat);
-    const fallbackLng = Number.parseFloat(anchor?.anchorLng || anchor?.anchor_lng);
-    return Number.isFinite(fallbackLat) && Number.isFinite(fallbackLng)
-      ? [fallbackLat, fallbackLng]
-      : null;
-  }, [building?.entrance_lat, building?.entrance_lng, floorData]);
-  const indoorMap = useMemo(() => buildCanonicalIndoorMap(floorData), [floorData]);
-  const currentOverlayBounds = useMemo(
-    () => indoorMap.floor.overlayBounds,
-    [indoorMap],
-  );
-  const hasGeoAnchor = Boolean(
-    entranceCenter &&
-      (currentOverlayBounds || (indoorMap.floor.corners || []).length >= 4),
-  );
-  const rendererResolution = useMemo(
-    () => resolveNavigationAdapter(MAP_PROVIDER),
-    [],
-  );
-  const currentFloorBeacons = useMemo(
-    () =>
-      indoorMap.beacons.filter(
-        (beacon) =>
-          !beacon.floorId ||
-          beacon.floorId === currentFloor?.id ||
-          beacon.floorId === floorData?.id,
-      ),
-    [currentFloor?.id, floorData?.id, indoorMap.beacons],
-  );
-
-  useEffect(() => {
-    api.buildings
-      .list()
-      .then((data) => setBuildingOptions(data || []))
-      .catch(() => setBuildingOptions([]));
-  }, []);
-
-  useEffect(() => {
-    if (!buildingId) return;
-
-    api.buildings
-      .get(buildingId)
-      .then((data) => {
-        setBuilding(data);
-        const orderedFloors = [...(data.floors || [])].sort(
-          (left, right) => left.level - right.level,
-        );
-        setFloors(orderedFloors);
-        setCurrentFloor((previous) => previous || orderedFloors[0] || null);
-      })
-      .catch((error) => console.error(error));
+    load();
+    return () => {
+      cancelled = true;
+    };
   }, [buildingId]);
 
   useEffect(() => {
-    if (!fromRoomId) return;
-
-    api.rooms
-      .get(fromRoomId)
-      .then((room) => {
-        setFromRoom(room);
-        setFromQuery(room.name || "");
-        setMode("indoor");
-      })
-      .catch((error) => console.error(error));
-  }, [fromRoomId]);
-
-  useEffect(() => {
-    if (!(fromRoom?.floor_id || fromRoom?.floorId) || !floors.length) return;
-    const matchingFloor = floors.find(
-      (entry) => entry.id === (fromRoom.floor_id || fromRoom.floorId),
-    );
-    if (matchingFloor) setCurrentFloor(matchingFloor);
-  }, [floors, fromRoom]);
-
-  useEffect(() => {
-    if (!currentFloor) return;
-
+    if (!currentFloorId) return;
     let cancelled = false;
-    setFloorData(null);
-    setFloorImage(null);
 
     api.floors
-      .get(currentFloor.id)
-      .then((data) => {
+      .getMapData(currentFloorId)
+      .then((payload) => {
         if (cancelled) return;
-        setFloorData(data);
-        if (!data.floor_plan_url) return;
-
-        const image = new Image();
-        image.crossOrigin = "anonymous";
-        image.onload = () => {
-          if (!cancelled) setFloorImage(image);
-        };
-        image.src = data.floor_plan_url;
+        setFloorMapData(payload.map_data || null);
+        setGeoreference(
+          payload.georeference || payload.map_data?.georeference || null,
+        );
       })
       .catch((error) => console.error(error));
 
     return () => {
       cancelled = true;
     };
-  }, [currentFloor]);
+  }, [currentFloorId]);
 
-  useEffect(() => {
-    if (!deferredSearchQuery || !buildingId) {
-      setSearchResults([]);
-      setSearchLoading(false);
-      return;
-    }
+  const pois = useMemo(() => extractPois(floorMapData || {}), [floorMapData]);
 
-    let cancelled = false;
-    setSearchLoading(true);
+  const filteredResults = useMemo(() => {
+    if (!query.trim()) return [];
+    const text = query.toLowerCase();
+    return pois
+      .filter((item) =>
+        `${item.name} ${item.category}`.toLowerCase().includes(text),
+      )
+      .slice(0, 24);
+  }, [pois, query]);
 
-    const timer = setTimeout(() => {
-      api.rooms
-        .search(buildingId, deferredSearchQuery)
-        .then((results) => {
-          if (cancelled) return;
-          startTransition(() => setSearchResults(results || []));
-        })
-        .catch(() => {
-          if (!cancelled) setSearchResults([]);
-        })
-        .finally(() => {
-          if (!cancelled) setSearchLoading(false);
-        });
-    }, 220);
-
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-  }, [buildingId, deferredSearchQuery]);
-
-  useEffect(() => {
-    if (mode !== "indoor") {
-      setOverlayVisible(false);
-      setRoomPickTarget(null);
-      return;
-    }
-
-    setOverlayVisible(false);
-    const timer = window.setTimeout(() => setOverlayVisible(true), 50);
-    return () => window.clearTimeout(timer);
-  }, [currentFloor?.id, floorData?.id, mode]);
-
-  useEffect(() => {
-    lastStepCountRef.current = sensorFusion.stepCount;
-  }, [sensorFusionEnabled]);
-
-  useEffect(() => {
-    if (!sensorFusion.supported) return undefined;
-    if (!sensorFusion.permissionNeeded || sensorFusion.permissionGranted) return undefined;
-
-    const requestOnFirstInteraction = () => {
-      sensorFusion.requestPermission().catch(() => {});
-      window.removeEventListener("pointerdown", requestOnFirstInteraction);
-    };
-
-    window.addEventListener("pointerdown", requestOnFirstInteraction, { once: true });
-    return () => window.removeEventListener("pointerdown", requestOnFirstInteraction);
-  }, [
-    sensorFusion.permissionGranted,
-    sensorFusion.permissionNeeded,
-    sensorFusion.requestPermission,
-    sensorFusion.supported,
-  ]);
-
-  const currentSensorRoomCenter = useMemo(() => {
-    if (!fromRoom) return null;
-    const activeFloorId = fromRoom.floor_id || fromRoom.floorId || null;
-    if (activeFloorId !== currentFloor?.id) return null;
-    const routeRoomId = fromRoom.route_room_id || fromRoom.id;
-    const room = indoorMap.rooms.find((entry) => entry.id === routeRoomId) || fromRoom;
-    return roomCenter(room);
-  }, [currentFloor?.id, fromRoom, indoorMap.rooms]);
-
-  useEffect(() => {
-    if (!currentSensorRoomCenter || !currentFloor?.id) return;
-    setSensorPosition((current) => {
-      if (
-        current?.floorId === currentFloor.id &&
-        current.source !== "start-room" &&
-        current.roomId === fromRoom?.id
-      ) {
-        return current;
-      }
-      return {
-        floorId: currentFloor.id,
-        x: currentSensorRoomCenter.x,
-        y: currentSensorRoomCenter.y,
-        source: "start-room",
-        roomId: fromRoom?.id || null,
-      };
-    });
-    lastStepCountRef.current = sensorFusion.stepCount;
-  }, [currentFloor?.id, currentSensorRoomCenter, fromRoom?.id, sensorFusion.stepCount]);
-
-  useEffect(() => {
-    if (!sensorPosition || !currentFloorBeacons.length) return;
-    const nearest = [...currentFloorBeacons].sort((left, right) => {
-      const leftDistance = Math.hypot(left.x - sensorPosition.x, left.y - sensorPosition.y);
-      const rightDistance = Math.hypot(right.x - sensorPosition.x, right.y - sensorPosition.y);
-      return leftDistance - rightDistance;
-    })[0];
-
-    if (!nearest) return;
-    const distance = Math.hypot(nearest.x - sensorPosition.x, nearest.y - sensorPosition.y);
-    if (distance > Math.max(48, (nearest.radiusMeters || 2.5) * 24)) return;
-
-    setSensorPosition((current) =>
-      current
-        ? {
-            ...current,
-            floorId: currentFloor?.id,
-            x: nearest.x,
-            y: nearest.y,
-            source: "beacon-snap",
-          }
-        : current,
-    );
-  }, [currentFloor?.id, currentFloorBeacons, sensorPosition]);
-
-  useEffect(() => {
-    if (!sensorFusionEnabled || !sensorPosition || sensorFusion.heading === null) return;
-    if (sensorPosition.floorId !== currentFloor?.id) return;
-
-    const deltaSteps = sensorFusion.stepCount - lastStepCountRef.current;
-    if (deltaSteps <= 0) return;
-    lastStepCountRef.current = sensorFusion.stepCount;
-
-    const pixelsPerMeter = indoorMap.metadata.pixelsPerMeter || 40;
-    const stepPixels = pixelsPerMeter * 0.72 * deltaSteps;
-    const radians = (sensorFusion.heading * Math.PI) / 180;
-    const dx = Math.sin(radians) * stepPixels;
-    const dy = -Math.cos(radians) * stepPixels;
-
-    setSensorPosition((current) =>
-      current
-        ? {
-            ...current,
-            x: current.x + dx,
-            y: current.y + dy,
-          }
-        : current,
-    );
-  }, [
-    currentFloor?.id,
-    indoorMap.metadata.pixelsPerMeter,
-    sensorFusion.heading,
-    sensorFusion.stepCount,
-    sensorFusionEnabled,
-    sensorPosition,
-  ]);
-
-  const visibleFloors = useMemo(() => {
-    if (!indoorRoute?.floors_involved?.length) return floors;
-    const routeFloorIds = new Set(indoorRoute.floors_involved);
-    return floors.filter((floor) => routeFloorIds.has(floor.id));
-  }, [floors, indoorRoute]);
-
-  const floorPathMap = useMemo(() => {
-    const grouped = new Map();
-    (indoorRoute?.path || []).forEach((point) => {
-      if (!grouped.has(point.floor_id)) grouped.set(point.floor_id, []);
-      grouped.get(point.floor_id).push(point);
-    });
-    return grouped;
-  }, [indoorRoute]);
-
-  const currentFloorPath = currentFloor
-    ? floorPathMap.get(currentFloor.id) || []
-    : [];
-
-  const outdoorFitPoints = useMemo(() => {
-    if (outdoorRoute?.length) return outdoorRoute;
-
-    const points = [];
-    if (userLocation) points.push(userLocation);
-    if (entranceCenter) {
-      points.push(entranceCenter);
-    }
-    return points;
-  }, [entranceCenter, outdoorRoute, userLocation]);
-
-  const routeSummary = useMemo(() => {
-    if (!indoorRoute) return null;
-    return {
-      distance: indoorRoute.distance,
-      duration:
-        indoorRoute.estimated_time ||
-        Math.max(1, Math.round(indoorRoute.distance / 84)),
-      steps: (indoorRoute.instructions || indoorRoute.steps || []).length,
-    };
-  }, [indoorRoute]);
-
-  const currentInstruction = useMemo(() => {
-    const instructions = indoorRoute?.instructions || [];
-    if (!instructions.length) return null;
-    return (
-      instructions.find((instruction) => instruction.floor_id === currentFloor?.id) ||
-      instructions[0]
-    );
-  }, [currentFloor?.id, indoorRoute?.instructions]);
-
-  const selectRoom = useCallback(
-    (room) => {
-      const target = roomPickTarget || selectingFor;
-      const matchingFloorId = room.floor_id || room.floorId || null;
-      if (matchingFloorId) {
-        const matchingFloor = floors.find((entry) => entry.id === matchingFloorId);
-        if (matchingFloor) setCurrentFloor(matchingFloor);
-      }
-      if (target === "from") {
-        setFromRoom(room);
-        setFromQuery(room.name || "");
-      } else {
-        setToRoom(room);
-        setToQuery(room.name || "");
-      }
-      setSelectingFor(target);
-      setRoomPickTarget(null);
-      setSearchResults([]);
-      setIndoorRoute(null);
-      setMode("indoor");
-      setMobileSheetExpanded(true);
-    },
-    [floors, roomPickTarget, selectingFor],
+  const currentFloorRoute = useMemo(
+    () => routePathForFloor(route, currentFloorId),
+    [route, currentFloorId],
   );
 
-  const resolveRouteRoomId = useCallback(
-    (target) => {
-      if (!target) return null;
-      if (target.route_room_id) return target.route_room_id;
-      if (target.kind !== "poi") return target.id || null;
-
-      const targetFloorId = target.floor_id || target.floorId || currentFloor?.id || floorData?.id;
-      const floorRooms = indoorMap.rooms.filter(
-        (room) =>
-          !targetFloorId ||
-          !room.floor_id ||
-          room.floor_id === targetFloorId ||
-          room.floorId === targetFloorId,
-      );
-
-      if (!floorRooms.length) return null;
-
-      const nearestRoom = [...floorRooms].sort((left, right) => {
-        const leftDistance = pointDistance(roomCenter(left), target);
-        const rightDistance = pointDistance(roomCenter(right), target);
-        return leftDistance - rightDistance;
-      })[0];
-
-      return nearestRoom?.id || null;
-    },
-    [currentFloor?.id, floorData?.id, indoorMap.rooms],
-  );
-
-  const getUserLocation = useCallback(() => {
-    if (!navigator.geolocation) {
-      window.alert("Geolocation is not supported by this browser.");
-      return;
-    }
-
-    setMode("outdoor");
-    setLocationLoading(true);
-    navigator.geolocation.getCurrentPosition(
-      async (position) => {
-        const currentLocation = [
-          position.coords.latitude,
-          position.coords.longitude,
-        ];
-        setUserLocation(currentLocation);
-
-        if (!entranceCenter) {
-          setLocationLoading(false);
-          return;
-        }
-
-        try {
-          const response = await fetch(
-            `/api/v1/navigation/outdoor-route?fromLat=${currentLocation[0]}&fromLng=${currentLocation[1]}&toLat=${entranceCenter[0]}&toLng=${entranceCenter[1]}`,
-          );
-          const data = await response.json();
-
-          if (data.coordinates?.length) {
-            setOutdoorRoute(
-              data.coordinates.map((coord) => [coord[1], coord[0]]),
-            );
-            setOutdoorRouteMessage(data.message || "");
-          } else {
-            setOutdoorRoute([
-              currentLocation,
-              entranceCenter,
-            ]);
-            setOutdoorRouteMessage(
-              "Walking directions are temporarily unavailable, so a direct approach line is shown instead.",
-            );
-          }
-        } catch (error) {
-          console.error(error);
-          setOutdoorRoute([
-            currentLocation,
-            entranceCenter,
-          ]);
-          setOutdoorRouteMessage(
-            "Walking directions are temporarily unavailable, so a direct approach line is shown instead.",
-          );
-        } finally {
-          setLocationLoading(false);
-        }
-      },
-      () => {
-        setLocationLoading(false);
-        window.alert(
-          "Unable to access location. Please enable GPS permission.",
-        );
-      },
-      { enableHighAccuracy: true, timeout: 10000 },
-    );
-  }, [entranceCenter]);
-
-  const getIndoorRoute = useCallback(async () => {
+  async function runRoute() {
     if (!fromRoom || !toRoom) return;
-
-    const fromRouteRoomId = resolveRouteRoomId(fromRoom);
-    const toRouteRoomId = resolveRouteRoomId(toRoom);
-
-    if (!fromRouteRoomId || !toRouteRoomId) {
-      window.alert("Pick rooms or POIs that can be anchored to a mapped room before routing.");
-      return;
-    }
-
     setRouteLoading(true);
     try {
       const result = await api.navigation.route(
-        fromRouteRoomId,
-        toRouteRoomId,
+        fromRoom.id,
+        toRoom.id,
         buildingId,
       );
-      setIndoorRoute(result);
-      setRoomPickTarget(null);
-      setMode("indoor");
-      const firstFloor = floors.find(
-        (floor) => floor.id === result.floors_involved?.[0],
-      );
-      if (firstFloor) setCurrentFloor(firstFloor);
+      setRoute(result);
     } catch (error) {
-      window.alert(error.message || "Unable to calculate route.");
+      alert(error.message || "Unable to calculate route");
     } finally {
       setRouteLoading(false);
     }
-  }, [buildingId, floors, fromRoom, resolveRouteRoomId, toRoom]);
+  }
 
-  const handleSwapRooms = () => {
-    setFromRoom(toRoom);
-    setToRoom(fromRoom);
-    setFromQuery(toRoom?.name || "");
-    setToQuery(fromRoom?.name || "");
-    setIndoorRoute(null);
-    setRoomPickTarget(null);
-  };
+  function selectSearchResult(result) {
+    setQuery(result.name || "");
+    if (!routingMode) return;
 
-  const handleBuildingChange = (nextBuildingId) => {
-    if (!nextBuildingId || nextBuildingId === buildingId) return;
-    navigate(`/navigate/${nextBuildingId}`);
-  };
+    if (!fromRoom) {
+      setFromRoom(result);
+      setFromQuery(result.name || "");
+      return;
+    }
 
-  const applyQuickCategory = (query) => {
-    setMode("indoor");
-    setSelectingFor("to");
-    setToQuery(query);
-    setRoomPickTarget(null);
-    setMobileSheetExpanded(true);
-  };
+    setToRoom(result);
+    setToQuery(result.name || "");
+  }
 
-  const handleTouchStart = (event) => {
-    dragStartRef.current = event.touches[0].clientY;
-  };
-
-  const handleTouchEnd = (event) => {
-    if (dragStartRef.current === null) return;
-    const delta = event.changedTouches[0].clientY - dragStartRef.current;
-    if (delta > 40) setMobileSheetExpanded(false);
-    if (delta < -40) setMobileSheetExpanded(true);
-    dragStartRef.current = null;
-  };
-
-  const panelContent = (
-    <div className="flex h-full min-h-0 flex-col gap-4 overflow-y-auto pr-1">
-      <div className="flex items-center justify-between gap-3">
-        <div className="app-logo">
-          <span className="app-logo-mark">
-            <Compass className="h-4 w-4" />
-          </span>
-          <div>
-            <div className="text-sm font-semibold">CampusNav</div>
-            <div className="text-[11px] text-muted">
-              {building?.name || "Navigation"}
-            </div>
-          </div>
-        </div>
-        <button onClick={toggleTheme} className="btn-ghost px-3">
-          {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-        </button>
+  if (loading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-bg text-sm text-secondary">
+        Loading navigation...
       </div>
-
-      <div className="rounded-[24px] border border-default bg-surface px-4 py-4 shadow-sm">
-        <div className="map-editor__search">
-          <Search className="h-4 w-4 text-muted" />
-          <input
-            value={selectingFor === "to" ? toQuery : fromQuery}
-            onFocus={() => {
-              setSelectingFor("to");
-              setMode("indoor");
-            }}
-            onChange={(event) => {
-              setSelectingFor("to");
-              setToQuery(event.target.value);
-            }}
-            placeholder="Search here..."
-          />
-        </div>
-
-        <div className="mt-4 grid grid-cols-4 gap-2">
-          {[
-            { label: "Dining", icon: UtensilsCrossed, query: "food" },
-            { label: "Help", icon: LifeBuoy, query: "help" },
-            { label: "Departments", icon: Star, query: "department" },
-            { label: "Exits", icon: DoorOpen, query: "exit" },
-          ].map((entry) => {
-            const Icon = entry.icon;
-            return (
-              <button
-                key={entry.label}
-                type="button"
-                onClick={() => applyQuickCategory(entry.query)}
-                className="rounded-2xl border border-default bg-surface-alt px-2 py-3 text-center transition-colors hover:bg-surface"
-              >
-                <Icon className="mx-auto h-4 w-4 text-secondary" />
-                <div className="mt-2 text-[11px] font-medium text-secondary">
-                  {entry.label}
-                </div>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <div className="rounded-xl border border-default bg-surface px-4 py-3">
-        <div className="flex items-center justify-between gap-3">
-          <div>
-            <div className="text-sm font-medium text-primary">Unified Map View</div>
-            <div className="mt-1 text-xs subtle-text">
-              Outdoor context stays live. Indoor layers reveal themselves as you zoom into mapped buildings.
-            </div>
-          </div>
-          <span className="badge-neutral">{mode === "indoor" ? "Indoor focus" : "Outdoor focus"}</span>
-        </div>
-      </div>
-
-      {mode === "indoor" && (
-        <div className="inline-flex rounded-full border border-default bg-surface-alt p-1">
-          {[
-            { id: "2d", label: "2D" },
-            { id: "isometric", label: "2.5D" },
-            { id: "3d", label: "3D" },
-          ].map((entry) => (
-            <button
-              key={entry.id}
-              onClick={() => setIndoorViewMode(entry.id)}
-              className={`rounded-full px-4 py-2 text-sm font-semibold uppercase transition-colors ${
-                indoorViewMode === entry.id ? "bg-accent text-white" : "text-secondary"
-              }`}
-            >
-              {entry.label}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {buildingOptions.length > 1 && (
-        <div>
-          <label className="field-label">Building</label>
-          <select
-            className="select"
-            value={buildingId || ""}
-            onChange={(event) => handleBuildingChange(event.target.value)}
-          >
-            {buildingOptions.map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.name}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-
-      <>
-        <div className="rounded-xl border border-default bg-surface px-4 py-4">
-          <div className="text-sm font-medium text-primary">
-            Building entrance
-          </div>
-          <div className="mt-2 text-sm subtle-text">
-            {building?.address || "Entrance details have not been added yet."}
-          </div>
-          <div className="mt-3">
-            <button
-              onClick={getUserLocation}
-              disabled={locationLoading}
-              className="btn-primary w-full"
-            >
-              <Crosshair className="h-4 w-4" />
-              {locationLoading ? "Finding your location..." : "Find My Location"}
-            </button>
-          </div>
-          {outdoorRouteMessage && (
-            <div className="mt-3 rounded-xl border border-default bg-surface-alt px-4 py-3 text-sm subtle-text">
-              {outdoorRouteMessage}
-            </div>
-          )}
-        </div>
-
-        <>
-          <div className="space-y-3">
-            <SearchField
-              label="From"
-              room={fromRoom}
-              active={selectingFor === "from"}
-              query={fromQuery}
-              loading={selectingFor === "from" && searchLoading}
-              results={selectingFor === "from" ? searchResults : []}
-              mapPicking={roomPickTarget === "from"}
-              onFocus={() => {
-                setSelectingFor("from");
-                setRoomPickTarget(null);
-                setMode("indoor");
-              }}
-              onQueryChange={(value) => {
-                setSelectingFor("from");
-                setFromQuery(value);
-                if (!value.trim()) setFromRoom(null);
-              }}
-              onPickOnMap={() => {
-                setSelectingFor("from");
-                setRoomPickTarget("from");
-                setMode("indoor");
-              }}
-              onSelectRoom={selectRoom}
-              accent="bg-emerald-500"
-            />
-            <div className="flex justify-center">
-              <button onClick={handleSwapRooms} className="btn-secondary px-3">
-                <ArrowUpDown className="h-4 w-4" />
-              </button>
-            </div>
-            <SearchField
-              label="To"
-              room={toRoom}
-              active={selectingFor === "to"}
-              query={toQuery}
-              loading={selectingFor === "to" && searchLoading}
-              results={selectingFor === "to" ? searchResults : []}
-              mapPicking={roomPickTarget === "to"}
-              onFocus={() => {
-                setSelectingFor("to");
-                setRoomPickTarget(null);
-                setMode("indoor");
-              }}
-              onQueryChange={(value) => {
-                setSelectingFor("to");
-                setToQuery(value);
-                if (!value.trim()) setToRoom(null);
-              }}
-              onPickOnMap={() => {
-                setSelectingFor("to");
-                setRoomPickTarget("to");
-                setMode("indoor");
-              }}
-              onSelectRoom={selectRoom}
-              accent="bg-rose-500"
-            />
-          </div>
-
-          {mode === "indoor" && currentFloor && (
-            <div>
-              <label className="field-label">Current Floor</label>
-              <select
-                className="select"
-                value={currentFloor.id}
-                onChange={(event) =>
-                  setCurrentFloor(
-                    floors.find((floor) => floor.id === event.target.value) ||
-                      null,
-                  )
-                }
-              >
-                {floors.map((floor) => (
-                  <option key={floor.id} value={floor.id}>
-                    {floor.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          <button
-            onClick={getIndoorRoute}
-            disabled={!fromRoom || !toRoom || routeLoading}
-            className="btn-primary w-full"
-          >
-            <Navigation className="h-4 w-4" />
-            {routeLoading ? "Calculating..." : "Get Directions"}
-          </button>
-        </>
-      </>
-    </div>
-  );
+    );
+  }
 
   return (
-    <div className="page-shell relative h-screen overflow-hidden bg-bg">
-      <div className="absolute inset-0">
-        <NavigationMapRenderer
-          provider={rendererResolution.activeProvider}
-          mode={mode}
-          entranceCenter={entranceCenter}
-          building={building}
-          floorData={floorData}
-          floorImage={floorImage}
-          currentFloorPath={currentFloorPath}
-          fromRoom={fromRoom}
-          toRoom={toRoom}
-          currentFloor={currentFloor}
-          isDark={isDark}
-          currentOverlayBounds={currentOverlayBounds}
-          roomPickTarget={roomPickTarget}
-          overlayVisible={overlayVisible}
-          selectRoom={selectRoom}
-          hasGeoAnchor={hasGeoAnchor}
-          outdoorFitPoints={outdoorFitPoints}
-          outdoorRoute={outdoorRoute}
-          userLocation={userLocation}
-          viewMode={mode === "indoor" ? indoorViewMode : "2d"}
-          sensorPosition={
-            sensorPosition?.floorId === currentFloor?.id ? sensorPosition : null
+    <div className="relative h-screen w-full overflow-hidden bg-bg">
+      <MapLibreNavigationMap
+        building={building}
+        floors={floors}
+        currentFloorId={currentFloorId}
+        onFloorSelect={setCurrentFloorId}
+        mapData={floorMapData}
+        georeference={georeference}
+        routePath={currentFloorRoute}
+        destinationLabel={toRoom?.name || toQuery}
+        onExitBuilding={() => {
+          setRoute(null);
+          setRoutingMode(false);
+        }}
+        onPoiDirections={(poi) => {
+          setRoutingMode(true);
+          if (!fromRoom && pois.length) {
+            setFromRoom(pois[0]);
+            setFromQuery(pois[0].name || "Start");
           }
-          showBeacons={mode === "indoor"}
-        />
-      </div>
+          setToRoom({ id: poi.id, name: poi.name });
+          setToQuery(poi.name || "");
+        }}
+        onPoiSelect={() => {}}
+        infoAction={() => alert("CampusNav indoor/outdoor 3D navigation")}
+      />
 
-      {rendererResolution.fallbackReason && (
-        <div className="absolute left-1/2 top-4 z-[710] -translate-x-1/2 rounded-md border border-default bg-[color:var(--color-map-overlay)] px-3 py-2 text-xs text-secondary shadow-sm">
-          {rendererResolution.fallbackReason}
-        </div>
-      )}
-
-      {mode === "indoor" && isAdmin && (!entranceCenter || !hasGeoAnchor) && (
-        <div className="absolute left-1/2 top-4 z-[710] -translate-x-1/2 rounded-md border border-default bg-[color:var(--color-map-overlay)] px-3 py-2 text-xs text-secondary shadow-sm">
-          Complete Position on World for this floor to enable the live map overlay.
-        </div>
-      )}
-
-      {currentInstruction && (
-        <div className="absolute left-1/2 top-4 z-[705] w-[min(90vw,560px)] -translate-x-1/2">
-          <div className="map-panel rounded-2xl border border-default px-4 py-3">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted">
-              Live Navigation
-            </div>
-            <div className="mt-1 text-sm font-medium text-primary">
-              {currentInstruction.text || "Follow the highlighted route"}
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="absolute right-4 top-4 z-[706] flex items-center gap-2">
-        <button
-          type="button"
-          onClick={() => setMode("outdoor")}
-          className="rounded-full border border-default bg-[color:var(--color-map-overlay)] px-4 py-2 text-sm font-medium text-secondary shadow-sm"
-        >
-          Exit {building?.name || "Building"}
-        </button>
-        <button
-          type="button"
-          title="Map information"
-          className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-default bg-[color:var(--color-map-overlay)] text-secondary shadow-sm"
-        >
-          <Info className="h-4 w-4" />
-        </button>
-      </div>
-
-      <div className="absolute left-4 top-4 z-[700] hidden w-full max-w-[380px] lg:block">
-        <div className="map-panel h-[calc(100vh-2rem)] overflow-hidden rounded-xl border border-default p-4">
-          {panelContent}
-        </div>
-      </div>
-
-      {routeSummary && (
-        <div className="absolute right-4 top-4 z-[700] hidden w-[280px] lg:block">
-          <div className="map-panel rounded-xl border border-default p-4">
-            <div className="section-label">Route Summary</div>
-            <div className="mt-4 grid gap-3">
-              <div className="rounded-xl border border-default bg-surface px-4 py-3">
-                <div className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">
-                  Distance
-                </div>
-                <div className="mt-1 text-2xl font-bold tracking-[-0.02em]">
-                  {routeSummary.distance} m
-                </div>
-              </div>
-              <div className="grid gap-3 sm:grid-cols-2">
-                <div className="rounded-xl border border-default bg-surface px-4 py-3">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">
-                    Duration
-                  </div>
-                  <div className="mt-1 text-xl font-bold">
-                    {routeSummary.duration} min
-                  </div>
-                </div>
-                <div className="rounded-xl border border-default bg-surface px-4 py-3">
-                  <div className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">
-                    Steps
-                  </div>
-                  <div className="mt-1 text-xl font-bold">
-                    {routeSummary.steps}
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {mode === "indoor" && visibleFloors.length > 1 && (
-        <div
-          className="absolute right-4 top-28 z-[700] hidden flex-col items-stretch gap-2 rounded-[20px] bg-[color:var(--color-map-overlay)] p-2 lg:flex"
-          style={{ boxShadow: "var(--shadow-panel)" }}
-        >
-          {visibleFloors.map((floor) => (
-            <button
-              key={floor.id}
-              onClick={() => setCurrentFloor(floor)}
-              className={`map-floor-pill ${
-                currentFloor?.id === floor.id ? "is-active" : ""
-              }`}
-            >
-              {floor.name}
-            </button>
-          ))}
-        </div>
-      )}
-
-      <div className="absolute bottom-5 left-4 z-[700] hidden lg:block">
-        <div className="rounded-full border border-default bg-[color:var(--color-map-overlay)] px-3 py-2 text-sm text-secondary shadow-sm">
-          <select
-            className="bg-transparent text-sm outline-none"
-            defaultValue="English (US)"
-          >
-            <option>English (US)</option>
-          </select>
-        </div>
-      </div>
-
-      <div className="absolute bottom-5 left-1/2 z-[700] hidden -translate-x-1/2 lg:block">
-        <div className="rounded-full border border-default bg-[color:var(--color-map-overlay)] px-4 py-2 text-xs text-secondary shadow-sm">
-          CampusNav © MapTiler © OpenStreetMap contributors
-        </div>
-      </div>
-
-      <div className="fixed bottom-0 left-0 right-0 z-[720] lg:hidden">
-        <div
-          className={`rounded-t-[20px] border border-default bg-[color:var(--color-map-overlay)] px-4 pb-5 pt-3 shadow-[0_-14px_32px_rgba(15,23,42,0.14)] transition-all ${
-            mobileSheetExpanded ? "max-h-[78vh]" : "max-h-[190px]"
-          } overflow-hidden`}
-          onTouchStart={handleTouchStart}
-          onTouchEnd={handleTouchEnd}
-        >
-          <button
-            type="button"
-            onClick={() => setMobileSheetExpanded((value) => !value)}
-            className="block w-full"
-          >
-            <span className="sheet-handle" />
-          </button>
-          <div className="max-h-[calc(78vh-3rem)] overflow-y-auto">
-            {panelContent}
-          </div>
-
-          {routeSummary && (
-            <div className="mt-4 rounded-xl border border-default bg-surface px-4 py-4">
-              <div className="section-label">Route Summary</div>
-              <div className="mt-3 grid grid-cols-3 gap-3 text-center">
-                <div>
-                  <div className="text-xs uppercase tracking-[0.12em] text-muted">
-                    Meters
-                  </div>
-                  <div className="mt-1 text-lg font-bold">
-                    {routeSummary.distance}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-xs uppercase tracking-[0.12em] text-muted">
-                    Minutes
-                  </div>
-                  <div className="mt-1 text-lg font-bold">
-                    {routeSummary.duration}
-                  </div>
-                </div>
-                <div>
-                  <div className="text-xs uppercase tracking-[0.12em] text-muted">
-                    Steps
-                  </div>
-                  <div className="mt-1 text-lg font-bold">
-                    {routeSummary.steps}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {mode === "indoor" && visibleFloors.length > 1 && (
-            <div className="mt-4 flex gap-2 overflow-x-auto pb-1">
-              {visibleFloors.map((floor) => (
-                <button
-                  key={floor.id}
-                  onClick={() => setCurrentFloor(floor)}
-                  className={`map-floor-pill ${
-                    currentFloor?.id === floor.id ? "is-active" : ""
-                  }`}
-                >
-                  {floor.name}
-                </button>
-              ))}
-            </div>
-          )}
-        </div>
-      </div>
+      <Panel
+        query={query}
+        onQuery={setQuery}
+        results={filteredResults}
+        onSelectResult={selectSearchResult}
+        fromQuery={fromQuery}
+        toQuery={toQuery}
+        onFromQuery={setFromQuery}
+        onToQuery={setToQuery}
+        onSwap={() => {
+          const oldFrom = fromRoom;
+          const oldFromText = fromQuery;
+          setFromRoom(toRoom);
+          setFromQuery(toQuery);
+          setToRoom(oldFrom);
+          setToQuery(oldFromText);
+          setRoute(null);
+        }}
+        routingMode={routingMode}
+        onStartRouting={() => {
+          setRoutingMode(true);
+          if (!fromRoom && filteredResults.length) {
+            setFromRoom(filteredResults[0]);
+            setFromQuery(filteredResults[0].name || "");
+          }
+        }}
+        onEndRouting={() => {
+          setRoutingMode(false);
+          setRoute(null);
+        }}
+        onRoute={runRoute}
+        loadingRoute={routeLoading}
+        mobile={mobile}
+      />
     </div>
   );
 }

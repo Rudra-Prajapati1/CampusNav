@@ -1,4 +1,3 @@
-// CampusNav redesign — MapEditor.jsx — updated
 import {
   forwardRef,
   useEffect,
@@ -7,1640 +6,487 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  Stage,
+  Layer,
+  Line,
+  Circle,
+  Rect,
+  Text,
+  Group,
+  Image as KonvaImage,
+} from "react-konva";
 import { v4 as uuidv4, validate as uuidValidate } from "uuid";
 import toast from "react-hot-toast";
 import {
-  Accessibility,
-  ArrowDown,
-  ArrowUp,
-  Check,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  DoorOpen,
   Download,
   Eye,
   EyeOff,
   GitBranch,
-  GripVertical,
-  HelpCircle,
   ImagePlus,
   Import,
-  LayoutGrid,
-  Layers,
   Magnet,
-  MapPin,
-  MousePointer2,
   Move,
-  MoveDiagonal2,
-  PencilRuler,
-  RectangleHorizontal,
-  RotateCw,
-  Search,
-  SearchCheck,
+  Pencil,
+  Plus,
+  Save,
   Sparkles,
-  Spline,
-  Trash2,
-  Wifi,
-  X,
+  Square,
 } from "lucide-react";
-import {
-  DEFAULT_INDUSTRY,
-  formatRoomTypeLabel,
-  getRoomTypeMeta,
-  getRoomTypes,
-  resolvePoiIcon,
-} from "../config/poiTypes.js";
 import { api } from "../utils/api.js";
-import { downloadDataUrl, sanitizeFilename } from "../utils/zipDownload.js";
 
-const GRID = 20;
-const MIN_ZOOM = 0.25;
-const MAX_ZOOM = 6;
-const MIN_SIZE = 24;
-const LINK_DIST = 48;
-const PATH_LINK_DIST = 26;
-const LEFT_PANEL_COLLAPSE = 84;
-const LEFT_PANEL_MIN = 188;
-const LEFT_PANEL_MAX = 340;
-const WAYPOINTS = ["junction", "entrance", "destination"];
-const TRANSITIONS = ["none", "stairs", "elevator"];
-const ROOM_ALIASES = { toilet: "restroom", staircase: "stairs" };
-const REORDERABLE_KINDS = new Set([
-  "room",
-  "wall",
-  "window",
-  "door",
-  "object",
-  "beacon",
-]);
-const DEFAULT_LAYER_INDEX = {
-  room: 100,
-  wall: 140,
-  window: 160,
-  door: 200,
-  object: 260,
-  beacon: 300,
-  waypoint: 900,
-  path: 1000,
+const TOOL_KEYS = {
+  s: "select",
+  w: "wall",
+  r: "room",
+  d: "door",
+  i: "window",
+  p: "waypoint",
+  e: "path",
 };
-const SHAPE_PRESETS = [
-  { id: "rectangle", label: "Rectangle" },
-  { id: "pill", label: "Pill" },
-  { id: "diamond", label: "Diamond" },
-  { id: "stadium", label: "Stadium" },
-  { id: "hex", label: "Hex" },
-];
-const ICON_PRESETS = [
-  { id: "auto", label: "Auto" },
-  { id: "stairs", label: "Stairs" },
-  { id: "elevator", label: "Elevator" },
-  { id: "restroom", label: "Restroom" },
-  { id: "food", label: "Food" },
-  { id: "parking", label: "Parking" },
-  { id: "exit", label: "Exit" },
-  { id: "office", label: "Office" },
-  { id: "info", label: "Info" },
+
+const ROOM_COLORS = {
+  room: "#9370DB40",
+  corridor: "#D3D3D340",
+  stairs: "#FF8C0040",
+  elevator: "#4169E140",
+};
+
+const AI_OPTIONS = [
+  {
+    key: "walls",
+    label: "Walls",
+    description: "Detects structural wall lines from the floor plan",
+    defaultValue: true,
+  },
+  {
+    key: "doors",
+    label: "Doors",
+    description: "Finds door openings between spaces",
+    defaultValue: true,
+  },
+  {
+    key: "windows",
+    label: "Windows",
+    description: "Identifies window segments on exterior walls",
+    defaultValue: true,
+  },
+  {
+    key: "connections",
+    label: "Nav Edges",
+    description: "Builds the walkable navigation graph",
+    defaultValue: false,
+  },
+  {
+    key: "objects",
+    label: "AI Objects",
+    description: "Detects stairs, elevators, restrooms (beta)",
+    defaultValue: false,
+  },
+  {
+    key: "locationsOnRooms",
+    label: "Locations on Rooms",
+    description: "Places location pins at room centers",
+    defaultValue: false,
+  },
+  {
+    key: "locationsOnObjects",
+    label: "Locations on Objects",
+    description: "Places pins on detected objects",
+    defaultValue: false,
+  },
+  {
+    key: "locationsOnConnections",
+    label: "Locations on Connections",
+    description: "Places pins at corridor intersections",
+    defaultValue: false,
+  },
 ];
 
-const AI_TRACE_STEPS = [
-  "Preprocessing",
-  "Detecting Walls",
-  "Detecting Rooms",
-  "Building Graph",
-  "Done",
-];
+const AI_STEPS = ["Preprocessing", "Walls", "Rooms", "Graph", "Done"];
 
-function AiTraceModal({
+function deepClone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function ensureUuid(value) {
+  return uuidValidate(value) ? value : uuidv4();
+}
+
+function emptyCollection() {
+  return { type: "FeatureCollection", features: [] };
+}
+
+function buildEmptyMvf(width = 2000, height = 1500, floorLabel = "Floor") {
+  return {
+    spaces: emptyCollection(),
+    obstructions: emptyCollection(),
+    openings: emptyCollection(),
+    nodes: emptyCollection(),
+    objects: emptyCollection(),
+    meta: {
+      imageWidth: width,
+      imageHeight: height,
+      pixelsPerMeter: 20,
+      floorLabel,
+    },
+  };
+}
+
+function isMvf(value) {
+  return (
+    value &&
+    value.spaces?.type === "FeatureCollection" &&
+    value.obstructions?.type === "FeatureCollection" &&
+    value.openings?.type === "FeatureCollection" &&
+    value.nodes?.type === "FeatureCollection" &&
+    value.objects?.type === "FeatureCollection"
+  );
+}
+
+function angleSnap(start, end) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.hypot(dx, dy);
+  if (length === 0) return end;
+  const angle = Math.atan2(dy, dx);
+  const snappedAngle = Math.round(angle / (Math.PI / 4)) * (Math.PI / 4);
+  return {
+    x: start.x + length * Math.cos(snappedAngle),
+    y: start.y + length * Math.sin(snappedAngle),
+  };
+}
+
+function toPointFromCoords(coords) {
+  return {
+    x: Number(coords?.[0] || 0),
+    y: Number(coords?.[1] || 0),
+  };
+}
+
+function toCoords(point) {
+  return [Number(point.x || 0), Number(point.y || 0)];
+}
+
+function flatten(points) {
+  return points.flatMap((point) => [point.x, point.y]);
+}
+
+function roomPolygon(feature) {
+  const ring = feature?.geometry?.coordinates?.[0] || [];
+  if (!Array.isArray(ring) || ring.length < 4) return [];
+  return ring.slice(0, -1).map(toPointFromCoords);
+}
+
+function polygonCenter(points) {
+  if (!points.length) return { x: 0, y: 0 };
+  const total = points.reduce(
+    (acc, point) => ({ x: acc.x + point.x, y: acc.y + point.y }),
+    { x: 0, y: 0 },
+  );
+  return {
+    x: total.x / points.length,
+    y: total.y / points.length,
+  };
+}
+
+function polygonBounds(points) {
+  if (!points.length) return { x: 0, y: 0, width: 0, height: 0 };
+  const xs = points.map((point) => point.x);
+  const ys = points.map((point) => point.y);
+  const minX = Math.min(...xs);
+  const minY = Math.min(...ys);
+  const maxX = Math.max(...xs);
+  const maxY = Math.max(...ys);
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  };
+}
+
+function nearest(list, point, maxDist = 10) {
+  let best = null;
+  let bestDist = Infinity;
+  for (const entry of list) {
+    const distance = Math.hypot(entry.x - point.x, entry.y - point.y);
+    if (distance < bestDist) {
+      bestDist = distance;
+      best = entry;
+    }
+  }
+  return bestDist <= maxDist ? best : null;
+}
+
+function buildMvfFromFloor(floorData) {
+  if (isMvf(floorData?.map_data)) {
+    return deepClone(floorData.map_data);
+  }
+
+  const width = Number(floorData?.floor_plan_width || 2000);
+  const height = Number(floorData?.floor_plan_height || 1500);
+  const mvf = buildEmptyMvf(width, height, floorData?.name || "Floor");
+
+  const rooms = Array.isArray(floorData?.rooms) ? floorData.rooms : [];
+  for (const room of rooms) {
+    const polygon =
+      Array.isArray(room.polygon_points) && room.polygon_points.length >= 3
+        ? room.polygon_points.map((point) => [point.x, point.y])
+        : [
+            [room.x, room.y],
+            [room.x + room.width, room.y],
+            [room.x + room.width, room.y + room.height],
+            [room.x, room.y + room.height],
+          ];
+    mvf.spaces.features.push({
+      type: "Feature",
+      id: ensureUuid(room.id),
+      properties: {
+        kind: room.type === "corridor" ? "corridor" : "room",
+        name: room.name || "Room",
+        category: room.type || "other",
+        color: room.color || "#9370DB",
+        entrances: [],
+      },
+      geometry: {
+        type: "Polygon",
+        coordinates: [
+          polygon.length &&
+          polygon[0][0] === polygon[polygon.length - 1][0] &&
+          polygon[0][1] === polygon[polygon.length - 1][1]
+            ? polygon
+            : [...polygon, polygon[0]],
+        ],
+      },
+    });
+  }
+
+  const waypoints = Array.isArray(floorData?.waypoints)
+    ? floorData.waypoints
+    : [];
+  const pointById = new Map();
+  for (const waypoint of waypoints) {
+    const id = ensureUuid(waypoint.id);
+    pointById.set(id, waypoint);
+    mvf.nodes.features.push({
+      type: "Feature",
+      id,
+      properties: {
+        kind: "waypoint",
+        spaceId: waypoint.room_id || null,
+        neighbors: [],
+      },
+      geometry: { type: "Point", coordinates: [waypoint.x, waypoint.y] },
+    });
+  }
+
+  const nodeById = new Map(
+    mvf.nodes.features.map((feature) => [feature.id, feature]),
+  );
+  const connections = Array.isArray(floorData?.connections)
+    ? floorData.connections
+    : [];
+  for (const connection of connections) {
+    const a = nodeById.get(connection.waypoint_a_id);
+    const b = nodeById.get(connection.waypoint_b_id);
+    if (!a || !b) continue;
+    const pointA = toPointFromCoords(a.geometry.coordinates);
+    const pointB = toPointFromCoords(b.geometry.coordinates);
+    const weight = Math.round(
+      Math.hypot(pointA.x - pointB.x, pointA.y - pointB.y),
+    );
+    a.properties.neighbors.push({ id: b.id, weight });
+    b.properties.neighbors.push({ id: a.id, weight });
+  }
+
+  return mvf;
+}
+
+function dedupeEdges(nodes) {
+  const edges = [];
+  const seen = new Set();
+  for (const node of nodes) {
+    const neighbors = Array.isArray(node.properties?.neighbors)
+      ? node.properties.neighbors
+      : [];
+    for (const neighbor of neighbors) {
+      const a = String(node.id);
+      const b = String(neighbor.id);
+      if (!a || !b || a === b) continue;
+      const key = [a, b].sort().join(":");
+      if (seen.has(key)) continue;
+      seen.add(key);
+      edges.push({
+        from: a,
+        to: b,
+        weight: Number(neighbor.weight || 1),
+      });
+    }
+  }
+  return edges;
+}
+
+function buildSavePayload(mvf) {
+  const rooms = mvf.spaces.features.map((feature) => {
+    const polygon = roomPolygon(feature);
+    const bounds = polygonBounds(polygon);
+    return {
+      id: ensureUuid(feature.id),
+      name: feature.properties?.name || "Room",
+      type: feature.properties?.kind || "other",
+      x: bounds.x,
+      y: bounds.y,
+      width: bounds.width,
+      height: bounds.height,
+      color: feature.properties?.color || null,
+      description: feature.properties?.description || "",
+      polygon_points: polygon,
+    };
+  });
+
+  const waypoints = mvf.nodes.features.map((feature, index) => ({
+    id: ensureUuid(feature.id),
+    x: Number(feature.geometry?.coordinates?.[0] || 0),
+    y: Number(feature.geometry?.coordinates?.[1] || 0),
+    type: feature.properties?.spaceId ? "room_center" : "corridor",
+    room_id: feature.properties?.spaceId || null,
+    name: feature.properties?.name || `Waypoint ${index + 1}`,
+    linked_floor_id: feature.properties?.linkedFloorId || null,
+  }));
+
+  const edges = dedupeEdges(mvf.nodes.features);
+  const connections = edges.map((edge) => ({
+    id: uuidv4(),
+    waypoint_a_id: edge.from,
+    waypoint_b_id: edge.to,
+  }));
+
+  return {
+    rooms,
+    waypoints,
+    connections,
+    map_data: mvf,
+    scale_pixels_per_meter: Number(mvf.meta?.pixelsPerMeter || 20),
+  };
+}
+
+function AiModal({
   open,
-  scope,
-  options,
   running,
-  stepIndex,
+  options,
+  scope,
+  step,
   onClose,
-  onScopeChange,
-  onToggleOption,
   onRun,
+  onToggle,
+  onScope,
 }) {
   if (!open) return null;
 
   return (
-    <div className="fixed inset-0 z-[860] flex items-center justify-center bg-slate-950/40 px-4 py-8">
-      <div className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <div className="section-label">AI Mapping</div>
-            <h2 className="mt-2 text-2xl font-bold tracking-[-0.03em]">
-              Run AI Mapping
-            </h2>
-            <p className="mt-2 text-sm subtle-text">
-              Detect editable walls, doors, windows, rooms, navigation edges, and
-              spatial objects from the uploaded floor plan.
-            </p>
-          </div>
-          <button type="button" onClick={onClose} className="btn-ghost px-3">
-            <X className="h-4 w-4" />
+    <div className="fixed inset-0 z-[950] flex items-center justify-center bg-black/40 px-4">
+      <div className="w-full max-w-2xl rounded-2xl bg-white p-6 shadow-2xl">
+        <div className="flex items-center justify-between">
+          <h2 className="text-xl font-semibold tracking-tight text-slate-900">
+            AI MAPPING
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-3 py-1 text-slate-600 hover:bg-slate-100"
+          >
+            x
           </button>
         </div>
 
-        <div className="mt-6 flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-100 p-1">
-          {[
-            { id: "current_floor", label: "Current Floor" },
-            { id: "all_floors", label: "All Floors" },
-          ].map((entry) => (
-            <button
-              key={entry.id}
-              type="button"
-              disabled={running}
-              onClick={() => onScopeChange(entry.id)}
-              className={`rounded-lg px-4 py-2 text-sm font-semibold transition-colors ${
-                scope === entry.id ? "bg-blue-600 text-white" : "text-secondary"
-              }`}
-            >
-              {entry.label}
-            </button>
-          ))}
+        <div className="mt-4">
+          <h3 className="text-base font-semibold text-slate-900">
+            Run AI Mapping
+          </h3>
+          <p className="mt-1 text-sm text-slate-500">
+            Detect editable walls, doors, windows, rooms, navigation edges, and
+            spatial objects from the uploaded floor plan.
+          </p>
         </div>
 
-        <div className="mt-6 grid gap-3 md:grid-cols-2">
-          {[
-            ["walls", "Walls", false],
-            ["doors", "Doors", false],
-            ["windows", "Windows", false],
-            ["connections", "Navigation Edges", false],
-            ["objects", "AI Objects", true],
-            ["locationsOnRooms", "Locations on Rooms", false],
-            ["locationsOnObjects", "Locations on Objects", false],
-            ["locationsOnConnections", "Locations on Connections", false],
-          ].map(([key, label, beta]) => (
+        <div className="mt-4 flex gap-2">
+          <button
+            type="button"
+            onClick={() => onScope("current_floor")}
+            className={`rounded-md px-4 py-2 text-sm ${scope === "current_floor" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"}`}
+          >
+            Current Floor
+          </button>
+          <button
+            type="button"
+            onClick={() => onScope("all_floors")}
+            className={`rounded-md px-4 py-2 text-sm ${scope === "all_floors" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"}`}
+          >
+            All Floors
+          </button>
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 gap-2 md:grid-cols-2">
+          {AI_OPTIONS.map((entry) => (
             <label
-              key={key}
-              className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3"
+              key={entry.key}
+              className="rounded-lg border border-slate-200 p-3"
             >
-              <span className="flex items-center gap-2 text-sm font-medium text-primary">
-                {label}
-                {beta ? (
-                  <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-amber-700">
-                    Beta
-                  </span>
-                ) : null}
-              </span>
-              <input
-                type="checkbox"
-                checked={Boolean(options[key])}
-                disabled={running}
-                onChange={() => onToggleOption(key)}
-              />
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-medium text-slate-800">
+                  {entry.label}
+                </span>
+                <input
+                  type="checkbox"
+                  checked={Boolean(options[entry.key])}
+                  disabled={running}
+                  onChange={() => onToggle(entry.key)}
+                />
+              </div>
+              <div className="mt-1 text-xs text-slate-500">
+                {entry.description}
+              </div>
             </label>
           ))}
         </div>
 
-        <div className="mt-6 rounded-2xl border border-default bg-surface-alt p-4">
-          <div className="text-xs font-semibold uppercase tracking-[0.14em] text-muted">
+        <div className="mt-5">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
             Progress
           </div>
-          <div className="mt-3 grid gap-2 md:grid-cols-5">
-            {AI_TRACE_STEPS.map((step, index) => (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {AI_STEPS.map((name, index) => (
               <div
-                key={step}
-                className={`rounded-xl border px-3 py-2 text-sm ${
-                  index <= stepIndex
-                    ? "border-accent bg-accent-light text-accent"
-                    : "border-default bg-surface text-secondary"
-                }`}
+                key={name}
+                className={`rounded-md border px-3 py-1 text-xs ${index <= step ? "border-blue-200 bg-blue-50 text-blue-700" : "border-slate-200 bg-white text-slate-500"}`}
               >
-                {step}
+                {name}
               </div>
             ))}
           </div>
         </div>
 
-        <div className="mt-6 flex flex-col gap-3 sm:flex-row sm:justify-end">
+        <div className="mt-6 flex justify-end gap-3">
           <button
             type="button"
-            disabled={running}
             onClick={onClose}
-            className="btn-secondary"
+            disabled={running}
+            className="rounded-md border border-slate-300 px-4 py-2 text-sm"
           >
             Cancel
           </button>
           <button
             type="button"
-            disabled={running}
             onClick={onRun}
-            className="inline-flex h-10 items-center justify-center rounded-lg bg-blue-600 px-4 font-semibold text-white transition hover:bg-blue-700 disabled:opacity-60"
+            disabled={running}
+            className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white"
           >
-            {running ? "Running AI Mapping..." : "Run AI Mapping"}
+            {running ? "Running..." : "Run AI Mapping"}
           </button>
         </div>
       </div>
     </div>
-  );
-}
-
-const TOOLS = [
-  { group: "Draw", id: "room", label: "Room", key: "R", icon: RectangleHorizontal },
-  { group: "Draw", id: "door", label: "Door", key: "D", icon: DoorOpen },
-  { group: "Draw", id: "waypoint", label: "Waypoint", key: "W", icon: MapPin },
-  { group: "Draw", id: "beacon", label: "Beacon", key: "B", icon: Wifi },
-  { group: "Draw", id: "path", label: "Path", key: "P", icon: Spline },
-  { group: "Edit", id: "select", label: "Select", key: "S", icon: MousePointer2 },
-  { group: "Edit", id: "move", label: "Move", key: "M", icon: Move },
-  { group: "Edit", id: "resize", label: "Resize", key: "E", icon: MoveDiagonal2 },
-  { group: "Edit", id: "delete", label: "Delete", key: "Del", icon: Trash2 },
-];
-
-const clone = (value) => JSON.parse(JSON.stringify(value));
-const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
-const snap = (value, enabled) =>
-  enabled ? Math.round(value / GRID) * GRID : value;
-const toRadians = (degrees) => (Number(degrees || 0) * Math.PI) / 180;
-const slugify = (value) =>
-  String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "_")
-    .replace(/^_+|_+$/g, "") || "custom";
-const dist = (a, b) => Math.hypot((a.x || 0) - (b.x || 0), (a.y || 0) - (b.y || 0));
-
-function ensureUuid(value) {
-  return typeof value === "string" && uuidValidate(value) ? value : uuidv4();
-}
-
-function estimatedOverlayBoundsFromEntrance(building) {
-  const lat = Number.parseFloat(building?.entrance_lat);
-  const lng = Number.parseFloat(building?.entrance_lng);
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
-
-  const latSpan = 0.00018;
-  const lngSpan = 0.00018;
-  return {
-    north: (lat + latSpan).toFixed(6),
-    south: (lat - latSpan).toFixed(6),
-    east: (lng + lngSpan).toFixed(6),
-    west: (lng - lngSpan).toFixed(6),
-  };
-}
-
-function pointInPoly(point, points) {
-  let inside = false;
-  for (let i = 0, j = points.length - 1; i < points.length; j = i++) {
-    if (
-      points[i].y > point.y !== points[j].y > point.y &&
-      point.x <
-        ((points[j].x - points[i].x) * (point.y - points[i].y)) /
-          (points[j].y - points[i].y) +
-          points[i].x
-    ) {
-      inside = !inside;
-    }
-  }
-  return inside;
-}
-
-function segDist(point, a, b) {
-  const dx = b.x - a.x;
-  const dy = b.y - a.y;
-  if (dx === 0 && dy === 0) return dist(point, a);
-  const t = clamp(
-    ((point.x - a.x) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy),
-    0,
-    1,
-  );
-  return dist(point, { x: a.x + t * dx, y: a.y + t * dy });
-}
-
-function boundsFromPoints(points = []) {
-  return points.reduce(
-    (acc, point) => ({
-      minX: Math.min(acc.minX, point.x),
-      minY: Math.min(acc.minY, point.y),
-      maxX: Math.max(acc.maxX, point.x),
-      maxY: Math.max(acc.maxY, point.y),
-    }),
-    {
-      minX: points[0]?.x ?? 0,
-      minY: points[0]?.y ?? 0,
-      maxX: points[0]?.x ?? 0,
-      maxY: points[0]?.y ?? 0,
-    },
-  );
-}
-
-function rotatePoint(point, center, degrees = 0) {
-  const radians = toRadians(degrees);
-  if (Math.abs(radians) < 0.0001) return { ...point };
-
-  const cos = Math.cos(radians);
-  const sin = Math.sin(radians);
-  const dx = point.x - center.x;
-  const dy = point.y - center.y;
-
-  return {
-    x: center.x + dx * cos - dy * sin,
-    y: center.y + dx * sin + dy * cos,
-  };
-}
-
-function inverseRotatePoint(point, center, degrees = 0) {
-  return rotatePoint(point, center, -degrees);
-}
-
-function getBounds(element) {
-  if (element.kind === "room") {
-    const box = boundsFromPoints(roomPolygon(element));
-    return {
-      x: box.minX,
-      y: box.minY,
-      width: box.maxX - box.minX,
-      height: box.maxY - box.minY,
-    };
-  }
-  if (element.kind === "path") {
-    const box = boundsFromPoints(element.points);
-    return {
-      x: box.minX,
-      y: box.minY,
-      width: box.maxX - box.minX,
-      height: box.maxY - box.minY,
-    };
-  }
-  if (element.kind === "wall") {
-    return {
-      x: Math.min(element.x1, element.x2) - (element.thickness || 6) / 2,
-      y: Math.min(element.y1, element.y2) - (element.thickness || 6) / 2,
-      width:
-        Math.abs(element.x2 - element.x1) + (element.thickness || 6),
-      height:
-        Math.abs(element.y2 - element.y1) + (element.thickness || 6),
-    };
-  }
-  if (element.kind === "window") {
-    return {
-      x: element.x - element.width / 2,
-      y: element.y - 8,
-      width: element.width || 28,
-      height: 16,
-    };
-  }
-  if (element.kind === "object") {
-    return { x: element.x - 14, y: element.y - 14, width: 28, height: 28 };
-  }
-  if (element.kind === "door" || element.kind === "waypoint" || element.kind === "beacon") {
-    return { x: element.x - 12, y: element.y - 12, width: 24, height: 24 };
-  }
-  return {
-    x: element.x || 0,
-    y: element.y || 0,
-    width: element.width || 0,
-    height: element.height || 0,
-  };
-}
-
-function roomCenter(room) {
-  if (room.shape === "polygon" && room.points?.length >= 3) {
-    const box = boundsFromPoints(room.points);
-    return { x: (box.minX + box.maxX) / 2, y: (box.minY + box.maxY) / 2 };
-  }
-  return {
-    x: (room.x || 0) + (room.width || 0) / 2,
-    y: (room.y || 0) + (room.height || 0) / 2,
-  };
-}
-
-function normalizeLayerIndex(kind, value) {
-  const parsed = Number.parseFloat(value);
-  if (Number.isFinite(parsed)) return parsed;
-  return DEFAULT_LAYER_INDEX[kind] || 100;
-}
-
-function elementSortWeight(element) {
-  if (element.kind === "path") return 20000 + normalizeLayerIndex(element.kind, element.layerIndex);
-  if (element.kind === "waypoint") return 19000 + normalizeLayerIndex(element.kind, element.layerIndex);
-  return normalizeLayerIndex(element.kind, element.layerIndex);
-}
-
-function renderSort(left, right) {
-  return elementSortWeight(left) - elementSortWeight(right);
-}
-
-function layerListSort(left, right) {
-  return elementSortWeight(right) - elementSortWeight(left);
-}
-
-function defaultShapePresetForType(typeId) {
-  if (typeId === "stairs") return "diamond";
-  if (typeId === "elevator") return "hex";
-  if (typeId === "restroom") return "pill";
-  if (typeId === "parking") return "stadium";
-  if (typeId === "emergency_exit") return "diamond";
-  return "rectangle";
-}
-
-function defaultIconPresetForType(typeId) {
-  if (!typeId) return "auto";
-  if (typeId.includes("restroom")) return "restroom";
-  if (typeId.includes("food") || typeId.includes("caf") || typeId.includes("restaurant")) {
-    return "food";
-  }
-  if (typeId.includes("parking")) return "parking";
-  if (typeId.includes("exit")) return "exit";
-  if (typeId.includes("elevator")) return "elevator";
-  if (typeId.includes("stairs") || typeId.includes("escalator")) return "stairs";
-  if (typeId.includes("office") || typeId.includes("meeting") || typeId.includes("cabin")) {
-    return "office";
-  }
-  if (typeId.includes("info") || typeId.includes("reception")) return "info";
-  return "auto";
-}
-
-function roomIconSymbol(room, industryId) {
-  const resolvedType = resolvedRoomType(room);
-  const iconPreset = room.iconPreset && room.iconPreset !== "auto"
-    ? room.iconPreset
-    : defaultIconPresetForType(resolvedType);
-
-  const symbolMap = {
-    stairs: "⇅",
-    elevator: "⇳",
-    restroom: "WC",
-    food: "☕",
-    parking: "P",
-    exit: "EXIT",
-    office: "OF",
-    info: "i",
-  };
-
-  if (symbolMap[iconPreset]) return symbolMap[iconPreset];
-
-  const meta = getRoomTypeMeta(industryId, resolvedType);
-  if (meta?.navRole === "stairs") return symbolMap.stairs;
-  if (meta?.navRole === "elevator") return symbolMap.elevator;
-
-  return room.name
-    ? room.name
-        .split(/\s+/)
-        .slice(0, 2)
-        .map((part) => part[0])
-        .join("")
-        .toUpperCase()
-    : roomLabel(room, industryId)
-        .split(/\s+/)
-        .slice(0, 2)
-        .map((part) => part[0])
-        .join("")
-        .toUpperCase();
-}
-
-function rectPoints(room) {
-  return [
-    { x: room.x, y: room.y },
-    { x: room.x + room.width, y: room.y },
-    { x: room.x + room.width, y: room.y + room.height },
-    { x: room.x, y: room.y + room.height },
-  ];
-}
-
-function baseRoomPolygon(room) {
-  if (room.shape === "polygon" && room.points?.length >= 3) return room.points;
-  if (room.shapePreset === "diamond") {
-    return [
-      { x: room.x + room.width / 2, y: room.y },
-      { x: room.x + room.width, y: room.y + room.height / 2 },
-      { x: room.x + room.width / 2, y: room.y + room.height },
-      { x: room.x, y: room.y + room.height / 2 },
-    ];
-  }
-  if (room.shapePreset === "hex") {
-    const inset = room.width * 0.16;
-    return [
-      { x: room.x + inset, y: room.y },
-      { x: room.x + room.width - inset, y: room.y },
-      { x: room.x + room.width, y: room.y + room.height / 2 },
-      { x: room.x + room.width - inset, y: room.y + room.height },
-      { x: room.x + inset, y: room.y + room.height },
-      { x: room.x, y: room.y + room.height / 2 },
-    ];
-  }
-  return rectPoints(room);
-}
-
-function roomPolygon(room) {
-  const points = baseRoomPolygon(room);
-  const rotation = Number(room.rotation || 0);
-  if (!rotation) return points;
-  const center = roomCenter(room);
-  return points.map((point) => rotatePoint(point, center, rotation));
-}
-
-function drawRoomPath(ctx, room) {
-  if (room.shapePreset === "pill" || room.shapePreset === "stadium") {
-    const center = roomCenter(room);
-    ctx.save();
-    ctx.translate(center.x, center.y);
-    ctx.rotate(toRadians(room.rotation || 0));
-    ctx.beginPath();
-    ctx.roundRect(
-      -room.width / 2,
-      -room.height / 2,
-      room.width,
-      room.height,
-      Math.min(room.height / 2, 28),
-    );
-    ctx.restore();
-    return;
-  }
-  const points = roomPolygon(room);
-  ctx.beginPath();
-  ctx.moveTo(points[0].x, points[0].y);
-  points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
-  ctx.closePath();
-}
-
-function roomCenterFromShape(room) {
-  return roomCenter(room);
-}
-
-function createRoomDoorPosition(room, edge = "right", offset = 0.5) {
-  const safeOffset = clamp(offset, 0.05, 0.95);
-  const center = roomCenter(room);
-  let point = null;
-  if (edge === "left") {
-    point = { x: room.x, y: room.y + room.height * safeOffset };
-  } else if (edge === "top") {
-    point = { x: room.x + room.width * safeOffset, y: room.y };
-  } else if (edge === "bottom") {
-    point = { x: room.x + room.width * safeOffset, y: room.y + room.height };
-  } else {
-    point = { x: room.x + room.width, y: room.y + room.height * safeOffset };
-  }
-  return rotatePoint(point, center, room.rotation || 0);
-}
-
-function doorVectors(room, edge = "right") {
-  const rotation = Number(room.rotation || 0);
-  const tangentBase =
-    edge === "left" || edge === "right"
-      ? { x: 0, y: 1 }
-      : { x: 1, y: 0 };
-  const normalBase =
-    edge === "left"
-      ? { x: -1, y: 0 }
-      : edge === "right"
-        ? { x: 1, y: 0 }
-        : edge === "top"
-          ? { x: 0, y: -1 }
-          : { x: 0, y: 1 };
-
-  return {
-    tangent: rotatePoint(tangentBase, { x: 0, y: 0 }, rotation),
-    normal: rotatePoint(normalBase, { x: 0, y: 0 }, rotation),
-  };
-}
-
-function doorOpeningLength(door) {
-  const widthMeters = Number.parseFloat(door.widthMeters);
-  if (Number.isFinite(widthMeters) && widthMeters > 0) {
-    return clamp(widthMeters * 22, 18, 54);
-  }
-  return 26;
-}
-
-function drawDoorOpening(ctx, room, door, background, accent, preview3d = false, depth = 0) {
-  const center = createRoomDoorPosition(room, door.edge, door.offset);
-  const { tangent, normal } = doorVectors(room, door.edge);
-  const half = doorOpeningLength(door) / 2;
-  const doorDepthX = preview3d ? depth * 0.9 : 0;
-  const doorDepthY = preview3d ? -depth * 0.55 : 0;
-  const start = {
-    x: center.x - tangent.x * half + doorDepthX,
-    y: center.y - tangent.y * half + doorDepthY,
-  };
-  const end = {
-    x: center.x + tangent.x * half + doorDepthX,
-    y: center.y + tangent.y * half + doorDepthY,
-  };
-
-  ctx.save();
-  ctx.lineCap = "round";
-  ctx.strokeStyle = background;
-  ctx.lineWidth = preview3d ? 10 : 9;
-  ctx.beginPath();
-  ctx.moveTo(start.x, start.y);
-  ctx.lineTo(end.x, end.y);
-  ctx.stroke();
-
-  ctx.strokeStyle = accent;
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(
-    center.x + doorDepthX + normal.x * 2,
-    center.y + doorDepthY + normal.y * 2,
-  );
-  ctx.lineTo(
-    center.x + doorDepthX + normal.x * 10,
-    center.y + doorDepthY + normal.y * 10,
-  );
-  ctx.stroke();
-  ctx.restore();
-}
-
-function drawRoomExtrusion(ctx, room, fill, stroke, shadow, selected, depth = 10) {
-  const topPolygon = roomPolygon(room);
-  const offsetPolygon = topPolygon.map((point) => ({
-    x: point.x + depth * 1.15,
-    y: point.y - depth * 0.7,
-  }));
-
-  for (let index = topPolygon.length - 1; index >= 0; index -= 1) {
-    const current = topPolygon[index];
-    const next = topPolygon[(index + 1) % topPolygon.length];
-    const currentTop = offsetPolygon[index];
-    const nextTop = offsetPolygon[(index + 1) % topPolygon.length];
-
-    ctx.beginPath();
-    ctx.moveTo(current.x, current.y);
-    ctx.lineTo(next.x, next.y);
-    ctx.lineTo(nextTop.x, nextTop.y);
-    ctx.lineTo(currentTop.x, currentTop.y);
-    ctx.closePath();
-    ctx.fillStyle = shadow;
-    ctx.fill();
-  }
-
-  ctx.beginPath();
-  ctx.moveTo(offsetPolygon[0].x, offsetPolygon[0].y);
-  offsetPolygon.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
-  ctx.closePath();
-  ctx.fillStyle = fill;
-  ctx.fill();
-  ctx.strokeStyle = stroke;
-  ctx.lineWidth = selected ? 2.5 : 1.5;
-  ctx.stroke();
-}
-
-function edgeOffsetFromPoint(room, point) {
-  const localPoint = inverseRotatePoint(point, roomCenter(room), room.rotation || 0);
-  const distances = [
-    { edge: "left", value: Math.abs(localPoint.x - room.x) },
-    { edge: "right", value: Math.abs(localPoint.x - (room.x + room.width)) },
-    { edge: "top", value: Math.abs(localPoint.y - room.y) },
-    { edge: "bottom", value: Math.abs(localPoint.y - (room.y + room.height)) },
-  ].sort((left, right) => left.value - right.value);
-  const edge = distances[0]?.edge || "right";
-
-  if (edge === "left" || edge === "right") {
-    return {
-      edge,
-      offset: clamp((localPoint.y - room.y) / Math.max(room.height, 1), 0.05, 0.95),
-    };
-  }
-
-  return {
-    edge,
-    offset: clamp((localPoint.x - room.x) / Math.max(room.width, 1), 0.05, 0.95),
-  };
-}
-
-function handlePoints(element) {
-  const box = getBounds(element);
-  const mx = box.x + box.width / 2;
-  const my = box.y + box.height / 2;
-  return [
-    { id: "nw", x: box.x, y: box.y },
-    { id: "n", x: mx, y: box.y },
-    { id: "ne", x: box.x + box.width, y: box.y },
-    { id: "e", x: box.x + box.width, y: my },
-    { id: "se", x: box.x + box.width, y: box.y + box.height },
-    { id: "s", x: mx, y: box.y + box.height },
-    { id: "sw", x: box.x, y: box.y + box.height },
-    { id: "w", x: box.x, y: my },
-  ];
-}
-
-function defaultRoomType(industryId) {
-  return getRoomTypes(industryId).find((entry) => !entry.isCustom)?.id || "custom";
-}
-
-function normalizeRoomType(rawType, industryId) {
-  const next = ROOM_ALIASES[rawType] || rawType;
-  if (!next) return { roomType: defaultRoomType(industryId), customLabel: "", customValue: "" };
-  if (getRoomTypes(industryId).some((entry) => entry.id === next)) {
-    return { roomType: next, customLabel: "", customValue: "" };
-  }
-  return {
-    roomType: "custom",
-    customLabel: formatRoomTypeLabel(rawType),
-    customValue: rawType,
-  };
-}
-
-function resolvedRoomType(room) {
-  return room.roomType === "custom"
-    ? room.customValue || slugify(room.customLabel)
-    : room.roomType;
-}
-
-function roomLabel(room, industryId) {
-  if (room.roomType !== "custom") {
-    const meta = getRoomTypeMeta(industryId, room.roomType);
-    if (!meta?.isCustom) return meta.label;
-  }
-  return room.customLabel || formatRoomTypeLabel(room.customValue || "custom");
-}
-
-function hit(point, element) {
-  if (element.kind === "room") {
-    return pointInPoly(point, roomPolygon(element));
-  }
-  if (element.kind === "wall") {
-    return (
-      segDist(
-        point,
-        { x: element.x1, y: element.y1 },
-        { x: element.x2, y: element.y2 },
-      ) <= Math.max(8, (element.thickness || 6) / 2 + 4)
-    );
-  }
-  if (element.kind === "window") {
-    return (
-      Math.abs(point.x - element.x) <= (element.width || 28) / 2 + 4 &&
-      Math.abs(point.y - element.y) <= 10
-    );
-  }
-  if (element.kind === "path") {
-    return element.points.some((entry, index) => {
-      if (!index) return false;
-      return segDist(point, element.points[index - 1], entry) <= 10;
-    });
-  }
-  const box = getBounds(element);
-  return (
-    point.x >= box.x &&
-    point.x <= box.x + box.width &&
-    point.y >= box.y &&
-    point.y <= box.y + box.height
-  );
-}
-
-function floorEntry(mapData, floorData) {
-  const floors = Array.isArray(mapData?.floors) ? mapData.floors : [];
-  return (
-    floors.find((entry) => entry.id === floorData?.id) ||
-    floors.find((entry) => entry.name === floorData?.name) ||
-    floors.find((entry) => entry.level === floorData?.level) ||
-    floors[0] ||
-    null
-  );
-}
-
-function normalizeOverlayBounds(bounds) {
-  if (!bounds || typeof bounds !== "object") {
-    return {
-      north: "",
-      south: "",
-      east: "",
-      west: "",
-    };
-  }
-
-  return {
-    north: bounds.north ?? "",
-    south: bounds.south ?? "",
-    east: bounds.east ?? "",
-    west: bounds.west ?? "",
-  };
-}
-
-function cleanOverlayBounds(bounds) {
-  const next = {
-    north: Number.parseFloat(bounds?.north),
-    south: Number.parseFloat(bounds?.south),
-    east: Number.parseFloat(bounds?.east),
-    west: Number.parseFloat(bounds?.west),
-  };
-
-  if (Object.values(next).some((value) => !Number.isFinite(value))) {
-    return null;
-  }
-
-  return next;
-}
-
-function elementTitle(element, industryId) {
-  if (!element) return "Selection";
-  if (element.kind === "room") return element.name || roomLabel(element, industryId);
-  if (element.kind === "wall") return element.name || "Wall";
-  if (element.kind === "window") return element.name || "Window";
-  if (element.kind === "door") return element.name || element.doorType || "Door";
-  if (element.kind === "waypoint") {
-    return element.name || formatRoomTypeLabel(element.waypointType || "waypoint");
-  }
-  if (element.kind === "object") return element.label || element.objectType || "Object";
-  return element.name || `Path ${element.points?.length || 0}`;
-}
-
-function iconForElement(element) {
-  if (element.kind === "room") return RectangleHorizontal;
-  if (element.kind === "wall") return PencilRuler;
-  if (element.kind === "window") return GripVertical;
-  if (element.kind === "door") return DoorOpen;
-  if (element.kind === "waypoint") return MapPin;
-  if (element.kind === "object") return Sparkles;
-  if (element.kind === "beacon") return Wifi;
-  return Spline;
-}
-
-function normalizeElement(element, industryId) {
-  const kind = element.kind || element.type;
-  if (kind === "rect" || kind === "polygon" || kind === "room") {
-    const shape = element.shape || (kind === "polygon" ? "polygon" : "rect");
-    const typeState = normalizeRoomType(
-      element.roomType || element.zoneType || element.typeId || null,
-      industryId,
-    );
-    const points = (element.points || element.polygon_points || []).map((point) => ({
-      x: point.x,
-      y: point.y,
-    }));
-    const box = shape === "polygon" && points.length ? boundsFromPoints(points) : null;
-    return {
-      id: ensureUuid(element.id),
-      kind: "room",
-      type: shape === "polygon" ? "polygon" : "rect",
-      shape,
-      x: box ? box.minX : element.x || 0,
-      y: box ? box.minY : element.y || 0,
-      width: box ? box.maxX - box.minX : element.width || element.w || 120,
-      height: box ? box.maxY - box.minY : element.height || element.h || 90,
-      points,
-      name: element.name || "",
-      roomType: typeState.roomType,
-      customLabel: element.customTypeLabel || typeState.customLabel || "",
-      customValue: element.customTypeValue || typeState.customValue || "",
-      description: element.description || "",
-      color: element.color || "",
-      wheelchairAccessible: Boolean(element.wheelchairAccessible),
-      publicAccess: element.publicAccess ?? true,
-      rotation: Number.parseFloat(element.rotation) || 0,
-      shapePreset:
-        element.shapePreset ||
-        defaultShapePresetForType(typeState.roomType === "custom" ? typeState.customValue : typeState.roomType),
-      iconPreset:
-        element.iconPreset ||
-        defaultIconPresetForType(typeState.roomType === "custom" ? typeState.customValue : typeState.roomType),
-      layerIndex: normalizeLayerIndex("room", element.layerIndex),
-    };
-  }
-  if (kind === "door") {
-    return {
-      id: ensureUuid(element.id),
-      kind: "door",
-      type: "door",
-      x: element.x || 0,
-      y: element.y || 0,
-      name: element.name || "Door",
-      doorType: element.doorType || "main_entrance",
-      widthMeters: element.widthMeters || element.width_meters || "",
-      accessible: Boolean(element.accessible),
-      locked: Boolean(element.locked),
-      roomId: element.roomId || element.room_id || null,
-      edge: element.edge || "right",
-      offset: Number.isFinite(Number.parseFloat(element.offset))
-        ? Number.parseFloat(element.offset)
-        : 0.5,
-      routingAnchor: element.routingAnchor ?? true,
-      linkedWaypointId: element.linkedWaypointId || element.linked_waypoint_id || null,
-      layerIndex: normalizeLayerIndex("door", element.layerIndex),
-    };
-  }
-  if (kind === "wall") {
-    return {
-      id: ensureUuid(element.id),
-      kind: "wall",
-      type: "wall",
-      x1: Number.parseFloat(element.x1) || 0,
-      y1: Number.parseFloat(element.y1) || 0,
-      x2: Number.parseFloat(element.x2) || 0,
-      y2: Number.parseFloat(element.y2) || 0,
-      thickness: Number.parseFloat(element.thickness) || 6,
-      name: element.name || "Wall",
-      layerIndex: normalizeLayerIndex("wall", element.layerIndex),
-    };
-  }
-  if (kind === "window") {
-    return {
-      id: ensureUuid(element.id),
-      kind: "window",
-      type: "window",
-      x: Number.parseFloat(element.x) || 0,
-      y: Number.parseFloat(element.y) || 0,
-      width: Number.parseFloat(element.width) || 28,
-      name: element.name || "Window",
-      layerIndex: normalizeLayerIndex("window", element.layerIndex),
-    };
-  }
-  if (kind === "waypoint") {
-    return {
-      id: ensureUuid(element.id),
-      kind: "waypoint",
-      type: "waypoint",
-      x: element.x || 0,
-      y: element.y || 0,
-      name: element.name || "",
-      waypointType:
-        element.waypointType ||
-        (element.type === "entrance"
-          ? "entrance"
-          : element.type === "room_center"
-            ? "destination"
-            : "junction"),
-      transitionType:
-        element.transitionType ||
-        (element.navType === "staircase" ? "stairs" : element.navType) ||
-        (element.type === "stairs" || element.type === "elevator" ? element.type : "none"),
-      linkedFloorId:
-        element.linkedFloorId || element.linkedFloor || element.linked_floor_id || null,
-      description: element.description || "",
-      customWaypointLabel: element.customWaypointLabel || "",
-      linkedRoomId: element.linkedRoomId || element.linked_room_id || null,
-      linkedDoorId: element.linkedDoorId || element.linked_door_id || null,
-      isAutoRoomWaypoint: Boolean(element.isAutoRoomWaypoint),
-      roomRatioX:
-        Number.isFinite(Number.parseFloat(element.roomRatioX))
-          ? Number.parseFloat(element.roomRatioX)
-          : 0.5,
-      roomRatioY:
-        Number.isFinite(Number.parseFloat(element.roomRatioY))
-          ? Number.parseFloat(element.roomRatioY)
-          : 0.5,
-      layerIndex: normalizeLayerIndex("waypoint", element.layerIndex),
-    };
-  }
-  if (kind === "beacon") {
-    return {
-      id: ensureUuid(element.id),
-      kind: "beacon",
-      type: "beacon",
-      x: element.x || 0,
-      y: element.y || 0,
-      name: element.name || "Beacon",
-      beaconId: element.beaconId || element.hardwareId || "",
-      radiusMeters: element.radiusMeters ?? element.radius_meters ?? 2.5,
-      txPower: element.txPower ?? element.tx_power ?? -59,
-      notes: element.notes || "",
-      layerIndex: normalizeLayerIndex("beacon", element.layerIndex),
-    };
-  }
-  if (kind === "object") {
-    return {
-      id: ensureUuid(element.id),
-      kind: "object",
-      type: "object",
-      x: Number.parseFloat(element.x) || 0,
-      y: Number.parseFloat(element.y) || 0,
-      label: element.label || element.name || "Object",
-      name: element.name || element.label || "",
-      objectType: element.objectType || element.type || "poi",
-      description: element.description || "",
-      photoUrl: element.photoUrl || element.photo_url || "",
-      linkedRoomId:
-        element.linkedRoomId ||
-        element.linked_room_id ||
-        element.roomId ||
-        element.room_id ||
-        null,
-      iconPreset:
-        element.iconPreset ||
-        defaultIconPresetForType(element.objectType || element.type || "info"),
-      layerIndex: normalizeLayerIndex("object", element.layerIndex),
-    };
-  }
-  if (kind === "path") {
-    return {
-      id: ensureUuid(element.id),
-      kind: "path",
-      type: "path",
-      points: (element.points || []).map((point) => ({ x: point.x, y: point.y })),
-      bidirectional: element.bidirectional ?? true,
-      accessible: Boolean(element.accessible),
-      name: element.name || "",
-      staffOnly: Boolean(element.staffOnly),
-      layerIndex: normalizeLayerIndex("path", element.layerIndex),
-    };
-  }
-  return null;
-}
-
-function modelFromFloor(floorData, industryId) {
-  if (!floorData) {
-    return {
-      floor: { id: uuidv4(), name: "Floor", level: 0, width: 1200, height: 800, bg: null },
-      elements: [],
-      pixelsPerMeter: null,
-      showGrid: true,
-      showLabels: true,
-      snapToGrid: true,
-      overlayBounds: normalizeOverlayBounds(),
-      geo: {
-        corners: [],
-        georeference: null,
-      },
-    };
-  }
-  const entry = floorEntry(floorData.map_data, floorData);
-  const elements = entry?.elements?.length
-    ? entry.elements.map((item) => normalizeElement(item, industryId)).filter(Boolean)
-    : [
-        ...(floorData.rooms || []).map((room) =>
-          normalizeElement(
-            {
-              id: room.id,
-              type: room.polygon_points?.length ? "polygon" : "rect",
-              x: room.x,
-              y: room.y,
-              width: room.width,
-              height: room.height,
-              polygon_points: room.polygon_points,
-              name: room.name,
-              roomType: room.type,
-              description: room.description,
-              color: room.color,
-            },
-            industryId,
-          ),
-        ),
-        ...(floorData.waypoints || []).map((waypoint) =>
-          normalizeElement(
-            {
-              id: waypoint.id,
-              kind: "waypoint",
-              x: waypoint.x,
-              y: waypoint.y,
-              name: waypoint.name,
-              type: waypoint.type,
-              linked_floor_id: waypoint.linked_floor_id,
-            },
-            industryId,
-          ),
-        ),
-        ...((floorData.connections || []).map((connection) => {
-          const start = (floorData.waypoints || []).find((wp) => wp.id === connection.waypoint_a_id);
-          const end = (floorData.waypoints || []).find((wp) => wp.id === connection.waypoint_b_id);
-          if (!start || !end) return null;
-          return {
-            id: connection.id || uuidv4(),
-            kind: "path",
-            type: "path",
-            points: [
-              { x: start.x, y: start.y },
-              { x: end.x, y: end.y },
-            ],
-            bidirectional: true,
-            accessible: false,
-            name: "",
-          };
-        }).filter(Boolean)),
-      ];
-  return {
-    floor: {
-      id: floorData.id,
-      name: floorData.name,
-      level: floorData.level ?? 0,
-      width: entry?.width || floorData.floor_plan_width || 1200,
-      height: entry?.height || floorData.floor_plan_height || 800,
-      bg: entry?.backgroundDataUrl || entry?.bgImage || null,
-    },
-    elements,
-    pixelsPerMeter:
-      floorData.map_data?.pixelsPerMeter ?? floorData.scale_pixels_per_meter ?? null,
-    showGrid: floorData.map_data?.showGrid ?? true,
-    showLabels: floorData.map_data?.showLabels ?? true,
-    snapToGrid: floorData.map_data?.snapToGrid ?? true,
-    overlayBounds: normalizeOverlayBounds(entry?.overlayBounds),
-    geo: {
-      corners: entry?.corners || floorData.map_data?.georeference?.corners || [],
-      georeference: entry?.georeference || floorData.map_data?.georeference || null,
-    },
-    threeD: {
-      extrusionHeight: entry?.threeD?.extrusionHeight ?? 3.2,
-      wallHeight: entry?.threeD?.wallHeight ?? 3.2,
-    },
-  };
-}
-
-function navigationIssues(model) {
-  const rooms = model.elements.filter((element) => element.kind === "room");
-  const waypoints = model.elements.filter((element) => element.kind === "waypoint");
-  const paths = model.elements.filter((element) => element.kind === "path");
-  const beacons = model.elements.filter((element) => element.kind === "beacon");
-  const overlayBounds = cleanOverlayBounds(model.overlayBounds);
-  const issues = [];
-
-  if (!rooms.length) issues.push("Add at least one room or POI.");
-  if (rooms.some((room) => !String(room.name || "").trim())) {
-    issues.push("Name all rooms so users can search them.");
-  }
-  if (rooms.length && !waypoints.length) issues.push("Add waypoints for routing.");
-  if (waypoints.length > 1 && !paths.length) {
-    issues.push("Connect waypoints with at least one path.");
-  }
-  if (!overlayBounds && !model.geo?.corners?.length) {
-    issues.push("Complete world position before publishing this floor.");
-  }
-  if (!beacons.length) {
-    issues.push("Place BLE beacons to prepare blue-dot positioning.");
-  }
-
-  return issues;
-}
-
-function editorBounds(model, bgImage) {
-  const boxes = model.elements.map(getBounds);
-  if (bgImage || model.floor.width || model.floor.height) {
-    return {
-      minX: 0,
-      minY: 0,
-      maxX: model.floor.width || bgImage?.naturalWidth || 1200,
-      maxY: model.floor.height || bgImage?.naturalHeight || 800,
-    };
-  }
-  if (!boxes.length) return { minX: 0, minY: 0, maxX: 1200, maxY: 800 };
-  return boxes.reduce(
-    (acc, box) => ({
-      minX: Math.min(acc.minX, box.x),
-      minY: Math.min(acc.minY, box.y),
-      maxX: Math.max(acc.maxX, box.x + box.width),
-      maxY: Math.max(acc.maxY, box.y + box.height),
-    }),
-    {
-      minX: boxes[0].x,
-      minY: boxes[0].y,
-      maxX: boxes[0].x + boxes[0].width,
-      maxY: boxes[0].y + boxes[0].height,
-    },
-  );
-}
-
-function fit(bounds, viewport) {
-  const width = Math.max(1, bounds.maxX - bounds.minX);
-  const height = Math.max(1, bounds.maxY - bounds.minY);
-  const zoom = clamp(
-    Math.min((viewport.width - 112) / width, (viewport.height - 112) / height),
-    MIN_ZOOM,
-    MAX_ZOOM,
-  );
-  return {
-    zoom,
-    x: viewport.width / 2 - ((bounds.minX + bounds.maxX) / 2) * zoom,
-    y: viewport.height / 2 - ((bounds.minY + bounds.maxY) / 2) * zoom,
-  };
-}
-
-function nearestWaypoint(point, waypoints) {
-  let match = null;
-  let best = Infinity;
-  waypoints.forEach((waypoint) => {
-    const value = dist(point, waypoint);
-    if (value < best) {
-      best = value;
-      match = waypoint;
-    }
-  });
-  return best <= LINK_DIST ? match : null;
-}
-
-function containingRoom(point, rooms) {
-  return rooms.find((room) => hit(point, room)) || null;
-}
-
-function serialize(model, bgImage, industryId) {
-  const rooms = model.elements.filter((element) => element.kind === "room");
-  const waypoints = model.elements.filter((element) => element.kind === "waypoint");
-  const dbRooms = rooms.map((room) => ({
-    id: room.id,
-    name: room.name || "Unnamed",
-    type: resolvedRoomType(room),
-    x: Math.round(room.x),
-    y: Math.round(room.y),
-    width: Math.round(room.width),
-    height: Math.round(room.height),
-    color: room.color || null,
-    description: room.description || "",
-    polygon_points: room.shape === "polygon" ? room.points : null,
-  }));
-  const dbWaypoints = waypoints.map((waypoint) => {
-    const room = containingRoom(waypoint, rooms);
-    const roomMeta = room ? getRoomTypeMeta(industryId, resolvedRoomType(room)) : null;
-    const type =
-      waypoint.transitionType === "stairs" || waypoint.transitionType === "elevator"
-        ? waypoint.transitionType
-        : roomMeta?.navRole ||
-          (waypoint.waypointType === "entrance"
-            ? "entrance"
-            : waypoint.waypointType === "destination"
-              ? "room_center"
-              : "corridor");
-    return {
-      id: waypoint.id,
-      x: Math.round(waypoint.x),
-      y: Math.round(waypoint.y),
-      type,
-      room_id: waypoint.waypointType === "destination" ? room?.id || null : null,
-      name: waypoint.name || "",
-      linked_floor_id: waypoint.linkedFloorId || null,
-    };
-  });
-  const dbConnections = [];
-  const seen = new Set();
-  model.elements
-    .filter((element) => element.kind === "path")
-    .forEach((path) => {
-      path.points.forEach((point, index) => {
-        if (!index) return;
-        const a = nearestWaypoint(path.points[index - 1], waypoints);
-        const b = nearestWaypoint(point, waypoints);
-        if (!a || !b || a.id === b.id) return;
-        const key = [a.id, b.id].sort().join(":");
-        if (seen.has(key)) return;
-        seen.add(key);
-        dbConnections.push({
-          id: uuidv4(),
-          waypoint_a_id: a.id,
-          waypoint_b_id: b.id,
-        });
-      });
-    });
-  return {
-    rooms: dbRooms,
-    waypoints: dbWaypoints,
-    connections: dbConnections,
-    map_data: {
-      version: 2,
-      pixelsPerMeter: model.pixelsPerMeter || null,
-      showGrid: model.showGrid,
-      showLabels: model.showLabels,
-      snapToGrid: model.snapToGrid,
-      georeference: model.geo?.georeference || null,
-      floors: [
-        {
-          id: model.floor.id,
-          name: model.floor.name,
-          level: model.floor.level,
-          width: model.floor.width || bgImage?.naturalWidth || 1200,
-          height: model.floor.height || bgImage?.naturalHeight || 800,
-          backgroundDataUrl: model.floor.bg || null,
-          bgImage: model.floor.bg || null,
-          overlayBounds: cleanOverlayBounds(model.overlayBounds),
-          corners: Array.isArray(model.geo?.corners) ? model.geo.corners : [],
-          georeference: model.geo?.georeference || null,
-          threeD: {
-            extrusionHeight: Number.parseFloat(model.threeD?.extrusionHeight) || 3.2,
-            wallHeight: Number.parseFloat(model.threeD?.wallHeight) || 3.2,
-          },
-          elements: model.elements.map((element) => {
-            if (element.kind === "room") {
-              return {
-                id: element.id,
-                kind: "room",
-                type: element.shape === "polygon" ? "polygon" : "rect",
-                shape: element.shape,
-                x: element.x,
-                y: element.y,
-                width: element.width,
-                height: element.height,
-                w: element.width,
-                h: element.height,
-                points: element.points,
-                name: element.name,
-                roomType: element.roomType,
-                customTypeLabel: element.customLabel,
-                customTypeValue: element.customValue,
-                description: element.description,
-                color: element.color,
-                wheelchairAccessible: Boolean(element.wheelchairAccessible),
-                publicAccess: element.publicAccess ?? true,
-                rotation: Number.parseFloat(element.rotation) || 0,
-                shapePreset: element.shapePreset,
-                iconPreset: element.iconPreset,
-                layerIndex: normalizeLayerIndex("room", element.layerIndex),
-              };
-            }
-            if (element.kind === "door") {
-              return {
-                ...element,
-                widthMeters:
-                  element.widthMeters === "" ? "" : Number.parseFloat(element.widthMeters) || "",
-                roomId: element.roomId || null,
-                edge: element.edge || "right",
-                offset: Number.parseFloat(element.offset) || 0.5,
-                routingAnchor: element.routingAnchor ?? true,
-                linkedWaypointId: element.linkedWaypointId || null,
-                layerIndex: normalizeLayerIndex("door", element.layerIndex),
-              };
-            }
-            if (element.kind === "waypoint") {
-              return {
-                id: element.id,
-                kind: "waypoint",
-                type: "waypoint",
-                x: element.x,
-                y: element.y,
-                name: element.name,
-                waypointType: element.waypointType,
-                transitionType: element.transitionType,
-                linkedFloorId: element.linkedFloorId,
-                customWaypointLabel: element.customWaypointLabel,
-                linkedRoomId: element.linkedRoomId || null,
-                linkedDoorId: element.linkedDoorId || null,
-                isAutoRoomWaypoint: Boolean(element.isAutoRoomWaypoint),
-                roomRatioX: element.roomRatioX ?? 0.5,
-                roomRatioY: element.roomRatioY ?? 0.5,
-                layerIndex: normalizeLayerIndex("waypoint", element.layerIndex),
-              };
-            }
-            if (element.kind === "beacon") {
-              return {
-                id: element.id,
-                kind: "beacon",
-                type: "beacon",
-                x: element.x,
-                y: element.y,
-                name: element.name,
-                beaconId: element.beaconId,
-                radiusMeters:
-                  element.radiusMeters === "" ? "" : Number.parseFloat(element.radiusMeters) || 2.5,
-                txPower:
-                  element.txPower === "" ? "" : Number.parseFloat(element.txPower) || -59,
-                notes: element.notes || "",
-                layerIndex: normalizeLayerIndex("beacon", element.layerIndex),
-              };
-            }
-            if (element.kind === "object") {
-              return {
-                ...element,
-                id: ensureUuid(element.id),
-                label: element.label || element.name || "Object",
-                name: element.name || element.label || "",
-                description: element.description || "",
-                photoUrl: element.photoUrl || "",
-                linkedRoomId: element.linkedRoomId || null,
-                layerIndex: normalizeLayerIndex(element.kind, element.layerIndex),
-              };
-            }
-            return {
-              ...element,
-              id: ensureUuid(element.id),
-              layerIndex: normalizeLayerIndex(element.kind, element.layerIndex),
-            };
-          }),
-        },
-      ],
-    },
-    scale_pixels_per_meter: model.pixelsPerMeter || null,
-  };
-}
-
-function autoPack(elements, industryId) {
-  const rooms = elements.filter((element) => element.kind === "room");
-  const doors = elements.filter((element) => element.kind === "door");
-  const waypoints = rooms.map((room) => {
-    const box = getBounds(room);
-    const door =
-      doors.find(
-        (entry) =>
-          entry.x >= box.x - 12 &&
-          entry.x <= box.x + box.width + 12 &&
-          entry.y >= box.y - 12 &&
-          entry.y <= box.y + box.height + 12,
-      ) || null;
-    const meta = getRoomTypeMeta(industryId, resolvedRoomType(room));
-    const anchor = door || roomCenter(room);
-    return {
-      id: uuidv4(),
-      kind: "waypoint",
-      type: "waypoint",
-      x: anchor.x,
-      y: anchor.y,
-      name: room.name || roomLabel(room, industryId),
-      waypointType: meta?.navRole ? "junction" : "destination",
-      transitionType: meta?.navRole || "none",
-      linkedFloorId: null,
-      description: "",
-      linkedRoomId: room.id,
-      linkedDoorId: door?.id || null,
-      isAutoRoomWaypoint: true,
-      roomRatioX: (anchor.x - box.x) / Math.max(box.width, 1),
-      roomRatioY: (anchor.y - box.y) / Math.max(box.height, 1),
-      layerIndex: normalizeLayerIndex("waypoint"),
-    };
-  });
-  const paths = [];
-  const visited = new Set([waypoints[0]?.id]);
-  while (visited.size && visited.size < waypoints.length) {
-    let edge = null;
-    waypoints.forEach((source) => {
-      if (!visited.has(source.id)) return;
-      waypoints.forEach((target) => {
-        if (visited.has(target.id) || source.id === target.id) return;
-        const value = dist(source, target);
-        if (!edge || value < edge.value) edge = { source, target, value };
-      });
-    });
-    if (!edge) break;
-    visited.add(edge.target.id);
-    paths.push({
-      id: uuidv4(),
-      kind: "path",
-      type: "path",
-      points: [
-        { x: edge.source.x, y: edge.source.y },
-        { x: edge.target.x, y: edge.target.y },
-      ],
-      bidirectional: true,
-      accessible: false,
-      name: "",
-      layerIndex: normalizeLayerIndex("path"),
-    });
-  }
-  return { waypoints, paths };
-}
-
-function normalizeModelLinks(model) {
-  const roomsById = new Map(
-    model.elements
-      .filter((element) => element.kind === "room")
-      .map((room) => [room.id, room]),
-  );
-  const waypointsById = new Map(
-    model.elements
-      .filter((element) => element.kind === "waypoint")
-      .map((waypoint) => [waypoint.id, waypoint]),
-  );
-
-  model.elements.forEach((element) => {
-    element.layerIndex = normalizeLayerIndex(element.kind, element.layerIndex);
-    if (element.kind === "room") {
-      element.shapePreset =
-        element.shapePreset || defaultShapePresetForType(resolvedRoomType(element));
-      element.iconPreset =
-        element.iconPreset || defaultIconPresetForType(resolvedRoomType(element));
-    }
-  });
-
-  model.elements
-    .filter((element) => element.kind === "door" && element.roomId)
-    .forEach((door) => {
-      const room = roomsById.get(door.roomId);
-      if (!room) return;
-      const anchor = createRoomDoorPosition(room, door.edge, door.offset);
-      door.x = anchor.x;
-      door.y = anchor.y;
-
-      if (door.routingAnchor && door.linkedWaypointId) {
-        const linkedWaypoint = waypointsById.get(door.linkedWaypointId);
-        if (linkedWaypoint) {
-          linkedWaypoint.x = anchor.x;
-          linkedWaypoint.y = anchor.y;
-          linkedWaypoint.linkedRoomId = room.id;
-          linkedWaypoint.linkedDoorId = door.id;
-          if (!linkedWaypoint.name || linkedWaypoint.name.includes("Door")) {
-            linkedWaypoint.name = `${room.name || "Room"} Door`;
-          }
-        }
-      }
-    });
-
-  model.elements
-    .filter(
-      (element) =>
-        element.kind === "waypoint" &&
-        element.linkedRoomId &&
-        element.isAutoRoomWaypoint &&
-        !element.linkedDoorId,
-    )
-    .forEach((waypoint) => {
-      const room = roomsById.get(waypoint.linkedRoomId);
-      if (!room) return;
-      waypoint.x =
-        room.x + room.width * clamp(waypoint.roomRatioX ?? 0.5, 0.08, 0.92);
-      waypoint.y =
-        room.y + room.height * clamp(waypoint.roomRatioY ?? 0.5, 0.08, 0.92);
-      if (!waypoint.name || waypoint.isAutoRoomWaypoint) {
-        waypoint.name = room.name || "Room Anchor";
-      }
-    });
-
-  return model;
-}
-
-function createRoomWaypoint(room, industryId) {
-  const meta = getRoomTypeMeta(industryId, resolvedRoomType(room));
-  return {
-    id: uuidv4(),
-    kind: "waypoint",
-    type: "waypoint",
-    x: room.x + room.width / 2,
-    y: room.y + room.height / 2,
-    name: room.name || roomLabel(room, industryId),
-    waypointType: meta?.navRole ? "junction" : "destination",
-    transitionType: meta?.navRole || "none",
-    linkedFloorId: null,
-    description: "",
-    customWaypointLabel: "",
-    linkedRoomId: room.id,
-    linkedDoorId: null,
-    isAutoRoomWaypoint: true,
-    roomRatioX: 0.5,
-    roomRatioY: 0.5,
-    layerIndex: normalizeLayerIndex("waypoint"),
-  };
-}
-
-function createManagedDoor(room, index = 0) {
-  const edge = index % 2 === 0 ? "right" : "bottom";
-  const offset = index % 2 === 0 ? 0.5 : 0.35;
-  const anchor = createRoomDoorPosition(room, edge, offset);
-  const doorId = uuidv4();
-  const waypointId = uuidv4();
-
-  return {
-    door: {
-      id: doorId,
-      kind: "door",
-      type: "door",
-      x: anchor.x,
-      y: anchor.y,
-      name: `Door ${index + 1}`,
-      doorType: "main_entrance",
-      widthMeters: "",
-      accessible: false,
-      locked: false,
-      roomId: room.id,
-      edge,
-      offset,
-      routingAnchor: true,
-      linkedWaypointId: waypointId,
-      layerIndex: normalizeLayerIndex("door"),
-    },
-    waypoint: {
-      id: waypointId,
-      kind: "waypoint",
-      type: "waypoint",
-      x: anchor.x,
-      y: anchor.y,
-      name: `${room.name || "Room"} Door`,
-      waypointType: "junction",
-      transitionType: "none",
-      linkedFloorId: null,
-      description: "",
-      customWaypointLabel: "",
-      linkedRoomId: room.id,
-      linkedDoorId: doorId,
-      isAutoRoomWaypoint: false,
-      roomRatioX: 0.5,
-      roomRatioY: 0.5,
-      layerIndex: normalizeLayerIndex("waypoint"),
-    },
-  };
-}
-
-function pathAnchorForPoint(point, elements) {
-  const candidates = elements.filter((element) => element.kind === "waypoint");
-  let best = null;
-  let bestDistance = Infinity;
-
-  candidates.forEach((candidate) => {
-    const value = dist(point, candidate);
-    if (value < bestDistance) {
-      bestDistance = value;
-      best = candidate;
-    }
-  });
-
-  return bestDistance <= PATH_LINK_DIST ? best : null;
-}
-
-function reorderElements(elements, dragId, targetId) {
-  const orderable = elements
-    .filter((element) => REORDERABLE_KINDS.has(element.kind))
-    .sort((left, right) => normalizeLayerIndex(left.kind, left.layerIndex) - normalizeLayerIndex(right.kind, right.layerIndex));
-
-  const dragIndex = orderable.findIndex((element) => element.id === dragId);
-  const targetIndex = orderable.findIndex((element) => element.id === targetId);
-  if (dragIndex === -1 || targetIndex === -1 || dragIndex === targetIndex) return elements;
-
-  const [dragged] = orderable.splice(dragIndex, 1);
-  orderable.splice(targetIndex, 0, dragged);
-
-  const nextLayerMap = new Map(
-    orderable.map((element, index) => [element.id, 100 + index * 20]),
-  );
-
-  return elements.map((element) =>
-    nextLayerMap.has(element.id)
-      ? { ...element, layerIndex: nextLayerMap.get(element.id) }
-      : element,
   );
 }
 
@@ -1648,3054 +494,1389 @@ const MapEditor = forwardRef(function MapEditor(
   {
     floorData,
     floors = [],
-    building = null,
-    buildingIndustry = DEFAULT_INDUSTRY,
     onSave,
     onStateChange,
     previewMode = false,
-    previewView = "2d",
     autoOpenAiMapping = false,
   },
   ref,
 ) {
-  const canvasRef = useRef(null);
-  const wrapRef = useRef(null);
-  const bgInputRef = useRef(null);
-  const jsonInputRef = useRef(null);
-  const actionRef = useRef(null);
-  const panelResizeRef = useRef(null);
-  const historyRef = useRef([]);
-  const futureRef = useRef([]);
-  const didFitRef = useRef(false);
-  const lastLoadedAiFloorRef = useRef(null);
-  const spaceDownRef = useRef(false);
-  const [model, setModel] = useState(() => modelFromFloor(floorData, buildingIndustry));
-  const modelRef = useRef(model);
+  const stageRef = useRef(null);
+  const containerRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const importInputRef = useRef(null);
+
+  const [mvf, setMvf] = useState(() => buildMvfFromFloor(floorData));
   const [tool, setTool] = useState("select");
-  const [shape, setShape] = useState("rect");
-  const [selectionId, setSelectionId] = useState(null);
-  const [draftType, setDraftType] = useState(defaultRoomType(buildingIndustry));
-  const [draftCustomLabel, setDraftCustomLabel] = useState("");
-  const [typeSearch, setTypeSearch] = useState("");
-  const [viewport, setViewport] = useState({ width: 0, height: 0 });
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const [cursor, setCursor] = useState(null);
-  const [polyDraft, setPolyDraft] = useState([]);
-  const [pathDraft, setPathDraft] = useState([]);
-  const [measure, setMeasure] = useState(null);
-  const [bgImage, setBgImage] = useState(null);
+  const [roomShape, setRoomShape] = useState("rectangle");
+  const [roomKind, setRoomKind] = useState("room");
+  const [showBackground, setShowBackground] = useState(true);
+  const [showNavGraph, setShowNavGraph] = useState(true);
+  const [snapEnabled, setSnapEnabled] = useState(true);
+  const [showGrid, setShowGrid] = useState(true);
+  const [selected, setSelected] = useState(null);
+  const [scale, setScale] = useState(1);
+  const [position, setPosition] = useState({ x: 40, y: 40 });
+  const [size, setSize] = useState({ width: 1200, height: 760 });
+  const [drawing, setDrawing] = useState(null);
+  const [polygonDraft, setPolygonDraft] = useState([]);
+  const [pathDraft, setPathDraft] = useState(null);
+  const [history, setHistory] = useState([]);
+  const [future, setFuture] = useState([]);
   const [dirty, setDirty] = useState(false);
-  const [undoCount, setUndoCount] = useState(0);
-  const [redoCount, setRedoCount] = useState(0);
-  const [showHelpPanel, setShowHelpPanel] = useState(false);
-  const [hiddenIds, setHiddenIds] = useState({});
-  const [leftPanelWidth, setLeftPanelWidth] = useState(220);
-  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);
-  const [draggedLayerId, setDraggedLayerId] = useState(null);
-  const [aiTraceModalOpen, setAiTraceModalOpen] = useState(false);
-  const [aiTraceScope, setAiTraceScope] = useState("current_floor");
-  const [aiTraceOptions, setAiTraceOptions] = useState({
-    walls: true,
-    doors: true,
-    windows: true,
-    connections: false,
-    objects: false,
-    locationsOnRooms: false,
-    locationsOnObjects: false,
-    locationsOnConnections: false,
-  });
-  const [aiTraceRunning, setAiTraceRunning] = useState(false);
-  const [aiTraceStep, setAiTraceStep] = useState(0);
-  const [sections, setSections] = useState({
-    draw: true,
-    edit: true,
-    view: true,
-    layers: true,
-    utilities: false,
-  });
-
-  const roomTypes = useMemo(() => {
-    return getRoomTypes(buildingIndustry).filter((entry) => {
-      const value = typeSearch.toLowerCase();
-      return !value || entry.label.toLowerCase().includes(value) || entry.id.includes(value);
-    });
-  }, [buildingIndustry, typeSearch]);
-
-  useEffect(() => {
-    if (autoOpenAiMapping) {
-      setAiTraceModalOpen(true);
-    }
-  }, [autoOpenAiMapping]);
-
-  const visibleElements = useMemo(
-    () =>
-      model.elements
-        .filter((element) => !hiddenIds[element.id])
-        .sort(renderSort),
-    [hiddenIds, model.elements],
+  const [cursor, setCursor] = useState(null);
+  const [backgroundImage, setBackgroundImage] = useState(null);
+  const [aiModalOpen, setAiModalOpen] = useState(false);
+  const [aiStep, setAiStep] = useState(0);
+  const [aiRunning, setAiRunning] = useState(false);
+  const [aiScope, setAiScope] = useState("current_floor");
+  const [aiOptions, setAiOptions] = useState(() =>
+    AI_OPTIONS.reduce(
+      (acc, option) => ({ ...acc, [option.key]: option.defaultValue }),
+      {},
+    ),
   );
 
-  const selected = model.elements.find((element) => element.id === selectionId) || null;
+  const mvfRef = useRef(mvf);
 
   useEffect(() => {
-    const next = modelFromFloor(floorData, buildingIndustry);
-    modelRef.current = normalizeModelLinks(next);
-    setModel(normalizeModelLinks(next));
-    setSelectionId(null);
-    setTool("select");
-    setShape("rect");
-    setDraftType(defaultRoomType(buildingIndustry));
-    setDraftCustomLabel("");
-    setTypeSearch("");
-    setPolyDraft([]);
-    setPathDraft([]);
-    setMeasure(null);
+    mvfRef.current = mvf;
+  }, [mvf]);
+
+  useEffect(() => {
+    const next = buildMvfFromFloor(floorData);
+    setMvf(next);
+    setHistory([]);
+    setFuture([]);
     setDirty(false);
-    setShowHelpPanel(false);
-    setHiddenIds({});
-    setLeftPanelWidth(220);
-    setLeftPanelCollapsed(false);
-    setDraggedLayerId(null);
-    historyRef.current = [];
-    futureRef.current = [];
-    setUndoCount(0);
-    setRedoCount(0);
-    didFitRef.current = false;
-    lastLoadedAiFloorRef.current = null;
-  }, [buildingIndustry, floorData]);
+    setSelected(null);
+    setDrawing(null);
+    setPolygonDraft([]);
+    setPathDraft(null);
+  }, [floorData]);
 
   useEffect(() => {
-    modelRef.current = model;
-  }, [model]);
+    if (!autoOpenAiMapping) return;
+    setAiModalOpen(true);
+  }, [autoOpenAiMapping]);
 
   useEffect(() => {
-    if (!floorData?.id || lastLoadedAiFloorRef.current === floorData.id) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const payload = await api.maps.latestAiTrace(floorData.id);
-        if (cancelled || !payload?.result) return;
-        applyAiTraceResult(payload.result, { silent: true });
-        lastLoadedAiFloorRef.current = floorData.id;
-      } catch {
-        lastLoadedAiFloorRef.current = floorData.id;
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [floorData?.id]);
-
-  useEffect(() => {
-    function handlePointerMove(event) {
-      if (!panelResizeRef.current || window.innerWidth <= 900) return;
-      const nextWidth = clamp(event.clientX, LEFT_PANEL_COLLAPSE, LEFT_PANEL_MAX);
-      if (nextWidth <= LEFT_PANEL_COLLAPSE) {
-        setLeftPanelCollapsed(true);
-        setLeftPanelWidth(LEFT_PANEL_MIN);
-        return;
-      }
-      setLeftPanelCollapsed(false);
-      setLeftPanelWidth(clamp(nextWidth, LEFT_PANEL_MIN, LEFT_PANEL_MAX));
-    }
-
-    function handlePointerUp() {
-      panelResizeRef.current = null;
-    }
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
-    };
-  }, []);
-
-  useEffect(() => {
-    if (selectionId && hiddenIds[selectionId]) {
-      setSelectionId(null);
-    }
-  }, [hiddenIds, selectionId]);
-
-  useEffect(() => {
-    const source = model.floor.bg || floorData?.floor_plan_url || null;
+    const source = floorData?.floor_plan_url || null;
     if (!source) {
-      setBgImage(null);
-      return undefined;
+      setBackgroundImage(null);
+      return;
     }
     let cancelled = false;
-    const image = new Image();
+    const image = new window.Image();
     image.crossOrigin = "anonymous";
-    image.onload = () => !cancelled && setBgImage(image);
-    image.onerror = () => !cancelled && setBgImage(null);
+    image.onload = () => {
+      if (!cancelled) setBackgroundImage(image);
+    };
+    image.onerror = () => {
+      if (!cancelled) setBackgroundImage(null);
+    };
     image.src = source;
     return () => {
       cancelled = true;
     };
-  }, [floorData?.floor_plan_url, model.floor.bg]);
+  }, [floorData?.floor_plan_url]);
 
   useEffect(() => {
-    if (!wrapRef.current) return undefined;
+    if (!containerRef.current) return;
     const observer = new ResizeObserver((entries) => {
       const entry = entries[0];
       if (!entry) return;
-      setViewport({
+      setSize({
         width: entry.contentRect.width,
         height: entry.contentRect.height,
       });
     });
-    observer.observe(wrapRef.current);
+    observer.observe(containerRef.current);
     return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return undefined;
-
-    const handleWheel = (event) => {
-      event.preventDefault();
-      const rect = canvas.getBoundingClientRect();
-      zoomBy(event.deltaY > 0 ? 0.9 : 1.1, {
-        x: event.clientX - rect.left,
-        y: event.clientY - rect.top,
-      });
+    const keyHandler = (event) => {
+      const key = event.key.toLowerCase();
+      if (event.ctrlKey && key === "z") {
+        event.preventDefault();
+        undo();
+        return;
+      }
+      if (event.ctrlKey && key === "y") {
+        event.preventDefault();
+        redo();
+        return;
+      }
+      const nextTool = TOOL_KEYS[key];
+      if (nextTool && !previewMode) {
+        event.preventDefault();
+        setTool(nextTool);
+      }
     };
+    window.addEventListener("keydown", keyHandler);
+    return () => window.removeEventListener("keydown", keyHandler);
+  }, [previewMode]);
 
-    canvas.addEventListener("wheel", handleWheel, { passive: false });
-    return () => canvas.removeEventListener("wheel", handleWheel);
-  }, [zoom, pan]);
-
-  function commit(next, track = true) {
-    const normalizedNext = normalizeModelLinks(next);
-    if (track) {
-      historyRef.current = [...historyRef.current, clone(modelRef.current)].slice(-60);
-      futureRef.current = [];
-      setUndoCount(historyRef.current.length);
-      setRedoCount(0);
+  const wallEndpoints = useMemo(() => {
+    const points = [];
+    for (const wall of mvf.obstructions.features) {
+      const coordinates = wall.geometry?.coordinates || [];
+      if (coordinates.length < 2) continue;
+      points.push(toPointFromCoords(coordinates[0]));
+      points.push(toPointFromCoords(coordinates[1]));
     }
-    modelRef.current = normalizedNext;
-    setModel(normalizedNext);
+    return points;
+  }, [mvf.obstructions.features]);
+
+  const nodeMap = useMemo(() => {
+    return new Map(mvf.nodes.features.map((feature) => [feature.id, feature]));
+  }, [mvf.nodes.features]);
+
+  const navEdges = useMemo(
+    () => dedupeEdges(mvf.nodes.features),
+    [mvf.nodes.features],
+  );
+
+  const counts = useMemo(
+    () => ({
+      rooms: mvf.spaces.features.length,
+      waypoints: mvf.nodes.features.length,
+      paths: navEdges.length,
+      doors: mvf.openings.features.filter(
+        (feature) => feature.properties?.kind === "door",
+      ).length,
+      beacons: 0,
+    }),
+    [mvf, navEdges],
+  );
+
+  function pushHistory(nextState) {
+    setHistory((current) => [...current, deepClone(nextState)].slice(-80));
+    setFuture([]);
     setDirty(true);
   }
 
-  function mutate(recipe, track = true) {
-    const next = clone(modelRef.current);
-    recipe(next);
-    commit(next, track);
-  }
-
-  function fitView() {
-    if (!viewport.width || !viewport.height) return;
-    const next = fit(editorBounds(modelRef.current, bgImage), viewport);
-    setZoom(next.zoom);
-    setPan({ x: next.x, y: next.y });
-  }
-
-  useEffect(() => {
-    if (!viewport.width || !viewport.height || didFitRef.current) return;
-    fitView();
-    didFitRef.current = true;
-  }, [bgImage, viewport]);
-
-  function undo() {
-    if (!historyRef.current.length) return;
-    const previous = normalizeModelLinks(
-      historyRef.current[historyRef.current.length - 1],
-    );
-    historyRef.current = historyRef.current.slice(0, -1);
-    futureRef.current = [clone(modelRef.current), ...futureRef.current].slice(0, 60);
-    modelRef.current = previous;
-    setModel(previous);
-    setSelectionId(null);
-    setDirty(true);
-    setUndoCount(historyRef.current.length);
-    setRedoCount(futureRef.current.length);
-  }
-
-  function redo() {
-    if (!futureRef.current.length) return;
-    const [next, ...rest] = futureRef.current;
-    futureRef.current = rest;
-    historyRef.current = [...historyRef.current, clone(modelRef.current)].slice(-60);
-    modelRef.current = normalizeModelLinks(next);
-    setModel(normalizeModelLinks(next));
-    setSelectionId(null);
-    setDirty(true);
-    setUndoCount(historyRef.current.length);
-    setRedoCount(futureRef.current.length);
-  }
-
-  function activate(nextTool) {
-    if (previewMode && nextTool !== "select") {
-      setTool("select");
-      return;
-    }
-    setTool(nextTool);
-    setPolyDraft([]);
-    setPathDraft([]);
-    setCursor(null);
-    if (nextTool !== "measure") setMeasure(null);
-  }
-
-  function pointFromEvent(event) {
-    const box = canvasRef.current.getBoundingClientRect();
-    const x = event.clientX - box.left;
-    const y = event.clientY - box.top;
-    return {
-      canvasX: x,
-      canvasY: y,
-      worldX: (x - pan.x) / zoom,
-      worldY: (y - pan.y) / zoom,
-      x: snap((x - pan.x) / zoom, modelRef.current.snapToGrid),
-      y: snap((y - pan.y) / zoom, modelRef.current.snapToGrid),
-    };
-  }
-
-  function hitElement(point) {
-    return [...visibleElements].reverse().find((element) => hit(point, element)) || null;
-  }
-
-  function removeSelected(targetId = selectionId) {
-    if (!targetId) return;
-    mutate((next) => {
-      const removed = next.elements.find((element) => element.id === targetId);
-      const idsToRemove = new Set([targetId]);
-
-      if (removed?.kind === "room") {
-        next.elements.forEach((element) => {
-          if (
-            (element.kind === "door" && element.roomId === removed.id) ||
-            (element.kind === "waypoint" && element.linkedRoomId === removed.id)
-          ) {
-            idsToRemove.add(element.id);
-          }
-        });
+  function updateMvf(updater, track = true) {
+    setMvf((current) => {
+      const next = deepClone(current);
+      updater(next);
+      if (track) {
+        setHistory((prevHistory) =>
+          [...prevHistory, deepClone(current)].slice(-80),
+        );
+        setFuture([]);
+        setDirty(true);
       }
-
-      if (removed?.kind === "door" && removed.linkedWaypointId) {
-        idsToRemove.add(removed.linkedWaypointId);
-      }
-
-      if (removed?.kind === "waypoint" && removed.linkedDoorId) {
-        idsToRemove.add(removed.linkedDoorId);
-      }
-
-      next.elements = next.elements.filter((element) => !idsToRemove.has(element.id));
-    });
-    setSelectionId(null);
-  }
-
-  function addElement(element) {
-    mutate((next) => {
-      next.elements.push(element);
-    });
-    setSelectionId(element.id);
-    setShowHelpPanel(false);
-  }
-
-  function updateElement(id, recipe, track = false) {
-    if (previewMode) return;
-    const next = clone(modelRef.current);
-    const target = next.elements.find((element) => element.id === id);
-    if (!target) return;
-    recipe(target);
-    commit(next, track);
-  }
-
-  function updateOverlayBound(key, value) {
-    if (previewMode) return;
-    mutate((next) => {
-      if (!next.overlayBounds) {
-        next.overlayBounds = normalizeOverlayBounds();
-      }
-      next.overlayBounds[key] = value === "" ? "" : value;
-    }, false);
-  }
-
-  function prefillOverlayFromEntrance() {
-    const estimate = estimatedOverlayBoundsFromEntrance(building);
-    if (!estimate) {
-      toast.error("Use Position on World to georeference this floor.");
-      return;
-    }
-
-    mutate((next) => {
-      next.overlayBounds = estimate;
-    }, false);
-    toast.success("Approximate bounds added. Finish Position on World for accurate placement.");
-  }
-
-  function toggleVisibility(id) {
-    setHiddenIds((current) => {
-      const next = { ...current };
-      if (next[id]) delete next[id];
-      else next[id] = true;
       return next;
     });
   }
 
-  function toggleSection(id) {
-    setSections((current) => ({ ...current, [id]: !current[id] }));
-  }
-
-  function moveLayer(elementId, direction) {
-    mutate((next) => {
-      const ordered = next.elements
-        .filter((element) => REORDERABLE_KINDS.has(element.kind))
-        .sort(
-          (left, right) =>
-            normalizeLayerIndex(left.kind, left.layerIndex) -
-            normalizeLayerIndex(right.kind, right.layerIndex),
-        );
-      const index = ordered.findIndex((element) => element.id === elementId);
-      if (index === -1) return;
-      const targetIndex = clamp(index + direction, 0, ordered.length - 1);
-      if (targetIndex === index) return;
-      const [item] = ordered.splice(index, 1);
-      ordered.splice(targetIndex, 0, item);
-      const nextLayerMap = new Map(
-        ordered.map((element, entryIndex) => [element.id, 100 + entryIndex * 20]),
+  function undo() {
+    setHistory((current) => {
+      if (!current.length) return current;
+      const previous = current[current.length - 1];
+      setFuture((futureState) =>
+        [deepClone(mvfRef.current), ...futureState].slice(0, 80),
       );
-      next.elements = next.elements.map((element) =>
-        nextLayerMap.has(element.id)
-          ? { ...element, layerIndex: nextLayerMap.get(element.id) }
-          : element,
-      );
+      setMvf(deepClone(previous));
+      setDirty(true);
+      return current.slice(0, -1);
     });
+    setSelected(null);
   }
 
-  function saveRoom(bounds, points = []) {
-    const room = {
-      id: uuidv4(),
-      kind: "room",
-      type: shape === "polygon" ? "polygon" : "rect",
-      shape,
-      x: bounds.x,
-      y: bounds.y,
-      width: bounds.width,
-      height: bounds.height,
-      points,
-      name: "",
-      roomType: draftType,
-      customLabel: draftType === "custom" ? draftCustomLabel.trim() : "",
-      customValue: draftType === "custom" ? slugify(draftCustomLabel) : "",
-      description: "",
-      color: "",
-      wheelchairAccessible: false,
-      publicAccess: true,
-      rotation: 0,
-      shapePreset: defaultShapePresetForType(
-        draftType === "custom" ? slugify(draftCustomLabel) : draftType,
-      ),
-      iconPreset: defaultIconPresetForType(
-        draftType === "custom" ? slugify(draftCustomLabel) : draftType,
-      ),
-      layerIndex: normalizeLayerIndex("room"),
+  function redo() {
+    setFuture((current) => {
+      if (!current.length) return current;
+      const [next, ...rest] = current;
+      setHistory((historyState) =>
+        [...historyState, deepClone(mvfRef.current)].slice(-80),
+      );
+      setMvf(deepClone(next));
+      setDirty(true);
+      return rest;
+    });
+    setSelected(null);
+  }
+
+  function stagePoint() {
+    const stage = stageRef.current;
+    if (!stage) return null;
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return null;
+    return {
+      x: (pointer.x - position.x) / scale,
+      y: (pointer.y - position.y) / scale,
     };
-    const waypoint = createRoomWaypoint(room, buildingIndustry);
-    mutate((next) => {
-      next.elements.push(room, waypoint);
-    });
-    setSelectionId(room.id);
-    setShowHelpPanel(false);
   }
 
-  function zoomBy(factor, anchor) {
-    const nextZoom = clamp(zoom * factor, MIN_ZOOM, MAX_ZOOM);
-    if (!anchor) {
-      setZoom(nextZoom);
-      return;
-    }
-    const wx = (anchor.x - pan.x) / zoom;
-    const wy = (anchor.y - pan.y) / zoom;
-    setZoom(nextZoom);
-    setPan({ x: anchor.x - wx * nextZoom, y: anchor.y - wy * nextZoom });
+  function snappedPoint(rawPoint) {
+    if (!rawPoint) return null;
+    const endpoint = snapEnabled ? nearest(wallEndpoints, rawPoint, 10) : null;
+    if (endpoint) return endpoint;
+    return {
+      x: snapEnabled ? Math.round(rawPoint.x) : rawPoint.x,
+      y: snapEnabled ? Math.round(rawPoint.y) : rawPoint.y,
+    };
   }
 
-  function validate() {
-    const rooms = modelRef.current.elements.filter((element) => element.kind === "room");
-    const waypoints = modelRef.current.elements.filter((element) => element.kind === "waypoint");
-    const paths = modelRef.current.elements.filter((element) => element.kind === "path");
-    const issues = [];
-    if (rooms.some((room) => !room.name.trim())) issues.push("Some rooms still need names.");
-    if (rooms.some((room) => room.roomType === "custom" && !room.customLabel.trim())) {
-      issues.push("Some custom room types still need labels.");
-    }
-    if (rooms.length && !waypoints.length) issues.push("No waypoints yet.");
-    if (waypoints.length > 1 && !paths.length) issues.push("Waypoints are not connected by paths.");
-    if (!modelRef.current.pixelsPerMeter) issues.push("Scale is not set.");
-    if (issues.length) toast.error(issues.join(" "));
-    else toast.success("Map validation passed.");
-  }
-
-  function autoWaypoints() {
-    const rooms = modelRef.current.elements.filter((element) => element.kind === "room");
-    if (!rooms.length) {
-      toast.error("Add at least one room first.");
-      return;
-    }
-    const pack = autoPack(modelRef.current.elements, buildingIndustry);
-    mutate((next) => {
-      next.elements = next.elements.filter(
-        (element) => element.kind !== "waypoint" && element.kind !== "path",
-      );
-      next.elements.push(...pack.waypoints, ...pack.paths);
-    });
-    toast.success("Waypoints and paths generated.");
-  }
-
-  function applyAiTraceResult(traced, { silent = false } = {}) {
-    const nextRooms = (traced.rooms || []).map((entry, index) =>
-      normalizeElement(
-        {
-          id: entry.id,
-          kind: "room",
-          type: entry.polygon?.length >= 3 ? "polygon" : "rect",
-          shape: entry.polygon?.length >= 3 ? "polygon" : "rect",
-          x: entry.x,
-          y: entry.y,
-          width: entry.width,
-          height: entry.height,
-          points: entry.polygon || [],
-          name: entry.name || `Room ${index + 1}`,
-          roomType: entry.roomType || defaultRoomType(buildingIndustry),
-          aiGenerated: true,
+  function addWall(start, end) {
+    updateMvf((next) => {
+      next.obstructions.features.push({
+        type: "Feature",
+        id: uuidv4(),
+        properties: { kind: "wall", thickness: 4 },
+        geometry: {
+          type: "LineString",
+          coordinates: [toCoords(start), toCoords(end)],
         },
-        buildingIndustry,
-      ),
-    );
+      });
+    });
+  }
 
-    const nodeMap = new Map();
-    const nextWaypoints = (traced.nodes || []).map((entry, index) => {
-      const waypoint = normalizeElement(
-        {
-          id: entry.id,
+  function addRectRoom(start, end) {
+    const x1 = Math.min(start.x, end.x);
+    const y1 = Math.min(start.y, end.y);
+    const x2 = Math.max(start.x, end.x);
+    const y2 = Math.max(start.y, end.y);
+    if (Math.abs(x2 - x1) < 6 || Math.abs(y2 - y1) < 6) return;
+
+    const polygon = [
+      [x1, y1],
+      [x2, y1],
+      [x2, y2],
+      [x1, y2],
+      [x1, y1],
+    ];
+
+    updateMvf((next) => {
+      next.spaces.features.push({
+        type: "Feature",
+        id: uuidv4(),
+        properties: {
+          kind: roomKind,
+          name: roomKind === "corridor" ? "Corridor" : "Room",
+          category: roomKind,
+          color: roomKind === "corridor" ? "#D3D3D3" : "#9370DB",
+          entrances: [],
+        },
+        geometry: { type: "Polygon", coordinates: [polygon] },
+      });
+    });
+  }
+
+  function addPolygonRoom(points) {
+    if (points.length < 3) return;
+    const ring = points.map(toCoords);
+    const closed =
+      ring[0][0] === ring[ring.length - 1][0] &&
+      ring[0][1] === ring[ring.length - 1][1]
+        ? ring
+        : [...ring, ring[0]];
+
+    updateMvf((next) => {
+      next.spaces.features.push({
+        type: "Feature",
+        id: uuidv4(),
+        properties: {
+          kind: roomKind,
+          name: roomKind === "corridor" ? "Corridor" : "Room",
+          category: roomKind,
+          color: roomKind === "corridor" ? "#D3D3D3" : "#9370DB",
+          entrances: [],
+        },
+        geometry: { type: "Polygon", coordinates: [closed] },
+      });
+    });
+  }
+
+  function addOpening(point, kind) {
+    const closest = nearest(
+      mvf.obstructions.features.flatMap((wall) => {
+        const coords = wall.geometry?.coordinates;
+        if (!coords || coords.length < 2) return [];
+        const a = toPointFromCoords(coords[0]);
+        const b = toPointFromCoords(coords[1]);
+        const center = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
+        return [center];
+      }),
+      point,
+      120,
+    );
+    const placement = closest || point;
+
+    updateMvf((next) => {
+      next.openings.features.push({
+        type: "Feature",
+        id: uuidv4(),
+        properties: {
+          kind,
+          width: kind === "door" ? 40 : 30,
+          rotation: 0,
+        },
+        geometry: { type: "Point", coordinates: [placement.x, placement.y] },
+      });
+    });
+  }
+
+  function addWaypoint(point) {
+    updateMvf((next) => {
+      next.nodes.features.push({
+        type: "Feature",
+        id: uuidv4(),
+        properties: {
           kind: "waypoint",
-          x: entry.x,
-          y: entry.y,
-          name: entry.roomId ? "" : entry.type || `Node ${index + 1}`,
-          waypointType: entry.type === "room" ? "destination" : "junction",
-          linkedRoomId: entry.roomId || null,
-          aiGenerated: true,
+          spaceId: null,
+          neighbors: [],
         },
-        buildingIndustry,
-      );
-      nodeMap.set(entry.id, waypoint);
-      return waypoint;
+        geometry: { type: "Point", coordinates: [point.x, point.y] },
+      });
     });
-
-    const nextConnections = (traced.edges || [])
-      .map((entry) => {
-        const start = nodeMap.get(entry.from);
-        const end = nodeMap.get(entry.to);
-        if (!start || !end) return null;
-        return normalizeElement(
-          {
-            id: entry.id,
-            kind: "path",
-            points: [
-              { x: start.x, y: start.y },
-              { x: end.x, y: end.y },
-            ],
-            bidirectional: true,
-            accessible: false,
-            name: "",
-            aiGenerated: true,
-          },
-          buildingIndustry,
-        );
-      })
-      .filter(Boolean);
-
-    const nextDoors = (traced.doors || []).map((entry) =>
-      normalizeElement(
-        {
-          id: entry.id,
-          kind: "door",
-          x: entry.x,
-          y: entry.y,
-          name: "Door",
-          doorType: "main_entrance",
-          angle: Number(entry.angle) || 0,
-          width: Number(entry.width) || 22,
-          aiGenerated: true,
-        },
-        buildingIndustry,
-      ),
-    );
-
-    const nextWalls = (traced.walls || []).map((entry) =>
-      normalizeElement(
-        {
-          id: entry.id,
-          kind: "wall",
-          x1: entry.x1,
-          y1: entry.y1,
-          x2: entry.x2,
-          y2: entry.y2,
-          thickness: entry.thickness,
-          aiGenerated: true,
-        },
-        buildingIndustry,
-      ),
-    );
-
-    const nextWindows = (traced.windows || []).map((entry) =>
-      normalizeElement(
-        {
-          id: entry.id,
-          kind: "window",
-          x: entry.x,
-          y: entry.y,
-          width: entry.width,
-          angle: Number(entry.angle) || 0,
-          aiGenerated: true,
-        },
-        buildingIndustry,
-      ),
-    );
-
-    const nextObjects = (traced.objects || []).map((entry) =>
-      normalizeElement(
-        {
-          id: entry.id,
-          kind: "object",
-          x: entry.x,
-          y: entry.y,
-          label: entry.label,
-          objectType: entry.type,
-          description: entry.description || "",
-          photoUrl: entry.photoUrl || entry.photo_url || "",
-          linkedRoomId: entry.roomId || entry.linkedRoomId || null,
-          iconPreset: defaultIconPresetForType(entry.type || "info"),
-          aiGenerated: true,
-        },
-        buildingIndustry,
-      ),
-    );
-
-    mutate((next) => {
-      next.elements = next.elements.filter(
-        (element) =>
-          ![
-            "room",
-            "wall",
-            "window",
-            "door",
-            "waypoint",
-            "path",
-            "object",
-          ].includes(element.kind),
-      );
-      next.elements.push(
-        ...nextWalls,
-        ...nextRooms,
-        ...nextWindows,
-        ...nextDoors,
-        ...nextWaypoints,
-        ...nextConnections,
-        ...nextObjects,
-      );
-    }, silent);
   }
 
-  async function runAiTrace() {
-    if (!floorData?.id) {
-      toast.error("Save the floor record before running auto trace.");
-      return;
-    }
+  function connectWaypoints(aId, bId) {
+    if (!aId || !bId || aId === bId) return;
+    updateMvf((next) => {
+      const source = next.nodes.features.find((feature) => feature.id === aId);
+      const target = next.nodes.features.find((feature) => feature.id === bId);
+      if (!source || !target) return;
 
-    if (
-      modelRef.current.elements.some((element) => element.kind === "room") &&
-      !window.confirm(
-        "Replace the current drafted rooms, doors, waypoints, and paths with a new auto-traced draft?",
-      )
-      ) {
-      return;
-    }
+      const sourcePoint = toPointFromCoords(source.geometry.coordinates);
+      const targetPoint = toPointFromCoords(target.geometry.coordinates);
+      const weight = Math.round(
+        Math.hypot(
+          sourcePoint.x - targetPoint.x,
+          sourcePoint.y - targetPoint.y,
+        ),
+      );
 
-    let stepTimer = null;
-    try {
-      setAiTraceRunning(true);
-      setAiTraceStep(0);
-      stepTimer = window.setInterval(() => {
-        setAiTraceStep((current) => Math.min(current + 1, AI_TRACE_STEPS.length - 2));
-      }, 550);
-
-      const formData = new FormData();
-      formData.append("floor_id", floorData.id);
-      formData.append("scope", aiTraceScope);
-      formData.append("options", JSON.stringify(aiTraceOptions));
-
-      const tracedPayload = await api.maps.aiTrace(formData);
-      window.clearInterval(stepTimer);
-      setAiTraceStep(AI_TRACE_STEPS.length - 1);
-
-      const traced = tracedPayload?.result || tracedPayload;
-      const resultSet = tracedPayload?.results || [];
-      if (
-        !traced?.rooms?.length &&
-        !traced?.walls?.length &&
-        !traced?.doors?.length
-      ) {
-        toast.error(
-          "AI mapping could not detect enough floor geometry from this plan. Try georeferencing it first or upload a clearer plan.",
-        );
-        return;
+      const sourceNeighbors = Array.isArray(source.properties.neighbors)
+        ? source.properties.neighbors
+        : [];
+      const targetNeighbors = Array.isArray(target.properties.neighbors)
+        ? target.properties.neighbors
+        : [];
+      if (!sourceNeighbors.some((entry) => entry.id === target.id)) {
+        sourceNeighbors.push({ id: target.id, weight });
+      }
+      if (!targetNeighbors.some((entry) => entry.id === source.id)) {
+        targetNeighbors.push({ id: source.id, weight });
       }
 
-      applyAiTraceResult(traced);
-      if (aiTraceScope === "all_floors" && resultSet.length > 1) {
-        toast.success(
-          `AI mapping completed for ${resultSet.length} floors. Loaded results for the current floor.`,
-        );
-      }
-      setAiTraceModalOpen(false);
-      toast.success(
-        `AI mapping detected ${traced.rooms?.length || 0} rooms, ${traced.walls?.length || 0} walls, and ${traced.doors?.length || 0} doors. Review everything before publishing.`,
+      source.properties.neighbors = sourceNeighbors;
+      target.properties.neighbors = targetNeighbors;
+    });
+  }
+
+  function removeSelection() {
+    if (!selected) return;
+    updateMvf((next) => {
+      next.spaces.features = next.spaces.features.filter(
+        (feature) => feature.id !== selected,
       );
-    } catch (error) {
-      toast.error(error.message || "Unable to auto trace this floor plan.");
-    } finally {
-      if (stepTimer) window.clearInterval(stepTimer);
-      setAiTraceRunning(false);
-      window.setTimeout(() => setAiTraceStep(0), 300);
-    }
-  }
-
-  function openAiTraceModal() {
-    setAiTraceModalOpen(true);
-  }
-
-  async function downloadRoomQr(room) {
-    if (!room?.id) return;
-    try {
-      const payload = await api.qr.room(room.id);
-      if (!payload?.qr) {
-        toast.error("QR code is not available for this room yet.");
-        return;
-      }
-      downloadDataUrl(
-        payload.qr,
-        `${sanitizeFilename(room.name || roomLabel(room, buildingIndustry) || "room")}-qr.png`,
+      next.obstructions.features = next.obstructions.features.filter(
+        (feature) => feature.id !== selected,
       );
-      toast.success("Room QR downloaded");
-    } catch (error) {
-      toast.error(error.message || "Save the map first so this room can get a QR code.");
-    }
+      next.openings.features = next.openings.features.filter(
+        (feature) => feature.id !== selected,
+      );
+      next.objects.features = next.objects.features.filter(
+        (feature) => feature.id !== selected,
+      );
+      next.nodes.features = next.nodes.features.filter(
+        (feature) => feature.id !== selected,
+      );
+      for (const node of next.nodes.features) {
+        node.properties.neighbors = ensureArray(
+          node.properties.neighbors,
+        ).filter((entry) => entry.id !== selected);
+      }
+    });
+    setSelected(null);
   }
 
-  function uploadBackground(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      const src = String(reader.result || "");
-      const image = new Image();
-      image.onload = () => {
-        mutate((next) => {
-          next.floor.bg = src;
-          next.floor.width = image.naturalWidth;
-          next.floor.height = image.naturalHeight;
-        });
-        setBgImage(image);
-        didFitRef.current = false;
-      };
-      image.src = src;
-    };
-    reader.readAsDataURL(file);
-    event.target.value = "";
+  function selectedFeature() {
+    const all = [
+      ...mvf.spaces.features,
+      ...mvf.obstructions.features,
+      ...mvf.openings.features,
+      ...mvf.objects.features,
+      ...mvf.nodes.features,
+    ];
+    return all.find((feature) => feature.id === selected) || null;
   }
 
-  function importJson(event) {
-    const file = event.target.files?.[0];
-    if (!file) return;
+  function exportMvf() {
+    const blob = new Blob([JSON.stringify(mvf, null, 2)], {
+      type: "application/json",
+    });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${floorData?.name || "floor"}-mvf.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function importMvf(file) {
     const reader = new FileReader();
     reader.onload = () => {
       try {
         const parsed = JSON.parse(String(reader.result || "{}"));
-        const next = modelFromFloor(
-          { ...floorData, map_data: parsed, rooms: [], waypoints: [], connections: [] },
-          buildingIndustry,
-        );
-        modelRef.current = next;
-        setModel(next);
-        setSelectionId(null);
+        if (!isMvf(parsed)) throw new Error("Invalid MVF JSON");
+        setMvf(parsed);
+        setHistory([]);
+        setFuture([]);
         setDirty(true);
-        historyRef.current = [];
-        futureRef.current = [];
-        setUndoCount(0);
-        setRedoCount(0);
-        didFitRef.current = false;
-        toast.success("Editor JSON imported.");
-      } catch {
-        toast.error("Invalid map JSON.");
+        toast.success("MVF imported.");
+      } catch (error) {
+        toast.error(error.message || "Failed to import MVF");
       }
     };
     reader.readAsText(file);
-    event.target.value = "";
   }
 
-  function exportJson() {
-    const payload = serialize(modelRef.current, bgImage, buildingIndustry);
-    const blob = new Blob([JSON.stringify(payload.map_data, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = url;
-    link.download = `${modelRef.current.floor.name || "floor"}-map.json`;
-    link.click();
-    URL.revokeObjectURL(url);
-  }
-
-  async function save() {
-    const payload = serialize(modelRef.current, bgImage, buildingIndustry);
-    if (onSave) await onSave(payload);
+  async function saveMap() {
+    if (!onSave) return;
+    const payload = buildSavePayload(mvfRef.current);
+    await onSave(payload);
     setDirty(false);
-    return payload;
   }
 
-  useImperativeHandle(
-    ref,
-    () => ({
-      save,
-      undo,
-      redo,
-      zoomIn: () => zoomBy(1.15),
-      zoomOut: () => zoomBy(1 / 1.15),
-      setZoom: (value) => setZoom(clamp(value, MIN_ZOOM, MAX_ZOOM)),
-      fitToScreen: fitView,
-      setTool: activate,
-      deleteSelection: removeSelected,
-      toggleGrid: () => mutate((next) => { next.showGrid = !next.showGrid; }, false),
-      toggleSnap: () => mutate((next) => { next.snapToGrid = !next.snapToGrid; }, false),
-      toggleLabels: () => mutate((next) => { next.showLabels = !next.showLabels; }, false),
-      setRoomShape: setShape,
-      selectElement: (id) => {
-        setSelectionId(id || null);
-        setShowHelpPanel(false);
-        if (id) setTool("select");
-      },
-      getState: () => ({
-        tool,
-        zoom,
-        dirty,
-        canUndo: historyRef.current.length > 0,
-        canRedo: futureRef.current.length > 0,
-        selectedElement: selected,
-        showGrid: modelRef.current.showGrid,
-        showLabels: modelRef.current.showLabels,
-        snapToGrid: modelRef.current.snapToGrid,
-        cursor,
-        overlayBounds: modelRef.current.overlayBounds,
-        issues: navigationIssues(modelRef.current),
-      }),
-    }),
-    [cursor, dirty, selected, tool, zoom],
-  );
+  function autoGenerateWaypoints() {
+    updateMvf((next) => {
+      const nodes = [];
+      for (const space of next.spaces.features) {
+        const points = roomPolygon(space);
+        const center = polygonCenter(points);
+        nodes.push({
+          type: "Feature",
+          id: uuidv4(),
+          properties: {
+            kind: "waypoint",
+            spaceId: space.id,
+            neighbors: [],
+          },
+          geometry: { type: "Point", coordinates: [center.x, center.y] },
+        });
+      }
 
-  function finalizePathDraft() {
-    if (pathDraft.length < 2) return false;
-    addElement({
-      id: uuidv4(),
-      kind: "path",
-      type: "path",
-      points: pathDraft,
-      bidirectional: true,
-      accessible: false,
-      name: "",
-      staffOnly: false,
-      layerIndex: normalizeLayerIndex("path"),
+      for (const node of nodes) {
+        const currentPoint = toPointFromCoords(node.geometry.coordinates);
+        const nearby = nodes
+          .filter((entry) => entry.id !== node.id)
+          .map((entry) => ({
+            node: entry,
+            distance: Math.hypot(
+              currentPoint.x - entry.geometry.coordinates[0],
+              currentPoint.y - entry.geometry.coordinates[1],
+            ),
+          }))
+          .sort((a, b) => a.distance - b.distance)
+          .slice(0, 2);
+
+        node.properties.neighbors = nearby.map((entry) => ({
+          id: entry.node.id,
+          weight: Math.round(entry.distance),
+        }));
+      }
+
+      next.nodes.features = nodes;
     });
-    setPathDraft([]);
-    setCursor(null);
-    activate("select");
-    return true;
+    toast.success("Waypoints generated.");
   }
+
+  function validateMap() {
+    const spaces = mvfRef.current.spaces.features;
+    const nodes = mvfRef.current.nodes.features;
+    const issues = [];
+
+    if (!spaces.length) issues.push("Add at least one room or corridor.");
+    if (
+      spaces.some((feature) => !String(feature.properties?.name || "").trim())
+    ) {
+      issues.push("Name all rooms and corridors.");
+    }
+    if (!nodes.length) issues.push("Add or auto-generate waypoints.");
+
+    const spaceIds = new Set(spaces.map((feature) => feature.id));
+    const mappedSpaceIds = new Set(
+      nodes.map((feature) => feature.properties?.spaceId).filter(Boolean),
+    );
+    for (const id of spaceIds) {
+      if (!mappedSpaceIds.has(id)) {
+        issues.push("Some spaces do not have waypoints.");
+        break;
+      }
+    }
+
+    if (issues.length) {
+      toast.error(issues.join(" "));
+      return;
+    }
+    toast.success("Validation passed.");
+  }
+
+  async function runAiMapping() {
+    if (!floorData?.id) {
+      toast.error("Floor id is missing.");
+      return;
+    }
+
+    setAiRunning(true);
+    setAiStep(0);
+
+    try {
+      const timer = window.setInterval(() => {
+        setAiStep((current) => Math.min(current + 1, AI_STEPS.length - 1));
+      }, 400);
+
+      const formData = new FormData();
+      formData.append("floor_id", floorData.id);
+      formData.append("scope", aiScope);
+      formData.append("options", JSON.stringify(aiOptions));
+
+      const response = await api.maps.aiTrace(formData);
+      window.clearInterval(timer);
+      setAiStep(AI_STEPS.length - 1);
+
+      const result = response?.result;
+      if (!isMvf(result)) {
+        throw new Error("AI mapping did not return MVF data.");
+      }
+
+      setMvf(result);
+      setHistory([]);
+      setFuture([]);
+      setDirty(true);
+      setAiModalOpen(false);
+      toast.success("AI mapping completed.");
+    } catch (error) {
+      toast.error(error.message || "AI mapping failed.");
+    } finally {
+      setAiRunning(false);
+    }
+  }
+
+  function canvasToWorld(event) {
+    const pointer = stageRef.current?.getPointerPosition();
+    if (!pointer) return null;
+    return {
+      x: (pointer.x - position.x) / scale,
+      y: (pointer.y - position.y) / scale,
+    };
+  }
+
+  function onMouseDown(event) {
+    if (previewMode) return;
+    const point = snappedPoint(canvasToWorld(event));
+    if (!point) return;
+
+    if (tool === "wall") {
+      setDrawing({ kind: "wall", start: point, end: point });
+      return;
+    }
+
+    if (tool === "room" && roomShape === "rectangle") {
+      setDrawing({ kind: "room", start: point, end: point });
+      return;
+    }
+
+    if (tool === "room" && roomShape === "polygon") {
+      setPolygonDraft((current) => [...current, point]);
+      return;
+    }
+
+    if (tool === "door") {
+      addOpening(point, "door");
+      return;
+    }
+
+    if (tool === "window") {
+      addOpening(point, "window");
+      return;
+    }
+
+    if (tool === "waypoint") {
+      addWaypoint(point);
+      return;
+    }
+
+    if (tool === "path") {
+      const nearestNode = nearest(
+        mvf.nodes.features.map((feature) => ({
+          id: feature.id,
+          ...toPointFromCoords(feature.geometry.coordinates),
+        })),
+        point,
+        14,
+      );
+      if (!nearestNode) return;
+      if (!pathDraft) {
+        setPathDraft(nearestNode.id);
+      } else {
+        connectWaypoints(pathDraft, nearestNode.id);
+        setPathDraft(null);
+      }
+      return;
+    }
+  }
+
+  function onMouseMove(event) {
+    const point = canvasToWorld(event);
+    if (!point) return;
+    setCursor(point);
+    if (!drawing) return;
+
+    if (drawing.kind === "wall") {
+      const snappedEnd = snapEnabled ? angleSnap(drawing.start, point) : point;
+      setDrawing((current) => ({ ...current, end: snappedEnd }));
+      return;
+    }
+
+    if (drawing.kind === "room") {
+      setDrawing((current) => ({ ...current, end: point }));
+    }
+  }
+
+  function onMouseUp() {
+    if (!drawing) return;
+    if (drawing.kind === "wall") {
+      addWall(drawing.start, drawing.end);
+    }
+    if (drawing.kind === "room") {
+      addRectRoom(drawing.start, drawing.end);
+    }
+    setDrawing(null);
+  }
+
+  function onDoubleClick() {
+    if (tool !== "room" || roomShape !== "polygon") return;
+    if (polygonDraft.length < 3) return;
+    addPolygonRoom(polygonDraft);
+    setPolygonDraft([]);
+  }
+
+  function zoomBy(factor) {
+    setScale((current) => Math.max(0.2, Math.min(6, current * factor)));
+  }
+
+  function updateSelectionProperty(key, value) {
+    if (!selected) return;
+    updateMvf((next) => {
+      const collections = [
+        next.spaces.features,
+        next.obstructions.features,
+        next.openings.features,
+        next.objects.features,
+        next.nodes.features,
+      ];
+      for (const collection of collections) {
+        const match = collection.find((feature) => feature.id === selected);
+        if (!match) continue;
+        if (!match.properties) match.properties = {};
+        match.properties[key] = value;
+        break;
+      }
+    });
+  }
+
+  useImperativeHandle(ref, () => ({
+    save: saveMap,
+    undo,
+    redo,
+    zoomIn: () => zoomBy(1.12),
+    zoomOut: () => zoomBy(0.88),
+    setZoom: (value) =>
+      setScale(Math.max(0.2, Math.min(6, Number(value) || 1))),
+    toggleGrid: () => setShowGrid((value) => !value),
+    toggleSnap: () => setSnapEnabled((value) => !value),
+  }));
 
   useEffect(() => {
-    const issues = navigationIssues(model);
     if (!onStateChange) return;
     onStateChange({
       tool,
-      roomShape: shape,
-      zoom,
+      zoom: scale,
       dirty,
-      canUndo: historyRef.current.length > 0,
-      canRedo: futureRef.current.length > 0,
-      showGrid: model.showGrid,
-      showLabels: model.showLabels,
-      snapToGrid: model.snapToGrid,
-      counts: {
-        rooms: model.elements.filter((element) => element.kind === "room").length,
-        waypoints: model.elements.filter((element) => element.kind === "waypoint").length,
-        paths: model.elements.filter((element) => element.kind === "path").length,
-        doors: model.elements.filter((element) => element.kind === "door").length,
-        beacons: model.elements.filter((element) => element.kind === "beacon").length,
-      },
-      selectedElement: selected
-        ? {
-            id: selected.id,
-            kind: selected.kind,
-            label: elementTitle(selected, buildingIndustry),
-          }
-        : null,
-      saveStatus: dirty ? "Unsaved changes" : "All changes saved",
+      canUndo: history.length > 0,
+      canRedo: future.length > 0,
+      showGrid,
+      snapToGrid: snapEnabled,
       cursor,
-      overlayBounds: model.overlayBounds,
-      issues,
+      selectedElement: selected,
+      counts,
+      saveStatus: dirty ? "Unsaved" : "Saved",
       readiness:
-        issues.length === 0 ? "Ready for navigation" : `${issues.length} issue${issues.length === 1 ? "" : "s"} to review`,
+        counts.rooms > 0 && counts.waypoints > 0 ? "Ready" : "Needs review",
+      issues: [],
     });
-  }, [buildingIndustry, cursor, dirty, model, onStateChange, selected, shape, tool, zoom]);
+  }, [
+    counts,
+    cursor,
+    dirty,
+    future.length,
+    history.length,
+    onStateChange,
+    scale,
+    selected,
+    showGrid,
+    snapEnabled,
+    tool,
+  ]);
 
-  useEffect(() => {
-    function keyDown(event) {
-      if (
-        event.target instanceof HTMLElement &&
-        ["INPUT", "TEXTAREA", "SELECT"].includes(event.target.tagName)
-      ) {
-        return;
-      }
-      const key = event.key.toLowerCase();
-      if (event.key === "Delete" || event.key === "Backspace") removeSelected();
-      if (!previewMode && key === "enter" && tool === "path") {
-        event.preventDefault();
-        finalizePathDraft();
-      }
-      if ((event.ctrlKey || event.metaKey) && key === "z") {
-        event.preventDefault();
-        event.shiftKey ? redo() : undo();
-      }
-      if ((event.ctrlKey || event.metaKey) && key === "y") {
-        event.preventDefault();
-        redo();
-      }
-      if ((event.ctrlKey || event.metaKey) && key === "s") {
-        event.preventDefault();
-        save();
-      }
-      if (event.key === " ") spaceDownRef.current = true;
-      if (!previewMode && key === "r") activate("room");
-      if (!previewMode && key === "d") activate("door");
-      if (!previewMode && key === "w") activate("waypoint");
-      if (!previewMode && key === "b") activate("beacon");
-      if (!previewMode && key === "p") activate("path");
-      if (key === "s" && !event.ctrlKey && !event.metaKey) activate("select");
-      if (!previewMode && key === "m") activate("move");
-      if (!previewMode && key === "e") activate("resize");
-      if (key === "f") fitView();
-      if (key === "g") mutate((next) => { next.showGrid = !next.showGrid; }, false);
-      if (key === "l") mutate((next) => { next.showLabels = !next.showLabels; }, false);
-      if (event.key === "Escape") {
-        actionRef.current = null;
-        setPolyDraft([]);
-        setMeasure(null);
-        setSelectionId(null);
-        if (tool === "path" && pathDraft.length >= 2) {
-          finalizePathDraft();
-          return;
-        }
-        setPathDraft([]);
-        activate("select");
-      }
-    }
-    function keyUp(event) {
-      if (event.key === " ") spaceDownRef.current = false;
-    }
-    window.addEventListener("keydown", keyDown);
-    window.addEventListener("keyup", keyUp);
-    return () => {
-      window.removeEventListener("keydown", keyDown);
-      window.removeEventListener("keyup", keyUp);
-    };
-  }, [finalizePathDraft, pathDraft.length, previewMode, tool, zoom]);
-
-  function down(event) {
-    canvasRef.current.setPointerCapture(event.pointerId);
-    const point = pointFromEvent(event);
-    const world = { x: point.worldX, y: point.worldY };
-    const snapped = { x: point.x, y: point.y };
-    const match = hitElement(world);
-      const handle = selected
-        ? handlePoints(selected).find((entry) => dist(world, entry) <= 12 / zoom + 4)
-        : null;
-    if (event.button === 1 || spaceDownRef.current) {
-      actionRef.current = { kind: "pan", startX: point.canvasX, startY: point.canvasY, pan: { ...pan } };
-      return;
-    }
-    if (previewMode) {
-      setSelectionId(match?.id || null);
-      if (match) setShowHelpPanel(false);
-      return;
-    }
-    if (tool === "delete") {
-      if (match) {
-        setSelectionId(match.id);
-        removeSelected(match.id);
-      }
-      return;
-    }
-    if (tool === "door") {
-      if (previewMode) return;
-      const room = [...modelRef.current.elements]
-        .filter((element) => element.kind === "room")
-        .reverse()
-        .find((entry) => hit(world, entry));
-      if (room) {
-        const edgeOffset = edgeOffsetFromPoint(room, snapped);
-        const managed = createManagedDoor(
-          {
-            ...room,
-            edge: edgeOffset.edge,
-            offset: edgeOffset.offset,
-          },
-          modelRef.current.elements.filter(
-            (element) => element.kind === "door" && element.roomId === room.id,
-          ).length,
-        );
-        managed.door.edge = edgeOffset.edge;
-        managed.door.offset = edgeOffset.offset;
-        managed.door.name = `${room.name || "Room"} Door`;
-        mutate((next) => {
-          next.elements.push(managed.door, managed.waypoint);
-        });
-        setSelectionId(managed.door.id);
-        setShowHelpPanel(false);
-        return;
-      }
-
-      addElement({
-        id: uuidv4(),
-        kind: "door",
-        type: "door",
-        x: snapped.x,
-        y: snapped.y,
-        name: "Door",
-        doorType: "main_entrance",
-        widthMeters: "",
-        accessible: false,
-        locked: false,
-        roomId: null,
-        edge: "right",
-        offset: 0.5,
-        routingAnchor: false,
-        linkedWaypointId: null,
-        layerIndex: normalizeLayerIndex("door"),
-      });
-      return;
-    }
-    if (tool === "waypoint") {
-      if (previewMode) return;
-      addElement({
-        id: uuidv4(),
-        kind: "waypoint",
-        type: "waypoint",
-        x: snapped.x,
-        y: snapped.y,
-        name: "",
-        waypointType: "junction",
-        transitionType: "none",
-        linkedFloorId: null,
-        description: "",
-        customWaypointLabel: "",
-        linkedRoomId: null,
-        linkedDoorId: null,
-        isAutoRoomWaypoint: false,
-        roomRatioX: 0.5,
-        roomRatioY: 0.5,
-        layerIndex: normalizeLayerIndex("waypoint"),
-      });
-      return;
-    }
-    if (tool === "beacon") {
-      addElement({
-        id: uuidv4(),
-        kind: "beacon",
-        type: "beacon",
-        x: snapped.x,
-        y: snapped.y,
-        name: "Beacon",
-        beaconId: "",
-        radiusMeters: 2.5,
-        txPower: -59,
-        notes: "",
-        layerIndex: normalizeLayerIndex("beacon"),
-      });
-      return;
-    }
-    if (tool === "measure") {
-      if (!measure?.start || measure.end) {
-        setMeasure({ start: world, end: null, pixels: 0, meters: null });
-      } else {
-        const pixels = dist(measure.start, world);
-        setMeasure({
-          start: measure.start,
-          end: world,
-          pixels,
-          meters: modelRef.current.pixelsPerMeter ? pixels / modelRef.current.pixelsPerMeter : null,
-        });
-        activate("select");
-      }
-      return;
-    }
-    if (tool === "room" && shape === "polygon") {
-      if (previewMode) return;
-      setSelectionId(null);
-      setPolyDraft((current) => [...current, snapped]);
-      setCursor(snapped);
-      return;
-    }
-    if (tool === "path") {
-      if (previewMode) return;
-      const anchor = pathAnchorForPoint(world, modelRef.current.elements);
-      if (!anchor) {
-        toast.error("Path points snap to door anchors or waypoints. Add/select one first.");
-        return;
-      }
-      setSelectionId(null);
-      setPathDraft((current) => {
-        if (current.some((entry) => dist(entry, anchor) < 1)) return current;
-        return [...current, { x: anchor.x, y: anchor.y }];
-      });
-      setCursor(snapped);
-      return;
-    }
-    if (tool === "room") {
-      if (previewMode) return;
-      setSelectionId(null);
-      actionRef.current = { kind: "rect", start: snapped };
-      setCursor(snapped);
-      return;
-    }
-    if (match) {
-      setSelectionId(match.id);
-      setShowHelpPanel(false);
-      if ((tool === "resize" || tool === "select") && handle) {
-        historyRef.current = [...historyRef.current, clone(modelRef.current)].slice(-60);
-        futureRef.current = [];
-        setUndoCount(historyRef.current.length);
-        setRedoCount(0);
-        actionRef.current = { kind: "resize", original: clone(selected), handle: handle.id };
-        return;
-      }
-      if (tool === "select" || tool === "move") {
-        historyRef.current = [...historyRef.current, clone(modelRef.current)].slice(-60);
-        futureRef.current = [];
-        setUndoCount(historyRef.current.length);
-        setRedoCount(0);
-        actionRef.current = { kind: "move", id: match.id, start: world, original: clone(match) };
-        return;
-      }
-    }
-    setSelectionId(null);
-  }
-
-  function move(event) {
-    const point = pointFromEvent(event);
-    const world = { x: point.worldX, y: point.worldY };
-    const snapped = { x: point.x, y: point.y };
-    const action = actionRef.current;
-    setCursor(snapped);
-    if (measure?.start && !measure.end && tool === "measure") {
-      const pixels = dist(measure.start, world);
-      setMeasure({
-        start: measure.start,
-        end: world,
-        pixels,
-        meters: modelRef.current.pixelsPerMeter ? pixels / modelRef.current.pixelsPerMeter : null,
-      });
-    }
-    if (!action) return;
-    if (action.kind === "pan") {
-      setPan({
-        x: action.pan.x + (point.canvasX - action.startX),
-        y: action.pan.y + (point.canvasY - action.startY),
-      });
-      return;
-    }
-    if (action.kind === "move") {
-      const dx = snapped.x - action.start.x;
-      const dy = snapped.y - action.start.y;
-      const next = clone(modelRef.current);
-      const target = next.elements.find((element) => element.id === action.id);
-      if (!target) return;
-      if (target.kind === "room" && target.shape === "polygon") {
-        target.points = action.original.points.map((entry) => ({ x: entry.x + dx, y: entry.y + dy }));
-      } else if (target.kind === "path") {
-        target.points = action.original.points.map((entry) => ({ x: entry.x + dx, y: entry.y + dy }));
-      }
-      if (target.kind === "door" && target.roomId) {
-        const room = next.elements.find(
-          (element) => element.kind === "room" && element.id === target.roomId,
-        );
-        if (room) {
-          const edgeOffset = edgeOffsetFromPoint(room, snapped);
-          target.edge = edgeOffset.edge;
-          target.offset = edgeOffset.offset;
-        }
-      }
-      if (target.kind === "waypoint" && target.linkedRoomId && !target.linkedDoorId) {
-        const room = next.elements.find(
-          (element) => element.kind === "room" && element.id === target.linkedRoomId,
-        );
-        if (room) {
-          target.roomRatioX = clamp((snapped.x - room.x) / Math.max(room.width, 1), 0.08, 0.92);
-          target.roomRatioY = clamp((snapped.y - room.y) / Math.max(room.height, 1), 0.08, 0.92);
-        }
-      }
-      if (target.x !== undefined) target.x = action.original.x + dx;
-      if (target.y !== undefined) target.y = action.original.y + dy;
-      modelRef.current = normalizeModelLinks(next);
-      setModel(normalizeModelLinks(next));
-      setDirty(true);
-      return;
-    }
-    if (action.kind === "resize") {
-      const start = getBounds(action.original);
-      const box = { x: start.x, y: start.y, width: start.width, height: start.height };
-      if (action.handle.includes("w")) {
-        box.x = Math.min(snapped.x, start.x + start.width - MIN_SIZE);
-        box.width = start.x + start.width - box.x;
-      }
-      if (action.handle.includes("e")) box.width = Math.max(MIN_SIZE, snapped.x - start.x);
-      if (action.handle.includes("n")) {
-        box.y = Math.min(snapped.y, start.y + start.height - MIN_SIZE);
-        box.height = start.y + start.height - box.y;
-      }
-      if (action.handle.includes("s")) box.height = Math.max(MIN_SIZE, snapped.y - start.y);
-      const next = clone(modelRef.current);
-      const target = next.elements.find((element) => element.id === action.original.id);
-      if (!target) return;
-      if (target.kind === "wall") {
-        const sx = box.width / Math.max(start.width, 1);
-        const sy = box.height / Math.max(start.height, 1);
-        target.x1 = box.x + (action.original.x1 - start.x) * sx;
-        target.y1 = box.y + (action.original.y1 - start.y) * sy;
-        target.x2 = box.x + (action.original.x2 - start.x) * sx;
-        target.y2 = box.y + (action.original.y2 - start.y) * sy;
-      } else if (target.kind === "path") {
-        const sx = box.width / Math.max(start.width, 1);
-        const sy = box.height / Math.max(start.height, 1);
-        target.points = action.original.points.map((entry) => ({
-          x: box.x + (entry.x - start.x) * sx,
-          y: box.y + (entry.y - start.y) * sy,
-        }));
-      } else if (target.kind === "door" || target.kind === "window") {
-        target.x = box.x + box.width / 2;
-        target.y = box.y + box.height / 2;
-        if (target.kind === "window") {
-          target.width = Math.max(12, box.width);
-        }
-        if (target.kind === "door") {
-          target.width = Math.max(12, box.width);
-        }
-      } else if (target.kind === "waypoint") {
-        target.x = box.x + box.width / 2;
-        target.y = box.y + box.height / 2;
-      }
-      if (target.shape === "polygon") {
-        const sx = box.width / start.width;
-        const sy = box.height / start.height;
-        target.points = action.original.points.map((entry) => ({
-          x: box.x + (entry.x - start.x) * sx,
-          y: box.y + (entry.y - start.y) * sy,
-        }));
-      }
-      target.x = box.x;
-      target.y = box.y;
-      target.width = box.width;
-      target.height = box.height;
-      modelRef.current = normalizeModelLinks(next);
-      setModel(normalizeModelLinks(next));
-      setDirty(true);
-    }
-  }
-
-  function up(event) {
-    if (canvasRef.current?.hasPointerCapture(event.pointerId)) {
-      canvasRef.current.releasePointerCapture(event.pointerId);
-    }
-    const action = actionRef.current;
-    actionRef.current = null;
-    if (action?.kind === "rect" && cursor) {
-      const box = {
-        x: Math.min(action.start.x, cursor.x),
-        y: Math.min(action.start.y, cursor.y),
-        width: Math.abs(cursor.x - action.start.x),
-        height: Math.abs(cursor.y - action.start.y),
-      };
-      if (box.width >= MIN_SIZE && box.height >= MIN_SIZE) saveRoom(box);
-    }
-  }
-
-  function dbl() {
-    if (previewMode) return;
-    if (selected?.kind === "room") {
-      const nextName = window.prompt("Rename room", selected.name || "");
-      if (nextName !== null) {
-        updateElement(selected.id, (element) => {
-          element.name = nextName.trim();
-        });
-      }
-      return;
-    }
-    if (tool === "room" && shape === "polygon" && polyDraft.length >= 3) {
-      const box = boundsFromPoints(polyDraft);
-      saveRoom(
-        {
-          x: box.minX,
-          y: box.minY,
-          width: box.maxX - box.minX,
-          height: box.maxY - box.minY,
-        },
-        polyDraft,
-      );
-      setPolyDraft([]);
-      setCursor(null);
-    }
-    if (tool === "path" && pathDraft.length >= 2) {
-      finalizePathDraft();
-    }
-  }
-
-  useEffect(() => {
-    if (!canvasRef.current || !viewport.width || !viewport.height) return;
-    const root = getComputedStyle(document.documentElement);
-    const isDark = document.documentElement.dataset.theme === "dark";
-    const canvas = canvasRef.current;
-    const ratio = window.devicePixelRatio || 1;
-    canvas.width = viewport.width * ratio;
-    canvas.height = viewport.height * ratio;
-    canvas.style.width = `${viewport.width}px`;
-    canvas.style.height = `${viewport.height}px`;
-    const ctx = canvas.getContext("2d");
-    ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-    ctx.clearRect(0, 0, viewport.width, viewport.height);
-    ctx.fillStyle = root.getPropertyValue("--color-bg").trim() || "#f8f9fa";
-    ctx.fillRect(0, 0, viewport.width, viewport.height);
-    ctx.save();
-    ctx.translate(pan.x, pan.y);
-    ctx.scale(zoom, zoom);
-    if (bgImage) {
-      ctx.globalAlpha = isDark ? 0.35 : 0.58;
-      ctx.drawImage(
-        bgImage,
-        0,
-        0,
-        model.floor.width || bgImage.naturalWidth,
-        model.floor.height || bgImage.naturalHeight,
-      );
-      ctx.globalAlpha = 1;
-    }
-    const accent = root.getPropertyValue("--color-accent").trim() || "#2563eb";
-    const accentLight = root.getPropertyValue("--color-accent-light").trim() || "#eff6ff";
-    const text = root.getPropertyValue("--color-text-primary").trim() || "#0f172a";
-    const warn = root.getPropertyValue("--color-warning").trim() || "#d97706";
-    const success = root.getPropertyValue("--color-success").trim() || "#16a34a";
-    const canvasBg = root.getPropertyValue("--color-bg").trim() || "#f8f9fa";
-    visibleElements.filter((element) => element.kind === "wall").forEach((wall) => {
-      ctx.beginPath();
-      ctx.moveTo(wall.x1, wall.y1);
-      ctx.lineTo(wall.x2, wall.y2);
-      ctx.strokeStyle = wall.aiGenerated ? "#444444" : isDark ? "#64748B" : "#475569";
-      ctx.lineWidth = wall.aiGenerated
-        ? clamp(Number(wall.thickness) || 3, 2, 4)
-        : wall.thickness || 6;
-      ctx.lineCap = "round";
-      ctx.stroke();
-      if (selectionId === wall.id) {
-        ctx.beginPath();
-        ctx.moveTo(wall.x1, wall.y1);
-        ctx.lineTo(wall.x2, wall.y2);
-        ctx.strokeStyle = accent;
-        ctx.lineWidth = (wall.thickness || 6) + 3;
-        ctx.globalAlpha = 0.35;
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
-    });
-    visibleElements
-      .filter((element) => element.kind === "window")
-      .forEach((windowElement) => {
-        const half = (windowElement.width || 28) / 2;
-        const angle = toRadians(windowElement.angle || 0);
-        const dx = Math.cos(angle) * half;
-        const dy = Math.sin(angle) * half;
-        const normalX = -Math.sin(angle) * 2;
-        const normalY = Math.cos(angle) * 2;
-        ctx.beginPath();
-        ctx.moveTo(windowElement.x - dx - normalX, windowElement.y - dy - normalY);
-        ctx.lineTo(windowElement.x + dx - normalX, windowElement.y + dy - normalY);
-        ctx.moveTo(windowElement.x - dx + normalX, windowElement.y - dy + normalY);
-        ctx.lineTo(windowElement.x + dx + normalX, windowElement.y + dy + normalY);
-        ctx.strokeStyle = "#06B6D4";
-        ctx.lineWidth = 2;
-        ctx.lineCap = "round";
-        ctx.stroke();
-      });
-    !previewMode && visibleElements.filter((element) => element.kind === "path").forEach((path) => {
-      if (!path.points.length) return;
-      ctx.beginPath();
-      ctx.moveTo(path.points[0].x, path.points[0].y);
-      path.points.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
-      ctx.strokeStyle = "#22C55E";
-      ctx.lineWidth = selectionId === path.id ? 3 : previewMode ? 3 : 2;
-      ctx.lineCap = "round";
-      ctx.lineJoin = "round";
-      ctx.setLineDash([8, 6]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-      path.points.forEach((point) => {
-        ctx.beginPath();
-        ctx.arc(point.x, point.y, 4, 0, Math.PI * 2);
-        ctx.fillStyle = "#22C55E";
-        ctx.fill();
-      });
-    });
-    visibleElements.filter((element) => element.kind === "room").forEach((room) => {
-      const roomDoors = visibleElements.filter(
-        (element) => element.kind === "door" && element.roomId === room.id,
-      );
-      const roomFill = previewMode
-        ? room.color || (isDark ? "rgba(30, 58, 95, 0.76)" : "rgba(255, 255, 255, 0.78)")
-        : room.color || (room.aiGenerated ? "rgba(147, 112, 219, 0.3)" : accentLight);
-      const extrusionDepth =
-        (Number.parseFloat(model.threeD?.extrusionHeight) || 3.2) * 3;
-      if (previewMode && previewView === "3d") {
-        drawRoomExtrusion(
-          ctx,
-          room,
-          roomFill,
-          room.color || accent,
-          isDark ? "rgba(15, 23, 42, 0.42)" : "rgba(15, 23, 42, 0.12)",
-          selectionId === room.id,
-          extrusionDepth,
-        );
-      } else {
-        drawRoomPath(ctx, room);
-        ctx.fillStyle = roomFill;
-        ctx.fill();
-        ctx.strokeStyle = room.color || accent;
-        if (room.aiGenerated && !room.color) {
-          ctx.strokeStyle = "#6644aa";
-        }
-        ctx.lineWidth = selectionId === room.id ? 2.5 : 1.5;
-        ctx.stroke();
-      }
-      roomDoors.forEach((door) =>
-        drawDoorOpening(
-          ctx,
-          room,
-          door,
-          canvasBg,
-          warn,
-          previewMode && previewView === "3d",
-          extrusionDepth,
-        ),
-      );
-      const center = roomCenterFromShape(room);
-      const labelCenter =
-        previewMode && previewView === "3d"
-          ? { x: center.x + extrusionDepth * 0.55, y: center.y - extrusionDepth * 0.35 }
-          : center;
-      const icon = roomIconSymbol(room, buildingIndustry);
-      ctx.fillStyle = text;
-      ctx.font = previewMode ? "700 12px Inter, sans-serif" : "700 11px Inter, sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(icon, labelCenter.x, labelCenter.y - (model.showLabels ? 10 : 0));
-      if (model.showLabels) {
-        ctx.fillStyle = text;
-        ctx.font = previewMode ? "600 12px Inter, sans-serif" : "600 11px Inter, sans-serif";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(
-          room.name || roomLabel(room, buildingIndustry),
-          labelCenter.x,
-          labelCenter.y + 12,
-        );
-      }
-    });
-    visibleElements.filter((element) => element.kind === "door").forEach((door) => {
-      if (door.roomId) return;
-      const half = (door.width || 22) / 2;
-      const angle = toRadians(door.angle || 90);
-      const dx = Math.cos(angle) * half;
-      const dy = Math.sin(angle) * half;
-      ctx.beginPath();
-      ctx.moveTo(door.x - dx, door.y - dy);
-      ctx.lineTo(door.x + dx, door.y + dy);
-      ctx.lineWidth = Math.max(2, Math.min(5, (door.width || 22) / 8));
-      ctx.strokeStyle = "#2196F3";
-      ctx.lineCap = "round";
-      ctx.stroke();
-    });
-    !previewMode && visibleElements.filter((element) => element.kind === "waypoint").forEach((waypoint) => {
-      ctx.beginPath();
-      ctx.arc(waypoint.x, waypoint.y, 4, 0, Math.PI * 2);
-      ctx.fillStyle = "#22C55E";
-      ctx.fill();
-      ctx.lineWidth = selectionId === waypoint.id ? 2 : 1.5;
-      ctx.strokeStyle = "#ffffff";
-      ctx.stroke();
-    });
-    visibleElements.filter((element) => element.kind === "beacon").forEach((beacon) => {
-      const radius = Math.max(18, (Number(beacon.radiusMeters) || 2.5) * 12);
-      ctx.beginPath();
-      ctx.arc(beacon.x, beacon.y, radius, 0, Math.PI * 2);
-      ctx.fillStyle = isDark ? "rgba(245, 158, 11, 0.16)" : "rgba(245, 158, 11, 0.12)";
-      ctx.fill();
-      ctx.beginPath();
-      ctx.arc(beacon.x, beacon.y, 7, 0, Math.PI * 2);
-      ctx.fillStyle = warn;
-      ctx.fill();
-      ctx.lineWidth = selectionId === beacon.id ? 2.5 : 2;
-      ctx.strokeStyle = "#ffffff";
-      ctx.stroke();
-    });
-    visibleElements.filter((element) => element.kind === "object").forEach((objectElement) => {
-      ctx.beginPath();
-      ctx.arc(objectElement.x, objectElement.y, 12, 0, Math.PI * 2);
-      ctx.fillStyle = objectElement.objectType === "exit" ? success : accent;
-      ctx.fill();
-      ctx.lineWidth = selectionId === objectElement.id ? 2.5 : 2;
-      ctx.strokeStyle = "#ffffff";
-      ctx.stroke();
-      ctx.fillStyle = "#ffffff";
-      ctx.font = "700 9px Inter, sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(
-        roomIconSymbol({
-          name: objectElement.label || objectElement.name || "POI",
-          iconPreset: objectElement.iconPreset || objectElement.objectType || "info",
-        }),
-        objectElement.x,
-        objectElement.y,
-      );
-      if (model.showLabels) {
-        ctx.fillStyle = text;
-        ctx.font = "600 10px Inter, sans-serif";
-        ctx.fillText(
-          objectElement.label || objectElement.name || "Object",
-          objectElement.x,
-          objectElement.y + 20,
-        );
-      }
-    });
-    if (selected) {
-      const box = getBounds(selected);
-      ctx.strokeStyle = accent;
-      ctx.lineWidth = 2;
-      ctx.strokeRect(box.x - 6, box.y - 6, box.width + 12, box.height + 12);
-      if (
-        ["room", "wall", "door", "window", "waypoint", "path"].includes(selected.kind) &&
-        !previewMode
-      ) {
-        handlePoints(selected).forEach((entry) => {
-          ctx.fillStyle = "#ffffff";
-          ctx.fillRect(entry.x - 2, entry.y - 2, 4, 4);
-          ctx.strokeStyle = accent;
-          ctx.strokeRect(entry.x - 2, entry.y - 2, 4, 4);
-        });
-      }
-    }
-    if (!previewMode && actionRef.current?.kind === "rect" && cursor) {
-      const x = Math.min(actionRef.current.start.x, cursor.x);
-      const y = Math.min(actionRef.current.start.y, cursor.y);
-      const width = Math.abs(cursor.x - actionRef.current.start.x);
-      const height = Math.abs(cursor.y - actionRef.current.start.y);
-      ctx.beginPath();
-      ctx.roundRect(x, y, width, height, 12);
-      ctx.fillStyle = accentLight;
-      ctx.globalAlpha = 0.7;
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      ctx.strokeStyle = accent;
-      ctx.stroke();
-    }
-    if (!previewMode && polyDraft.length) {
-      ctx.beginPath();
-      ctx.moveTo(polyDraft[0].x, polyDraft[0].y);
-      polyDraft.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
-      if (cursor) ctx.lineTo(cursor.x, cursor.y);
-      ctx.strokeStyle = accent;
-      ctx.setLineDash([8, 5]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-    if (!previewMode && pathDraft.length) {
-      ctx.beginPath();
-      ctx.moveTo(pathDraft[0].x, pathDraft[0].y);
-      pathDraft.slice(1).forEach((point) => ctx.lineTo(point.x, point.y));
-      if (cursor) ctx.lineTo(cursor.x, cursor.y);
-      ctx.strokeStyle = accent;
-      ctx.setLineDash([8, 5]);
-      ctx.stroke();
-      ctx.setLineDash([]);
-    }
-    if (measure?.start && measure.end) {
-      ctx.beginPath();
-      ctx.moveTo(measure.start.x, measure.start.y);
-      ctx.lineTo(measure.end.x, measure.end.y);
-      ctx.strokeStyle = warn;
-      ctx.lineWidth = 2;
-      ctx.stroke();
-    }
-    ctx.restore();
-  }, [bgImage, buildingIndustry, cursor, measure, model, pan, pathDraft, polyDraft, previewMode, previewView, selectionId, selected, viewport, visibleElements, zoom]);
-
-  const drawTools = TOOLS.filter((entry) => entry.group === "Draw");
-  const editTools = TOOLS.filter(
-    (entry) => entry.group === "Edit" && entry.id !== "resize",
-  );
-  const showHelp = !selected || showHelpPanel;
-  const roomColorPresets = [
-    "#2563EB",
-    "#16A34A",
-    "#D97706",
-    "#DC2626",
-    "#7C3AED",
-    "#0F766E",
-  ];
-  const orderedElements = [...model.elements].sort(layerListSort);
-  const attachedDoors =
-    selected?.kind === "room"
-      ? model.elements.filter(
-          (element) => element.kind === "door" && element.roomId === selected.id,
-        )
-      : [];
-  const readinessIssues = navigationIssues(model);
+  const selectedFeatureData = selectedFeature();
 
   return (
-    <div
-      className={`map-editor ${leftPanelCollapsed ? "is-left-collapsed" : ""}`}
-      style={{
-        "--map-editor-left-width": `${leftPanelCollapsed ? 68 : leftPanelWidth}px`,
-      }}
-    >
-      <aside className={`map-editor__rail ${leftPanelCollapsed ? "is-collapsed" : ""}`}>
-        <section className="map-editor__panel">
-          <div className="mb-2 flex items-center justify-between gap-2">
-            {!leftPanelCollapsed && (
-              <button
-                type="button"
-                onClick={() => toggleSection("draw")}
-                className="map-editor__section-toggle"
-              >
-                <span>Draw Tools</span>
-                <ChevronDown
-                  className={`h-4 w-4 transition-transform ${sections.draw ? "" : "-rotate-90"}`}
-                />
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={() => setLeftPanelCollapsed((current) => !current)}
-              className="map-editor__mini-button px-2"
-              title={leftPanelCollapsed ? "Expand tool rail" : "Collapse tool rail"}
-            >
-              {leftPanelCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
-            </button>
-          </div>
-          {sections.draw && (
-            <div className="map-editor__section-body">
-              <div className="map-editor__tool-list">
-                {drawTools.map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      disabled={previewMode}
-                      onClick={() => activate(item.id)}
-                      className={`map-editor__tool ${tool === item.id ? "is-active" : ""}`}
-                    >
-                      <span className="map-editor__tool-label">
-                        <Icon className="h-4 w-4" />
-                        {!leftPanelCollapsed && <span>{item.label}</span>}
-                      </span>
-                      {!leftPanelCollapsed && <span className="map-editor__tool-key">{item.key}</span>}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {!leftPanelCollapsed && (
-                <>
-              <div className="map-editor__divider" />
-
-              <div className="section-label">Room Shape</div>
-              <div className="map-editor__shape-switch">
-                <button
-                  type="button"
-                  disabled={previewMode}
-                  onClick={() => setShape("rect")}
-                  className={`map-editor__toggle ${shape === "rect" ? "is-active" : ""}`}
-                >
-                  <RectangleHorizontal className="h-4 w-4" />
-                  Rectangle
-                </button>
-                <button
-                  type="button"
-                  disabled={previewMode}
-                  onClick={() => setShape("polygon")}
-                  className={`map-editor__toggle ${shape === "polygon" ? "is-active" : ""}`}
-                >
-                  <LayoutGrid className="h-4 w-4" />
-                  Polygon
-                </button>
-              </div>
-
-              <div className="section-label">Room Type</div>
-              <div className="map-editor__search">
-                <Search className="h-4 w-4 text-muted" />
-                <input
-                  value={typeSearch}
-                  onChange={(event) => setTypeSearch(event.target.value)}
-                  placeholder="Search room types"
-                />
-              </div>
-              <div className="map-editor__type-grid">
-                {roomTypes.map((entry) => {
-                  const Icon = resolvePoiIcon(entry.icon);
-                  return (
-                    <button
-                      key={entry.id}
-                      type="button"
-                      disabled={previewMode}
-                      onClick={() => setDraftType(entry.id)}
-                      className={`map-editor__type-button ${draftType === entry.id ? "is-active" : ""}`}
-                    >
-                      <Icon className="h-4 w-4" />
-                      {entry.label}
-                    </button>
-                  );
-                })}
-              </div>
-              {draftType === "custom" && (
-                <div>
-                  <label className="field-label">Custom Label</label>
-                  <input
-                    className="input"
-                    value={draftCustomLabel}
-                    disabled={previewMode}
-                    onChange={(event) => setDraftCustomLabel(event.target.value)}
-                    placeholder="Quiet Room"
-                  />
-                </div>
-              )}
-                </>
-              )}
-            </div>
-          )}
-        </section>
-        <section className="map-editor__panel">
-          <button
-            type="button"
-            onClick={() => toggleSection("edit")}
-            className="map-editor__section-toggle"
-          >
-            <span>Edit Tools</span>
-            <ChevronDown
-              className={`h-4 w-4 transition-transform ${sections.edit ? "" : "-rotate-90"}`}
-            />
-          </button>
-          {sections.edit && (
-            <div className="map-editor__section-body">
-              <div className="map-editor__tool-list">
-                {editTools.map((item) => {
-                  const Icon = item.icon;
-                  return (
-                    <button
-                      key={item.id}
-                      type="button"
-                      disabled={previewMode && item.id !== "select"}
-                      onClick={() => activate(item.id)}
-                      className={`map-editor__tool ${tool === item.id ? "is-active" : ""}`}
-                    >
-                      <span className="map-editor__tool-label">
-                        <Icon className="h-4 w-4" />
-                        {!leftPanelCollapsed && <span>{item.label}</span>}
-                      </span>
-                      {!leftPanelCollapsed && <span className="map-editor__tool-key">
-                        {item.id === "select" ? "S / Esc" : item.key}
-                      </span>}
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </section>
-
-        {!leftPanelCollapsed && (
-        <>
-        <section className="map-editor__panel">
-          <button
-            type="button"
-            onClick={() => toggleSection("view")}
-            className="map-editor__section-toggle"
-          >
-            <span>View Tools</span>
-            <ChevronDown
-              className={`h-4 w-4 transition-transform ${sections.view ? "" : "-rotate-90"}`}
-            />
-          </button>
-          {sections.view && (
-            <div className="map-editor__section-body">
-              <div className="map-editor__tool-list">
-                <button type="button" onClick={fitView} className="map-editor__tool">
-                  <span className="map-editor__tool-label">
-                    <SearchCheck className="h-4 w-4" />
-                    {!leftPanelCollapsed && <span>Fit to Screen</span>}
-                  </span>
-                  {!leftPanelCollapsed && <span className="map-editor__tool-key">F</span>}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => mutate((next) => { next.showLabels = !next.showLabels; }, false)}
-                  className={`map-editor__tool ${model.showLabels ? "is-active" : ""}`}
-                >
-                  <span className="map-editor__tool-label">
-                    <Layers className="h-4 w-4" />
-                    {!leftPanelCollapsed && <span>Toggle Labels</span>}
-                  </span>
-                  {!leftPanelCollapsed && <span className="map-editor__tool-key">L</span>}
-                </button>
-              </div>
-            </div>
-          )}
-        </section>
-
-        <section className="map-editor__panel">
-          <button
-            type="button"
-            onClick={() => toggleSection("layers")}
-            className="map-editor__section-toggle"
-          >
-            <span>Layers / Elements</span>
-            <ChevronDown
-              className={`h-4 w-4 transition-transform ${sections.layers ? "" : "-rotate-90"}`}
-            />
-          </button>
-          {sections.layers && (
-            <div className="map-editor__section-body">
-              {orderedElements.length === 0 ? (
-                <p className="text-sm subtle-text">No elements yet. Start drawing.</p>
-              ) : (
-                <div className="map-editor__layer-list">
-                  {orderedElements.map((element) => {
-                    const Icon = iconForElement(element);
-                    const hidden = Boolean(hiddenIds[element.id]);
-                    const pinned = element.kind === "waypoint" || element.kind === "path";
-
-                    return (
-                      <div
-                        key={element.id}
-                        className={`map-editor__layer-item group ${selectionId === element.id ? "is-active" : ""}`}
-                        draggable={REORDERABLE_KINDS.has(element.kind)}
-                        onDragStart={() => setDraggedLayerId(element.id)}
-                        onDragOver={(event) => {
-                          if (!REORDERABLE_KINDS.has(element.kind)) return;
-                          event.preventDefault();
-                        }}
-                        onDrop={(event) => {
-                          if (!draggedLayerId) return;
-                          event.preventDefault();
-                          mutate((next) => {
-                            next.elements = reorderElements(next.elements, draggedLayerId, element.id);
-                          });
-                          setDraggedLayerId(null);
-                        }}
-                        onDragEnd={() => setDraggedLayerId(null)}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setSelectionId(element.id);
-                            setShowHelpPanel(false);
-                            setTool("select");
-                          }}
-                          className="min-w-0 flex flex-1 items-center gap-2 truncate text-left"
-                        >
-                          <Icon className="h-3.5 w-3.5 shrink-0" />
-                          <span className="truncate">
-                            {elementTitle(element, buildingIndustry)}
-                            {pinned ? " • pinned" : ""}
-                          </span>
-                        </button>
-                        {REORDERABLE_KINDS.has(element.kind) && (
-                          <div className="flex items-center gap-1">
-                            <button
-                              type="button"
-                              className="map-editor__layer-visibility"
-                              title="Move up"
-                              onClick={() => moveLayer(element.id, 1)}
-                            >
-                              <ArrowUp className="h-3.5 w-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              className="map-editor__layer-visibility"
-                              title="Move down"
-                              onClick={() => moveLayer(element.id, -1)}
-                            >
-                              <ArrowDown className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        )}
-                        <button
-                          type="button"
-                          title={hidden ? "Show element" : "Hide element"}
-                          aria-label={hidden ? "Show element" : "Hide element"}
-                          onClick={() => toggleVisibility(element.id)}
-                          className="map-editor__layer-visibility"
-                        >
-                          {hidden ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-                        </button>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          )}
-        </section>
-
-        <section className="map-editor__panel">
-          <button
-            type="button"
-            onClick={() => toggleSection("utilities")}
-            className="map-editor__section-toggle"
-          >
-            <span>Utilities</span>
-            <ChevronDown
-              className={`h-4 w-4 transition-transform ${sections.utilities ? "" : "-rotate-90"}`}
-            />
-          </button>
-          {sections.utilities && (
-            <div className="map-editor__section-body">
-              <div className="map-editor__utility-row">
-                <button
-                  type="button"
-                  disabled={previewMode}
-                  onClick={() => bgInputRef.current?.click()}
-                  className="map-editor__mini-button"
-                >
-                  <ImagePlus className="h-4 w-4" />
-                  Background
-                </button>
-                <button
-                  type="button"
-                  disabled={previewMode}
-                  onClick={() => jsonInputRef.current?.click()}
-                  className="map-editor__mini-button"
-                >
-                  <Import className="h-4 w-4" />
-                  Import
-                </button>
-              </div>
-              <div className="map-editor__utility-row">
-                <button type="button" onClick={exportJson} className="map-editor__mini-button">
-                  <Download className="h-4 w-4" />
-                  Export
-                </button>
-                <button
-                  type="button"
-                  disabled={previewMode}
-                  onClick={() => activate("measure")}
-                  className="map-editor__mini-button"
-                >
-                  <PencilRuler className="h-4 w-4" />
-                  Measure
-                </button>
-              </div>
-              <div className="map-editor__utility-row">
-                <button
-                  type="button"
-                  disabled={previewMode}
-                  onClick={openAiTraceModal}
-                  className="map-editor__mini-button"
-                >
-                  <Sparkles className="h-4 w-4" />
-                  Auto Trace Draft
-                </button>
-                <button
-                  type="button"
-                  disabled={previewMode}
-                  onClick={autoWaypoints}
-                  className="map-editor__mini-button"
-                >
-                  <Sparkles className="h-4 w-4" />
-                  Auto Waypoints
-                </button>
-              </div>
-              <div className="map-editor__utility-row">
-                <button type="button" onClick={validate} className="map-editor__mini-button">
-                  <Check className="h-4 w-4" />
-                  Validate
-                </button>
-              </div>
-              <div>
-                <label className="field-label">Scale (pixels / meter)</label>
-                <input
-                  className="input"
-                  type="number"
-                  step="0.1"
-                  disabled={previewMode}
-                  value={model.pixelsPerMeter || ""}
-                  onChange={(event) => mutate((next) => {
-                    const value = Number.parseFloat(event.target.value);
-                    next.pixelsPerMeter = Number.isFinite(value) && value > 0 ? value : null;
-                  }, false)}
-                  placeholder="50"
-                />
-              </div>
-            </div>
-          )}
-        </section>
-        </>
-        )}
-      </aside>
-
-      <div
-        className="map-editor__resizer"
-        role="separator"
-        aria-label="Resize tool rail"
-        onPointerDown={() => {
-          panelResizeRef.current = { side: "left" };
-          setLeftPanelCollapsed(false);
-        }}
-      >
-        <GripVertical className="h-4 w-4" />
-      </div>
-
-      <section className="map-editor__canvas">
-        <div
-          ref={wrapRef}
-          className="map-editor__canvas-inner"
-          style={{
-            backgroundImage: model.showGrid
-              ? "linear-gradient(0deg, color-mix(in srgb, var(--color-border) 28%, transparent) 1px, transparent 1px), linear-gradient(90deg, color-mix(in srgb, var(--color-border) 28%, transparent) 1px, transparent 1px)"
-              : "none",
-            backgroundSize: `${GRID * zoom}px ${GRID * zoom}px`,
-            cursor:
-              previewMode
-                ? "default"
-                : tool === "delete"
-                ? "not-allowed"
-                : tool === "move"
-                  ? "grab"
-                  : tool === "resize"
-                    ? "nwse-resize"
-                    : tool === "select"
-                      ? "default"
-                      : "crosshair",
-          }}
-        >
-          <canvas
-            ref={canvasRef}
-            onPointerDown={down}
-            onPointerMove={move}
-            onPointerUp={up}
-            onDoubleClick={dbl}
-          />
-          {previewMode && (
-            <div className="pointer-events-none absolute left-3 top-3 z-10">
-              <span className="badge-neutral">
-                <Eye className="h-3.5 w-3.5" />
-                Preview mode
-              </span>
-            </div>
-          )}
-          {!previewMode && (
-            <div className="pointer-events-none absolute left-3 top-3 z-10">
-              <span className="badge-neutral">
-                <MousePointer2 className="h-3.5 w-3.5" />
-                {tool === "room" && shape === "polygon"
-                  ? "Click to add corners. Double-click to finish."
-                  : tool === "path"
-                    ? "Click door anchors or waypoints. Enter / double-click / Esc to finish."
-                    : tool === "measure"
-                      ? "Click two points to measure."
-                      : "Select or draw on the canvas."}
-              </span>
-            </div>
-          )}
-          {measure && (
-            <div className="pointer-events-none absolute right-3 top-3 z-10">
-              <span className="badge-neutral">
-                <PencilRuler className="h-3.5 w-3.5" />
-                {measure.pixels?.toFixed(0) || 0} px
-                {measure.meters ? ` | ${measure.meters.toFixed(1)} m` : ""}
-              </span>
-            </div>
-          )}
-        </div>
-      </section>
-
-      <aside className="map-editor__aside">
-        <section className="map-editor__panel">
-          <div className="flex items-start justify-between gap-3">
-            <div>
-              <h2 className="map-editor__panel-title">
-                {showHelp ? "How To Use The Editor" : `${selected?.kind || "Selection"} Properties`}
-              </h2>
-              <p className="map-editor__property-text">
-                {showHelp
-                  ? "Shortcuts, guidance, and map overlay alignment."
-                  : "Update the selected element details."}
-              </p>
-            </div>
-            <div className="flex items-center gap-2">
-              {selected && !showHelp && (
-                <button type="button" onClick={() => setSelectionId(null)} className="btn-ghost px-3">
-                  <X className="h-4 w-4" />
-                </button>
-              )}
-              {selected && (
-                <button
-                  type="button"
-                  title="Show help"
-                  aria-label="Show help"
-                  onClick={() => setShowHelpPanel((current) => !current)}
-                  className="btn-ghost px-3"
-                >
-                  <HelpCircle className="h-4 w-4" />
-                </button>
-              )}
-            </div>
-          </div>
-          {showHelp ? (
-            <div className="map-editor__property-grid mt-4">
-              <div>
-                <div className="section-label">Drawing</div>
-                <div className="map-editor__help-list mt-3">
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">R</span><span>Room — Click and drag to draw a room</span></div>
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">D</span><span>Door — Click on a wall to place a door</span></div>
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">W</span><span>Waypoint — Click to place a navigation point</span></div>
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">P</span><span>Path — Click waypoints to connect them</span></div>
-                </div>
-              </div>
-
-              <div className="map-editor__divider" />
-
-              <div>
-                <div className="section-label">Editing</div>
-                <div className="map-editor__help-list mt-3">
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">S</span><span>Select — Click any element to select</span></div>
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">M</span><span>Move — Drag selected elements</span></div>
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">Del</span><span>Delete — Remove selected element</span></div>
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">Ctrl+Z</span><span>Undo / Ctrl+Y redo</span></div>
-                </div>
-              </div>
-
-              <div className="map-editor__divider" />
-
-              <div>
-                <div className="section-label">Canvas</div>
-                <div className="map-editor__help-list mt-3">
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">Scroll</span><span>Zoom in / out</span></div>
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">Middle</span><span>Drag to pan canvas</span></div>
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">F</span><span>Fit all elements to screen</span></div>
-                  <div className="map-editor__help-row"><span className="map-editor__key-pill">L</span><span>Toggle room labels</span></div>
-                </div>
-              </div>
-
-              <div className="map-editor__divider" />
-
-              <div>
-                <div className="section-label">Tips</div>
-                <ul className="map-editor__tips mt-3">
-                  <li>Draw rooms first, then place doors on walls.</li>
-                  <li>Connect waypoints with paths for navigation routing.</li>
-                  <li>Every room needs at least one waypoint inside it for routing to work.</li>
-                  <li>Use Fit to Screen if you lose your place.</li>
-                </ul>
-              </div>
-
-              <div className="map-editor__divider" />
-
-              <div>
-                <div className="section-label">Overlay Alignment</div>
-                <p className="mt-2 text-xs subtle-text">
-                  World position is driven by the georeference step and saved back into this floor automatically.
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    disabled={previewMode}
-                    onClick={prefillOverlayFromEntrance}
-                    className="map-editor__mini-button"
-                  >
-                    <MapPin className="h-4 w-4" />
-                    Approximate Bounds
-                  </button>
-                </div>
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  {["north", "south", "west", "east"].map((key) => (
-                    <div key={key}>
-                      <label className="field-label capitalize">{key}</label>
-                      <input
-                        className="input"
-                        type="number"
-                        step="any"
-                        disabled={previewMode}
-                        value={model.overlayBounds?.[key] ?? ""}
-                        onChange={(event) => updateOverlayBound(key, event.target.value)}
-                        placeholder={key === "north" || key === "south" ? "23.02887" : "72.55078"}
-                      />
-                    </div>
-                  ))}
-                </div>
-                {!cleanOverlayBounds(model.overlayBounds) && !model.geo?.corners?.length && (
-                  <div className="mt-3 rounded-lg border border-default bg-surface-alt px-3 py-2 text-xs text-secondary">
-                    Complete "Position on World" for this floor before publishing navigation.
-                  </div>
-                )}
-              </div>
-
-              <div className="map-editor__divider" />
-
-              <div>
-                <div className="section-label">Navigation Readiness</div>
-                <div className="mt-3 rounded-lg border border-default bg-surface-alt px-3 py-3 text-xs text-secondary">
-                  <div className="flex items-center justify-between">
-                    <span>Rooms</span>
-                    <span>{model.elements.filter((element) => element.kind === "room").length}</span>
-                  </div>
-                  <div className="mt-2 flex items-center justify-between">
-                    <span>Waypoints</span>
-                    <span>{model.elements.filter((element) => element.kind === "waypoint").length}</span>
-                  </div>
-                  <div className="mt-2 flex items-center justify-between">
-                    <span>Paths</span>
-                    <span>{model.elements.filter((element) => element.kind === "path").length}</span>
-                  </div>
-                  <div className="mt-2 flex items-center justify-between">
-                    <span>Beacons</span>
-                    <span>{model.elements.filter((element) => element.kind === "beacon").length}</span>
-                  </div>
-                </div>
-                <div className="mt-3 grid gap-2">
-                  {readinessIssues.length === 0 ? (
-                    <div className="rounded-lg border border-[color:rgba(34,197,94,0.25)] bg-[color:rgba(34,197,94,0.08)] px-3 py-2 text-xs text-secondary">
-                      This floor is ready for search, routing, overlay alignment, and positioning tests.
-                    </div>
-                  ) : (
-                    readinessIssues.map((issue) => (
-                      <div key={issue} className="rounded-lg border border-default bg-surface-alt px-3 py-2 text-xs text-secondary">
-                        {issue}
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              <div className="map-editor__divider" />
-
-              <div>
-                <div className="section-label">3D Preview</div>
-                <div className="mt-3 grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="field-label">Wall Height</label>
-                    <input
-                      className="input"
-                      type="number"
-                      step="0.1"
-                      disabled={previewMode}
-                      value={model.threeD?.wallHeight ?? 3.2}
-                      onChange={(event) =>
-                        mutate((next) => {
-                          next.threeD = next.threeD || {};
-                          next.threeD.wallHeight = event.target.value;
-                        }, false)
-                      }
-                    />
-                  </div>
-                  <div>
-                    <label className="field-label">Extrusion</label>
-                    <input
-                      className="input"
-                      type="number"
-                      step="0.1"
-                      disabled={previewMode}
-                      value={model.threeD?.extrusionHeight ?? 3.2}
-                      onChange={(event) =>
-                        mutate((next) => {
-                          next.threeD = next.threeD || {};
-                          next.threeD.extrusionHeight = event.target.value;
-                        }, false)
-                      }
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-          ) : (
-            <div className="map-editor__property-grid mt-6">
-              {selected.kind !== "path" && selected.kind !== "beacon" && (
-                <div>
-                  <label className="field-label">Name</label>
-                  <input className="input" disabled={previewMode} value={selected.name || ""} onChange={(event) => updateElement(selected.id, (element) => { element.name = event.target.value; })} placeholder="Main Lobby" />
-                </div>
-              )}
-              {selected.kind === "room" && (
-                <>
-                  <div className="section-label">Room Properties</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="field-label">Shape</label>
-                      <select
-                        className="select"
-                        disabled={previewMode}
-                        value={selected.shapePreset || "rectangle"}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.shapePreset = event.target.value;
-                          })
-                        }
-                      >
-                        {SHAPE_PRESETS.map((entry) => (
-                          <option key={entry.id} value={entry.id}>
-                            {entry.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <label className="field-label">Rotation</label>
-                      <div className="flex items-center gap-2">
-                        <span className="flex h-10 w-10 items-center justify-center rounded-lg border border-default bg-surface-alt text-secondary">
-                          <RotateCw className="h-4 w-4" />
-                        </span>
-                        <input
-                          className="input"
-                          type="number"
-                          step="1"
-                          disabled={previewMode}
-                          value={Math.round(selected.rotation || 0)}
-                          onChange={(event) =>
-                            updateElement(selected.id, (element) => {
-                              element.rotation = Number.parseFloat(event.target.value) || 0;
-                            })
-                          }
-                          placeholder="0"
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <label className="field-label">Width</label>
-                      <input
-                        className="input"
-                        type="number"
-                        min={MIN_SIZE}
-                        step="1"
-                        disabled={previewMode}
-                        value={Math.round(selected.width || 0)}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.width = Math.max(
-                              MIN_SIZE,
-                              Number.parseFloat(event.target.value) || MIN_SIZE,
-                            );
-                          })
-                        }
-                      />
-                    </div>
-                    <div>
-                      <label className="field-label">Height</label>
-                      <input
-                        className="input"
-                        type="number"
-                        min={MIN_SIZE}
-                        step="1"
-                        disabled={previewMode}
-                        value={Math.round(selected.height || 0)}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.height = Math.max(
-                              MIN_SIZE,
-                              Number.parseFloat(event.target.value) || MIN_SIZE,
-                            );
-                          })
-                        }
-                      />
-                    </div>
-                    <div>
-                      <label className="field-label">Map Icon</label>
-                      <select
-                        className="select"
-                        disabled={previewMode}
-                        value={selected.iconPreset || "auto"}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.iconPreset = event.target.value;
-                          })
-                        }
-                      >
-                        {ICON_PRESETS.map((entry) => (
-                          <option key={entry.id} value={entry.id}>
-                            {entry.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="field-label">Type</label>
-                    <select
-                      className="select"
-                      disabled={previewMode}
-                      value={selected.roomType || defaultRoomType(buildingIndustry)}
-                      onChange={(event) =>
-                        updateElement(selected.id, (element) => {
-                          element.roomType = event.target.value;
-                          if (event.target.value !== "custom") {
-                            element.customLabel = "";
-                            element.customValue = "";
-                          }
-                        })
-                      }
-                    >
-                      {getRoomTypes(buildingIndustry).map((entry) => {
-                        return (
-                          <option key={entry.id} value={entry.id}>
-                            {entry.label}
-                          </option>
-                        );
-                      })}
-                    </select>
-                  </div>
-                  {selected.roomType === "custom" && (
-                    <div>
-                      <label className="field-label">Custom Label</label>
-                      <input className="input" disabled={previewMode} value={selected.customLabel || ""} onChange={(event) => updateElement(selected.id, (element) => {
-                        element.customLabel = event.target.value;
-                        element.customValue = slugify(event.target.value);
-                      })} placeholder="Quiet Room" />
-                    </div>
-                  )}
-                  <div>
-                    <label className="field-label">Description</label>
-                    <textarea className="textarea" rows={2} disabled={previewMode} value={selected.description || ""} onChange={(event) => updateElement(selected.id, (element) => { element.description = event.target.value; })} placeholder="Helpful notes for destination search." />
-                  </div>
-                  <div>
-                    <label className="field-label">Color</label>
-                    <div className="flex flex-wrap items-center gap-2">
-                      {roomColorPresets.map((color) => (
-                        <button
-                          key={color}
-                          type="button"
-                          disabled={previewMode}
-                          onClick={() => updateElement(selected.id, (element) => { element.color = color; })}
-                          className={`map-editor__color-swatch ${(selected.color || "#2563EB").toLowerCase() === color.toLowerCase() ? "is-active" : ""}`}
-                          style={{ background: color }}
-                        />
-                      ))}
-                      <input type="color" disabled={previewMode} className="map-editor__color-input" value={selected.color || "#2563eb"} onChange={(event) => updateElement(selected.id, (element) => { element.color = event.target.value; })} />
-                      <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.color = ""; })} className="map-editor__mini-button">
-                        Reset
-                      </button>
-                    </div>
-                  </div>
-                  <div className="map-editor__divider" />
-                  <div className="section-label">Accessibility</div>
-                  <div className="grid gap-2">
-                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.wheelchairAccessible = !element.wheelchairAccessible; })} className={`map-editor__toggle ${selected.wheelchairAccessible ? "is-active" : ""}`}><Accessibility className="h-4 w-4" />Wheelchair accessible</button>
-                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.publicAccess = !element.publicAccess; })} className={`map-editor__toggle ${selected.publicAccess ? "is-active" : ""}`}><Check className="h-4 w-4" />Public access</button>
-                  </div>
-                  <div className="map-editor__divider" />
-                  <div className="section-label">Doors</div>
-                  <div className="grid gap-2">
-                    {attachedDoors.length === 0 ? (
-                      <div className="rounded-lg border border-default bg-surface-alt px-3 py-3 text-xs text-secondary">
-                        No doors attached yet. Add one and CampusNav will snap it to the room edge with a routing anchor.
-                      </div>
-                    ) : (
-                      attachedDoors.map((door, index) => (
-                        <div key={door.id} className="rounded-lg border border-default bg-surface-alt px-3 py-3">
-                          <div className="flex items-center justify-between gap-2">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectionId(door.id);
-                                setShowHelpPanel(false);
-                                setTool("select");
-                              }}
-                              className="text-sm font-medium text-primary"
-                            >
-                              {door.name || `Door ${index + 1}`}
-                            </button>
-                            <button
-                              type="button"
-                              disabled={previewMode}
-                              onClick={() => removeSelected(door.id)}
-                              className="map-editor__mini-button is-danger"
-                            >
-                              Remove
-                            </button>
-                          </div>
-                          <div className="mt-3 grid grid-cols-2 gap-2">
-                            <div>
-                              <label className="field-label">Edge</label>
-                              <select
-                                className="select"
-                                disabled={previewMode}
-                                value={door.edge || "right"}
-                                onChange={(event) =>
-                                  updateElement(door.id, (element) => {
-                                    element.edge = event.target.value;
-                                  })
-                                }
-                              >
-                                <option value="left">Left</option>
-                                <option value="right">Right</option>
-                                <option value="top">Top</option>
-                                <option value="bottom">Bottom</option>
-                              </select>
-                            </div>
-                            <div>
-                              <label className="field-label">Offset</label>
-                              <input
-                                className="input"
-                                type="range"
-                                min="0.05"
-                                max="0.95"
-                                step="0.01"
-                                disabled={previewMode}
-                                value={door.offset ?? 0.5}
-                                onChange={(event) =>
-                                  updateElement(door.id, (element) => {
-                                    element.offset = Number.parseFloat(event.target.value);
-                                  })
-                                }
-                              />
-                            </div>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                    <button
-                      type="button"
-                      disabled={previewMode}
-                      onClick={() => {
-                        const managed = createManagedDoor(selected, attachedDoors.length);
-                        mutate((next) => {
-                          next.elements.push(managed.door, managed.waypoint);
-                        });
-                        setSelectionId(managed.door.id);
-                      }}
-                      className="map-editor__mini-button"
-                    >
-                      <DoorOpen className="h-4 w-4" />
-                      Add Door
-                    </button>
-                    <button
-                      type="button"
-                      disabled={previewMode}
-                      onClick={() => downloadRoomQr(selected)}
-                      className="map-editor__mini-button"
-                    >
-                      <Download className="h-4 w-4" />
-                      Download Room QR
-                    </button>
-                  </div>
-                </>
-              )}
-              {selected.kind === "door" && (
-                <>
-                  <div className="section-label">Door Properties</div>
-                  <div>
-                    <label className="field-label">Type</label>
-                    <select className="select" disabled={previewMode} value={selected.doorType || "main_entrance"} onChange={(event) => updateElement(selected.id, (element) => { element.doorType = event.target.value; })}>
-                      <option value="main_entrance">Main Entrance</option>
-                      <option value="emergency_exit">Emergency Exit</option>
-                      <option value="staff_only">Staff Only</option>
-                      <option value="fire_door">Fire Door</option>
-                      <option value="custom">Custom</option>
-                    </select>
-                  </div>
-                  <div>
-                    <label className="field-label">Width (m)</label>
-                    <input className="input" type="number" step="0.1" disabled={previewMode} value={selected.widthMeters ?? ""} onChange={(event) => updateElement(selected.id, (element) => { element.widthMeters = event.target.value; })} placeholder="1.2" />
-                  </div>
-                  {selected.roomId && (
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="field-label">Edge</label>
-                        <select
-                          className="select"
-                          disabled={previewMode}
-                          value={selected.edge || "right"}
-                          onChange={(event) => updateElement(selected.id, (element) => { element.edge = event.target.value; })}
-                        >
-                          <option value="left">Left</option>
-                          <option value="right">Right</option>
-                          <option value="top">Top</option>
-                          <option value="bottom">Bottom</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="field-label">Offset</label>
-                        <input
-                          className="input"
-                          type="range"
-                          min="0.05"
-                          max="0.95"
-                          step="0.01"
-                          disabled={previewMode}
-                          value={selected.offset ?? 0.5}
-                          onChange={(event) => updateElement(selected.id, (element) => { element.offset = Number.parseFloat(event.target.value); })}
-                        />
-                      </div>
-                    </div>
-                  )}
-                  <div className="map-editor__divider" />
-                  <div className="section-label">Accessibility</div>
-                  <div className="grid gap-2">
-                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.accessible = !element.accessible; })} className={`map-editor__toggle ${selected.accessible ? "is-active" : ""}`}><Accessibility className="h-4 w-4" />Accessible</button>
-                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.locked = !element.locked; })} className={`map-editor__toggle ${selected.locked ? "is-active" : ""}`}><Check className="h-4 w-4" />Locked by default</button>
-                  </div>
-                </>
-              )}
-              {selected.kind === "waypoint" && (
-                <>
-                  <div className="section-label">Waypoint Properties</div>
-                  <p className="text-xs subtle-text">
-                    Waypoints are routing anchor points. Paths connect through them so the navigator knows exactly where a user can move.
-                  </p>
-                  <div>
-                    <label className="field-label">Type</label>
-                    <select className="select" disabled={previewMode} value={selected.transitionType === "elevator" || selected.transitionType === "stairs" ? selected.transitionType : selected.waypointType || "junction"} onChange={(event) => updateElement(selected.id, (element) => {
-                      const value = event.target.value;
-                      if (value === "elevator" || value === "stairs") {
-                        element.transitionType = value;
-                        element.waypointType = "junction";
-                      } else {
-                        element.transitionType = "none";
-                        element.waypointType = value;
-                      }
-                    })}>
-                      <option value="entrance">Entrance</option>
-                      <option value="junction">Junction</option>
-                      <option value="destination">Destination</option>
-                      <option value="elevator">Elevator</option>
-                      <option value="stairs">Stairs</option>
-                      <option value="custom">Custom</option>
-                    </select>
-                  </div>
-                  {selected.waypointType === "custom" && (
-                    <div>
-                      <label className="field-label">Custom Label</label>
-                      <input className="input" disabled={previewMode} value={selected.customWaypointLabel || ""} onChange={(event) => updateElement(selected.id, (element) => { element.customWaypointLabel = event.target.value; })} placeholder="Transfer Point" />
-                    </div>
-                  )}
-                  <div>
-                    <label className="field-label">Floor Connection</label>
-                    <select className="select" disabled={previewMode} value={selected.linkedFloorId || ""} onChange={(event) => updateElement(selected.id, (element) => { element.linkedFloorId = event.target.value || null; })}>
-                      <option value="">No linked floor</option>
-                      {floors.filter((floor) => floor.id !== floorData?.id).map((floor) => <option key={floor.id} value={floor.id}>{floor.name}</option>)}
-                    </select>
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="field-label">X</label>
-                      <input className="input" type="number" disabled={previewMode} value={Math.round(selected.x || 0)} onChange={(event) => updateElement(selected.id, (element) => {
-                        element.x = Number.parseFloat(event.target.value) || 0;
-                        if (element.linkedRoomId && !element.linkedDoorId) {
-                          const room = model.elements.find((item) => item.kind === "room" && item.id === element.linkedRoomId);
-                          if (room) {
-                            element.roomRatioX = clamp((element.x - room.x) / Math.max(room.width, 1), 0.08, 0.92);
-                          }
-                        }
-                      })} />
-                    </div>
-                    <div>
-                      <label className="field-label">Y</label>
-                      <input className="input" type="number" disabled={previewMode} value={Math.round(selected.y || 0)} onChange={(event) => updateElement(selected.id, (element) => {
-                        element.y = Number.parseFloat(event.target.value) || 0;
-                        if (element.linkedRoomId && !element.linkedDoorId) {
-                          const room = model.elements.find((item) => item.kind === "room" && item.id === element.linkedRoomId);
-                          if (room) {
-                            element.roomRatioY = clamp((element.y - room.y) / Math.max(room.height, 1), 0.08, 0.92);
-                          }
-                        }
-                      })} />
-                    </div>
-                  </div>
-                </>
-              )}
-              {selected.kind === "path" && (
-                <>
-                  <div className="section-label">Path Properties</div>
-                  <div>
-                    <label className="field-label">Label</label>
-                    <input className="input" disabled={previewMode} value={selected.name || ""} onChange={(event) => updateElement(selected.id, (element) => { element.name = event.target.value; })} placeholder="Optional" />
-                  </div>
-                  <div className="grid gap-2">
-                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.bidirectional = true; })} className={`map-editor__toggle ${selected.bidirectional ? "is-active" : ""}`}><GitBranch className="h-4 w-4" />Bidirectional</button>
-                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.bidirectional = false; })} className={`map-editor__toggle ${!selected.bidirectional ? "is-active" : ""}`}><Spline className="h-4 w-4" />One-way</button>
-                  </div>
-                  <div className="grid gap-2">
-                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.accessible = !element.accessible; })} className={`map-editor__toggle ${selected.accessible ? "is-active" : ""}`}><Accessibility className="h-4 w-4" />Accessible route</button>
-                    <button type="button" disabled={previewMode} onClick={() => updateElement(selected.id, (element) => { element.staffOnly = !element.staffOnly; })} className={`map-editor__toggle ${selected.staffOnly ? "is-active" : ""}`}><Check className="h-4 w-4" />Staff only</button>
-                  </div>
-                </>
-              )}
-              {selected.kind === "beacon" && (
-                <>
-                  <div className="section-label">Beacon Properties</div>
-                  <div>
-                    <label className="field-label">Beacon Name</label>
-                    <input className="input" disabled={previewMode} value={selected.name || ""} onChange={(event) => updateElement(selected.id, (element) => { element.name = event.target.value; })} placeholder="Entrance Beacon" />
-                  </div>
-                  <div>
-                    <label className="field-label">Hardware ID</label>
-                    <input className="input" disabled={previewMode} value={selected.beaconId || ""} onChange={(event) => updateElement(selected.id, (element) => { element.beaconId = event.target.value; })} placeholder="BEACON-01" />
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="field-label">Radius (m)</label>
-                      <input className="input" type="number" step="0.1" disabled={previewMode} value={selected.radiusMeters ?? ""} onChange={(event) => updateElement(selected.id, (element) => { element.radiusMeters = event.target.value; })} placeholder="2.5" />
-                    </div>
-                    <div>
-                      <label className="field-label">TX Power</label>
-                      <input className="input" type="number" step="1" disabled={previewMode} value={selected.txPower ?? ""} onChange={(event) => updateElement(selected.id, (element) => { element.txPower = event.target.value; })} placeholder="-59" />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="field-label">Notes</label>
-                    <textarea className="textarea" rows={2} disabled={previewMode} value={selected.notes || ""} onChange={(event) => updateElement(selected.id, (element) => { element.notes = event.target.value; })} placeholder="Mounted near the main corridor ceiling." />
-                  </div>
-                </>
-              )}
-              {selected.kind === "wall" && (
-                <>
-                  <div className="section-label">Wall Properties</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="field-label">Start X</label>
-                      <input
-                        className="input"
-                        type="number"
-                        disabled={previewMode}
-                        value={Math.round(selected.x1 || 0)}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.x1 = Number.parseFloat(event.target.value) || 0;
-                          })
-                        }
-                      />
-                    </div>
-                    <div>
-                      <label className="field-label">Start Y</label>
-                      <input
-                        className="input"
-                        type="number"
-                        disabled={previewMode}
-                        value={Math.round(selected.y1 || 0)}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.y1 = Number.parseFloat(event.target.value) || 0;
-                          })
-                        }
-                      />
-                    </div>
-                    <div>
-                      <label className="field-label">End X</label>
-                      <input
-                        className="input"
-                        type="number"
-                        disabled={previewMode}
-                        value={Math.round(selected.x2 || 0)}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.x2 = Number.parseFloat(event.target.value) || 0;
-                          })
-                        }
-                      />
-                    </div>
-                    <div>
-                      <label className="field-label">End Y</label>
-                      <input
-                        className="input"
-                        type="number"
-                        disabled={previewMode}
-                        value={Math.round(selected.y2 || 0)}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.y2 = Number.parseFloat(event.target.value) || 0;
-                          })
-                        }
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="field-label">Thickness</label>
-                    <input
-                      className="input"
-                      type="number"
-                      step="1"
-                      min="2"
-                      disabled={previewMode}
-                      value={selected.thickness || 6}
-                      onChange={(event) =>
-                        updateElement(selected.id, (element) => {
-                          element.thickness =
-                            Math.max(2, Number.parseFloat(event.target.value) || 6);
-                        })
-                      }
-                    />
-                  </div>
-                </>
-              )}
-              {selected.kind === "window" && (
-                <>
-                  <div className="section-label">Window Properties</div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="field-label">X</label>
-                      <input
-                        className="input"
-                        type="number"
-                        disabled={previewMode}
-                        value={Math.round(selected.x || 0)}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.x = Number.parseFloat(event.target.value) || 0;
-                          })
-                        }
-                      />
-                    </div>
-                    <div>
-                      <label className="field-label">Y</label>
-                      <input
-                        className="input"
-                        type="number"
-                        disabled={previewMode}
-                        value={Math.round(selected.y || 0)}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.y = Number.parseFloat(event.target.value) || 0;
-                          })
-                        }
-                      />
-                    </div>
-                  </div>
-                  <div>
-                    <label className="field-label">Width</label>
-                    <input
-                      className="input"
-                      type="number"
-                      step="1"
-                      min="8"
-                      disabled={previewMode}
-                      value={selected.width || 28}
-                      onChange={(event) =>
-                        updateElement(selected.id, (element) => {
-                          element.width =
-                            Math.max(8, Number.parseFloat(event.target.value) || 28);
-                        })
-                      }
-                    />
-                  </div>
-                </>
-              )}
-              {selected.kind === "object" && (
-                <>
-                <div className="section-label">Object Properties</div>
-                <div>
-                  <label className="field-label">Label</label>
-                    <input
-                      className="input"
-                      disabled={previewMode}
-                      value={selected.label || ""}
-                      onChange={(event) =>
-                        updateElement(selected.id, (element) => {
-                          element.label = event.target.value;
-                          element.name = event.target.value;
-                        })
-                      }
-                      placeholder="Elevator"
-                    />
-                  </div>
-                  <div className="grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="field-label">Type</label>
-                      <select
-                        className="select"
-                        disabled={previewMode}
-                        value={selected.objectType || "poi"}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.objectType = event.target.value;
-                            element.iconPreset =
-                              event.target.value === "exit" ? "exit" : "info";
-                          })
-                        }
-                      >
-                        <option value="poi">POI</option>
-                        <option value="stairs">Stairs</option>
-                        <option value="elevator">Elevator</option>
-                        <option value="restroom">Restroom</option>
-                        <option value="exit">Exit</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="field-label">Icon</label>
-                      <select
-                        className="select"
-                        disabled={previewMode}
-                        value={selected.iconPreset || "info"}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.iconPreset = event.target.value;
-                          })
-                        }
-                      >
-                        {ICON_PRESETS.map((entry) => (
-                          <option key={entry.id} value={entry.id}>
-                            {entry.label}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  <div className="mt-2">
-                    <label className="field-label">Description</label>
-                    <textarea
-                      className="textarea"
-                      rows={2}
-                      disabled={previewMode}
-                      value={selected.description || ""}
-                      onChange={(event) =>
-                        updateElement(selected.id, (element) => {
-                          element.description = event.target.value;
-                        })
-                      }
-                      placeholder="Helpful details shown in destination cards."
-                    />
-                  </div>
-                  <div className="mt-2 grid grid-cols-2 gap-2">
-                    <div>
-                      <label className="field-label">Photo URL</label>
-                      <input
-                        className="input"
-                        disabled={previewMode}
-                        value={selected.photoUrl || ""}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.photoUrl = event.target.value;
-                          })
-                        }
-                        placeholder="https://example.com/photo.jpg"
-                      />
-                    </div>
-                    <div>
-                      <label className="field-label">Route Room</label>
-                      <select
-                        className="select"
-                        disabled={previewMode}
-                        value={selected.linkedRoomId || ""}
-                        onChange={(event) =>
-                          updateElement(selected.id, (element) => {
-                            element.linkedRoomId = event.target.value || null;
-                          })
-                        }
-                      >
-                        <option value="">Nearest waypoint</option>
-                        {model.elements
-                          .filter((element) => element.kind === "room")
-                          .map((room) => (
-                            <option key={room.id} value={room.id}>
-                              {room.name || "Unnamed room"}
-                            </option>
-                          ))}
-                      </select>
-                    </div>
-                  </div>
-                </>
-              )}
-              <div className="map-editor__divider" />
-              <div className="section-label">Actions</div>
-              <div className="map-editor__utility-row">
-                {selected.kind !== "path" && (
-                  <button
-                    type="button"
-                    disabled={previewMode}
-                    onClick={() => {
-                      const source = clone(selected);
-                      const duplicate = {
-                        ...source,
-                        id: uuidv4(),
-                        x: source.x !== undefined ? source.x + 24 : source.x,
-                        y: source.y !== undefined ? source.y + 24 : source.y,
-                        points: source.points?.map((point) => ({ x: point.x + 24, y: point.y + 24 })),
-                      };
-                      addElement(duplicate);
-                    }}
-                    className="map-editor__mini-button"
-                  >
-                    Duplicate
-                  </button>
-                )}
-                <button type="button" disabled={previewMode} onClick={() => removeSelected(selected.id)} className="map-editor__mini-button is-danger"><Trash2 className="h-4 w-4" />Delete</button>
-              </div>
-            </div>
-          )}
-        </section>
-        {false && (
-        <section className="map-editor__panel">
-          <h2 className="map-editor__panel-title">Live Summary</h2>
-          <div className="map-editor__meta-list">
-            <div className="rounded-lg border border-default bg-surface-alt px-3 py-3 text-sm text-secondary">
-              <div className="flex items-center justify-between"><span>Rooms / POIs</span><span>{model.elements.filter((element) => element.kind === "room").length}</span></div>
-              <div className="mt-2 flex items-center justify-between"><span>Waypoints</span><span>{model.elements.filter((element) => element.kind === "waypoint").length}</span></div>
-              <div className="mt-2 flex items-center justify-between"><span>Paths</span><span>{model.elements.filter((element) => element.kind === "path").length}</span></div>
-              <div className="mt-2 flex items-center justify-between"><span>Doors</span><span>{model.elements.filter((element) => element.kind === "door").length}</span></div>
-            </div>
-            {measure && (
-              <div className="rounded-lg border border-default bg-surface-alt px-3 py-3 text-sm text-secondary">
-                <div className="font-medium text-primary">Latest Measurement</div>
-                <div className="mt-2">{measure.pixels?.toFixed(0) || 0} px{measure.meters ? ` · ${measure.meters.toFixed(1)} m` : ""}</div>
-              </div>
-            )}
-            <div className="rounded-lg border border-default bg-surface-alt px-3 py-3 text-sm text-secondary">
-              <div className="font-medium text-primary">{dirty ? "Unsaved changes" : "Saved state"}</div>
-              <div className="mt-2">Undo: {undoCount} · Redo: {redoCount}</div>
-            </div>
-          </div>
-        </section>
-        )}
-      </aside>
-
-      <AiTraceModal
-        open={aiTraceModalOpen}
-        scope={aiTraceScope}
-        options={aiTraceOptions}
-        running={aiTraceRunning}
-        stepIndex={aiTraceStep}
-        onClose={() => {
-          if (!aiTraceRunning) {
-            setAiTraceModalOpen(false);
-            setAiTraceStep(0);
-          }
-        }}
-        onScopeChange={setAiTraceScope}
-        onToggleOption={(key) =>
-          setAiTraceOptions((current) => ({ ...current, [key]: !current[key] }))
+    <>
+      <AiModal
+        open={aiModalOpen}
+        running={aiRunning}
+        options={aiOptions}
+        scope={aiScope}
+        step={aiStep}
+        onClose={() => setAiModalOpen(false)}
+        onScope={setAiScope}
+        onToggle={(key) =>
+          setAiOptions((current) => ({ ...current, [key]: !current[key] }))
         }
-        onRun={runAiTrace}
+        onRun={runAiMapping}
       />
 
-      <input ref={bgInputRef} type="file" accept="image/*" className="hidden" onChange={uploadBackground} />
-      <input ref={jsonInputRef} type="file" accept=".json,application/json" className="hidden" onChange={importJson} />
-    </div>
+      <div className="flex h-full min-h-0 bg-[var(--color-surface)]">
+        <aside className="w-72 shrink-0 border-r border-default bg-surface p-3">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+            Draw Tools
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-2">
+            {[
+              ["select", "Select", "S", Move],
+              ["wall", "Wall", "W", Pencil],
+              ["room", "Room", "R", Square],
+              ["door", "Door", "D", Plus],
+              ["window", "Window", "I", Plus],
+              ["waypoint", "Waypoint", "P", Plus],
+              ["path", "Path", "E", GitBranch],
+            ].map(([id, label, key, Icon]) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setTool(id)}
+                className={`flex items-center gap-2 rounded-md border px-2 py-2 text-left text-sm ${tool === id ? "border-blue-600 bg-blue-50 text-blue-700" : "border-default"}`}
+              >
+                <Icon className="h-4 w-4" />
+                <span>{label}</span>
+                <span className="ml-auto text-xs text-muted">{key}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="mt-4 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+            Room Shape
+          </div>
+          <div className="mt-2 flex gap-2">
+            <button
+              type="button"
+              className={`rounded-md px-3 py-1 text-sm ${roomShape === "rectangle" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"}`}
+              onClick={() => setRoomShape("rectangle")}
+            >
+              Rectangle
+            </button>
+            <button
+              type="button"
+              className={`rounded-md px-3 py-1 text-sm ${roomShape === "polygon" ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-700"}`}
+              onClick={() => setRoomShape("polygon")}
+            >
+              Polygon
+            </button>
+          </div>
+
+          <div className="mt-4 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+            Room Type
+          </div>
+          <select
+            className="mt-2 w-full rounded-md border border-default px-2 py-2 text-sm"
+            value={roomKind}
+            onChange={(event) => setRoomKind(event.target.value)}
+          >
+            <option value="room">Classroom / Room</option>
+            <option value="corridor">Corridor</option>
+            <option value="stairs">Stairs</option>
+            <option value="elevator">Elevator</option>
+            <option value="entrance">Entrance</option>
+            <option value="canteen">Canteen</option>
+            <option value="store">Store</option>
+            <option value="atm">ATM</option>
+            <option value="emergency">Emergency</option>
+            <option value="parking">Parking</option>
+          </select>
+
+          <div className="mt-4 text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+            Utilities
+          </div>
+          <div className="mt-2 space-y-2">
+            <button
+              type="button"
+              onClick={() => setShowBackground((v) => !v)}
+              className="flex w-full items-center gap-2 rounded-md border border-default px-2 py-2 text-sm"
+            >
+              {showBackground ? (
+                <Eye className="h-4 w-4" />
+              ) : (
+                <EyeOff className="h-4 w-4" />
+              )}{" "}
+              Background
+            </button>
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              className="flex w-full items-center gap-2 rounded-md border border-default px-2 py-2 text-sm"
+            >
+              <ImagePlus className="h-4 w-4" /> Import Floor Image
+            </button>
+            <button
+              type="button"
+              onClick={() => importInputRef.current?.click()}
+              className="flex w-full items-center gap-2 rounded-md border border-default px-2 py-2 text-sm"
+            >
+              <Import className="h-4 w-4" /> Import MVF JSON
+            </button>
+            <button
+              type="button"
+              onClick={exportMvf}
+              className="flex w-full items-center gap-2 rounded-md border border-default px-2 py-2 text-sm"
+            >
+              <Download className="h-4 w-4" /> Export MVF JSON
+            </button>
+            <button
+              type="button"
+              onClick={validateMap}
+              className="flex w-full items-center gap-2 rounded-md border border-default px-2 py-2 text-sm"
+            >
+              <Save className="h-4 w-4" /> Validate
+            </button>
+            <button
+              type="button"
+              onClick={autoGenerateWaypoints}
+              className="flex w-full items-center gap-2 rounded-md border border-default px-2 py-2 text-sm"
+            >
+              <GitBranch className="h-4 w-4" /> Auto Waypoints
+            </button>
+            <button
+              type="button"
+              onClick={() => setAiModalOpen(true)}
+              className="flex w-full items-center gap-2 rounded-md border border-blue-200 bg-blue-50 px-2 py-2 text-sm text-blue-700"
+            >
+              <Sparkles className="h-4 w-4" /> Auto Trace Draft
+            </button>
+            <button
+              type="button"
+              onClick={() => setSnapEnabled((value) => !value)}
+              className={`flex w-full items-center gap-2 rounded-md border px-2 py-2 text-sm ${snapEnabled ? "border-blue-200 bg-blue-50 text-blue-700" : "border-default"}`}
+            >
+              <Magnet className="h-4 w-4" /> Snap {snapEnabled ? "ON" : "OFF"}
+            </button>
+          </div>
+
+          <div className="mt-4">
+            <label className="text-xs text-muted">
+              Scale (pixels per meter)
+            </label>
+            <input
+              type="number"
+              min="1"
+              className="mt-1 w-full rounded-md border border-default px-2 py-1 text-sm"
+              value={Number(mvf.meta?.pixelsPerMeter || 20)}
+              onChange={(event) => {
+                const next = Number(event.target.value || 20);
+                updateMvf((state) => {
+                  state.meta.pixelsPerMeter = next;
+                }, false);
+              }}
+            />
+          </div>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (!file) return;
+              const reader = new FileReader();
+              reader.onload = () => {
+                const dataUrl = String(reader.result || "");
+                const image = new window.Image();
+                image.onload = () => {
+                  setBackgroundImage(image);
+                  updateMvf((next) => {
+                    next.meta.imageWidth = image.width;
+                    next.meta.imageHeight = image.height;
+                  }, false);
+                };
+                image.src = dataUrl;
+              };
+              reader.readAsDataURL(file);
+            }}
+          />
+
+          <input
+            ref={importInputRef}
+            type="file"
+            accept="application/json"
+            className="hidden"
+            onChange={(event) => {
+              const file = event.target.files?.[0];
+              if (file) importMvf(file);
+            }}
+          />
+        </aside>
+
+        <div
+          ref={containerRef}
+          className="relative min-h-0 flex-1 overflow-hidden bg-slate-100"
+          onDoubleClick={onDoubleClick}
+        >
+          <Stage
+            ref={stageRef}
+            width={size.width}
+            height={size.height}
+            scaleX={scale}
+            scaleY={scale}
+            x={position.x}
+            y={position.y}
+            draggable={tool === "select"}
+            onDragEnd={(event) =>
+              setPosition({ x: event.target.x(), y: event.target.y() })
+            }
+            onWheel={(event) => {
+              event.evt.preventDefault();
+              const factor = event.evt.deltaY > 0 ? 0.92 : 1.08;
+              zoomBy(factor);
+            }}
+            onMouseDown={onMouseDown}
+            onMouseMove={onMouseMove}
+            onMouseUp={onMouseUp}
+          >
+            <Layer listening={false}>
+              {showGrid &&
+                Array.from({ length: 300 }).map((_, index) => (
+                  <Line
+                    key={`grid-x-${index}`}
+                    points={[index * 40, 0, index * 40, 6000]}
+                    stroke="#e2e8f0"
+                    strokeWidth={0.5}
+                  />
+                ))}
+              {showGrid &&
+                Array.from({ length: 200 }).map((_, index) => (
+                  <Line
+                    key={`grid-y-${index}`}
+                    points={[0, index * 40, 6000, index * 40]}
+                    stroke="#e2e8f0"
+                    strokeWidth={0.5}
+                  />
+                ))}
+            </Layer>
+
+            <Layer>
+              {showBackground && backgroundImage ? (
+                <KonvaImage
+                  image={backgroundImage}
+                  width={mvf.meta?.imageWidth || backgroundImage.width}
+                  height={mvf.meta?.imageHeight || backgroundImage.height}
+                  opacity={0.85}
+                />
+              ) : null}
+            </Layer>
+
+            <Layer>
+              {mvf.spaces.features.map((feature) => {
+                const points = roomPolygon(feature);
+                const center = polygonCenter(points);
+                const kind = String(
+                  feature.properties?.kind || "room",
+                ).toLowerCase();
+                const fill = ROOM_COLORS[kind] || ROOM_COLORS.room;
+                const selectedNow = selected === feature.id;
+                return (
+                  <Group key={feature.id}>
+                    <Line
+                      points={flatten(points)}
+                      closed
+                      fill={fill}
+                      stroke={selectedNow ? "#1d4ed8" : "#4b5563"}
+                      strokeWidth={selectedNow ? 2.4 : 1.5}
+                      onClick={() => setSelected(feature.id)}
+                      draggable={!previewMode && tool === "select"}
+                      onDragEnd={(event) => {
+                        const dx = event.target.x();
+                        const dy = event.target.y();
+                        event.target.position({ x: 0, y: 0 });
+                        updateMvf((next) => {
+                          const target = next.spaces.features.find(
+                            (entry) => entry.id === feature.id,
+                          );
+                          if (!target) return;
+                          target.geometry.coordinates[0] =
+                            target.geometry.coordinates[0].map((coord) => [
+                              coord[0] + dx,
+                              coord[1] + dy,
+                            ]);
+                        });
+                      }}
+                      onDblClick={() => {
+                        const name = window.prompt(
+                          "Rename space",
+                          feature.properties?.name || "Room",
+                        );
+                        if (name === null) return;
+                        updateSelectionProperty("name", name.trim() || "Room");
+                      }}
+                    />
+                    <Text
+                      x={center.x - 60}
+                      y={center.y - 10}
+                      width={120}
+                      align="center"
+                      text={feature.properties?.name || "Room"}
+                      fontSize={12}
+                      fill="#111827"
+                      listening={false}
+                    />
+                    {selectedNow && (
+                      <Rect
+                        x={polygonBounds(points).x}
+                        y={polygonBounds(points).y}
+                        width={polygonBounds(points).width}
+                        height={polygonBounds(points).height}
+                        stroke="#2563eb"
+                        dash={[6, 4]}
+                        listening={false}
+                      />
+                    )}
+                  </Group>
+                );
+              })}
+
+              {mvf.obstructions.features.map((feature) => {
+                const coordinates = feature.geometry?.coordinates || [];
+                if (coordinates.length < 2) return null;
+                const a = toPointFromCoords(coordinates[0]);
+                const b = toPointFromCoords(coordinates[1]);
+                const selectedNow = selected === feature.id;
+                return (
+                  <Group key={feature.id}>
+                    <Line
+                      points={[a.x, a.y, b.x, b.y]}
+                      stroke="#333333"
+                      strokeWidth={feature.properties?.thickness || 4}
+                      onClick={() => setSelected(feature.id)}
+                    />
+                    {selectedNow && !previewMode && (
+                      <>
+                        <Circle
+                          x={a.x}
+                          y={a.y}
+                          radius={6}
+                          fill="#2563eb"
+                          draggable
+                          onDragMove={(event) => {
+                            updateMvf((next) => {
+                              const target = next.obstructions.features.find(
+                                (entry) => entry.id === feature.id,
+                              );
+                              if (!target) return;
+                              target.geometry.coordinates[0] = [
+                                event.target.x(),
+                                event.target.y(),
+                              ];
+                            }, false);
+                          }}
+                          onDragEnd={() => pushHistory(mvfRef.current)}
+                        />
+                        <Circle
+                          x={b.x}
+                          y={b.y}
+                          radius={6}
+                          fill="#2563eb"
+                          draggable
+                          onDragMove={(event) => {
+                            updateMvf((next) => {
+                              const target = next.obstructions.features.find(
+                                (entry) => entry.id === feature.id,
+                              );
+                              if (!target) return;
+                              target.geometry.coordinates[1] = [
+                                event.target.x(),
+                                event.target.y(),
+                              ];
+                            }, false);
+                          }}
+                          onDragEnd={() => pushHistory(mvfRef.current)}
+                        />
+                      </>
+                    )}
+                  </Group>
+                );
+              })}
+
+              {mvf.openings.features.map((feature) => {
+                const point = toPointFromCoords(feature.geometry?.coordinates);
+                const kind = feature.properties?.kind;
+                const selectedNow = selected === feature.id;
+                if (kind === "door") {
+                  return (
+                    <Group
+                      key={feature.id}
+                      onClick={() => setSelected(feature.id)}
+                    >
+                      <Line
+                        points={[point.x - 12, point.y, point.x + 12, point.y]}
+                        stroke="#2196F3"
+                        strokeWidth={3}
+                      />
+                      <Line
+                        points={[point.x, point.y, point.x + 8, point.y - 8]}
+                        stroke="#2196F3"
+                        strokeWidth={2}
+                      />
+                      {selectedNow && (
+                        <Circle
+                          x={point.x}
+                          y={point.y}
+                          radius={5}
+                          stroke="#1d4ed8"
+                        />
+                      )}
+                    </Group>
+                  );
+                }
+
+                return (
+                  <Group
+                    key={feature.id}
+                    onClick={() => setSelected(feature.id)}
+                  >
+                    <Line
+                      points={[
+                        point.x - 10,
+                        point.y - 3,
+                        point.x + 10,
+                        point.y - 3,
+                      ]}
+                      stroke="#00BCD4"
+                      strokeWidth={2}
+                    />
+                    <Line
+                      points={[
+                        point.x - 10,
+                        point.y + 3,
+                        point.x + 10,
+                        point.y + 3,
+                      ]}
+                      stroke="#00BCD4"
+                      strokeWidth={2}
+                    />
+                    {selectedNow && (
+                      <Circle
+                        x={point.x}
+                        y={point.y}
+                        radius={5}
+                        stroke="#1d4ed8"
+                      />
+                    )}
+                  </Group>
+                );
+              })}
+
+              {showNavGraph &&
+                navEdges.map((edge, index) => {
+                  const source = nodeMap.get(edge.from);
+                  const target = nodeMap.get(edge.to);
+                  if (!source || !target) return null;
+                  const a = source.geometry.coordinates;
+                  const b = target.geometry.coordinates;
+                  return (
+                    <Line
+                      key={`edge-${index}-${edge.from}-${edge.to}`}
+                      points={[a[0], a[1], b[0], b[1]]}
+                      stroke="#00C853"
+                      strokeWidth={1.5}
+                      dash={[5, 5]}
+                      listening={false}
+                    />
+                  );
+                })}
+
+              {showNavGraph &&
+                mvf.nodes.features.map((feature) => {
+                  const point = toPointFromCoords(feature.geometry.coordinates);
+                  return (
+                    <Circle
+                      key={feature.id}
+                      x={point.x}
+                      y={point.y}
+                      radius={5}
+                      fill="#00C853"
+                      stroke="#007B33"
+                      strokeWidth={1.2}
+                      onClick={() => setSelected(feature.id)}
+                      draggable={!previewMode && tool === "select"}
+                      onDragMove={(event) => {
+                        updateMvf((next) => {
+                          const target = next.nodes.features.find(
+                            (entry) => entry.id === feature.id,
+                          );
+                          if (!target) return;
+                          target.geometry.coordinates = [
+                            event.target.x(),
+                            event.target.y(),
+                          ];
+                        }, false);
+                      }}
+                      onDragEnd={() => pushHistory(mvfRef.current)}
+                    />
+                  );
+                })}
+
+              {drawing?.kind === "wall" && (
+                <Line
+                  points={[
+                    drawing.start.x,
+                    drawing.start.y,
+                    drawing.end.x,
+                    drawing.end.y,
+                  ]}
+                  stroke="#334155"
+                  strokeWidth={3}
+                  dash={[6, 5]}
+                  listening={false}
+                />
+              )}
+
+              {drawing?.kind === "room" && (
+                <Rect
+                  x={Math.min(drawing.start.x, drawing.end.x)}
+                  y={Math.min(drawing.start.y, drawing.end.y)}
+                  width={Math.abs(drawing.end.x - drawing.start.x)}
+                  height={Math.abs(drawing.end.y - drawing.start.y)}
+                  fill="#9370DB33"
+                  stroke="#4c1d95"
+                  dash={[6, 4]}
+                  listening={false}
+                />
+              )}
+
+              {polygonDraft.length > 0 && (
+                <Line
+                  points={flatten(polygonDraft)}
+                  stroke="#6d28d9"
+                  strokeWidth={2}
+                  dash={[5, 4]}
+                  listening={false}
+                />
+              )}
+            </Layer>
+          </Stage>
+        </div>
+
+        <aside className="w-80 shrink-0 border-l border-default bg-surface p-3">
+          <div className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+            How to use the editor
+          </div>
+          <ul className="mt-2 space-y-1 text-sm text-slate-600">
+            <li>S: Select elements</li>
+            <li>W: Draw walls (angle snaps to 0/45/90)</li>
+            <li>R: Draw rooms (rectangle or polygon)</li>
+            <li>D: Place doors on walls</li>
+            <li>I: Place windows</li>
+            <li>P: Place waypoints</li>
+            <li>E: Connect waypoints</li>
+            <li>Ctrl+Z / Ctrl+Y: Undo / Redo</li>
+          </ul>
+
+          <div className="mt-4 rounded-lg border border-default p-3">
+            <div className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+              Selection
+            </div>
+            {!selectedFeatureData ? (
+              <div className="mt-2 text-sm text-slate-500">
+                Select an element to edit properties.
+              </div>
+            ) : (
+              <div className="mt-2 space-y-2">
+                <div className="text-sm font-medium text-slate-800">
+                  {selectedFeatureData.properties?.name ||
+                    selectedFeatureData.properties?.kind ||
+                    "Element"}
+                </div>
+                {selectedFeatureData.properties && (
+                  <>
+                    <label className="block text-xs text-slate-500">Name</label>
+                    <input
+                      className="w-full rounded-md border border-default px-2 py-1 text-sm"
+                      value={selectedFeatureData.properties.name || ""}
+                      onChange={(event) =>
+                        updateSelectionProperty("name", event.target.value)
+                      }
+                    />
+                    {selectedFeatureData.properties.color !== undefined && (
+                      <>
+                        <label className="block text-xs text-slate-500">
+                          Color
+                        </label>
+                        <input
+                          type="color"
+                          className="h-9 w-full rounded-md border border-default"
+                          value={
+                            selectedFeatureData.properties.color || "#9370DB"
+                          }
+                          onChange={(event) =>
+                            updateSelectionProperty("color", event.target.value)
+                          }
+                        />
+                      </>
+                    )}
+                  </>
+                )}
+                <button
+                  type="button"
+                  className="w-full rounded-md bg-red-600 px-3 py-2 text-sm font-medium text-white"
+                  onClick={removeSelection}
+                >
+                  Delete
+                </button>
+              </div>
+            )}
+          </div>
+
+          <div className="mt-4 grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => setShowNavGraph((value) => !value)}
+              className="rounded-md border border-default px-2 py-2 text-sm"
+            >
+              {showNavGraph ? "Hide Graph" : "Show Graph"}
+            </button>
+            <button
+              type="button"
+              onClick={saveMap}
+              className="rounded-md bg-blue-600 px-2 py-2 text-sm font-medium text-white"
+            >
+              Save
+            </button>
+          </div>
+
+          <div className="mt-4 text-xs text-slate-500">
+            {counts.rooms} spaces • {counts.waypoints} waypoints •{" "}
+            {counts.paths} edges • zoom {Math.round(scale * 100)}%
+          </div>
+        </aside>
+      </div>
+    </>
   );
 });
 

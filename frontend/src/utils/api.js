@@ -265,6 +265,7 @@ export const api = {
   // Floors: /api/v1/floors
   floors: {
     get: (id) => api.get(`/floors/${id}`),
+    getMapData: (id) => api.get(`/floors/${id}/map-data`),
     byBuilding: (buildingId) => api.get(`/floors/building/${buildingId}`),
     create: (data) => api.post("/floors", data),
     update: (id, data) => api.put(`/floors/${id}`, data),

@@ -1,661 +1,668 @@
-// CampusNav update — MapLibreNavigationMap.jsx
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { Building2, ZoomIn, ZoomOut } from "lucide-react";
-import IndoorCanvas from "./IndoorCanvas.jsx";
-import { mapLibreAdapter } from "./adapters/mapLibreAdapter.js";
+import { Info, Plus, Minus } from "lucide-react";
+import { MAPLIBRE_STYLE } from "./mapProviderConfig.js";
 
-const ROUTE_SOURCE_ID = "campusnav-outdoor-route";
-const ROUTE_LAYER_ID = "campusnav-outdoor-route-layer";
-const FLOOR_IMAGE_SOURCE_ID = "campusnav-floor-image";
-const FLOOR_IMAGE_LAYER_ID = "campusnav-floor-image-layer";
-const FOCUS_BUILDING_SOURCE_ID = "campusnav-focus-building";
-const FOCUS_BUILDING_LAYER_ID = "campusnav-focus-building-layer";
-const KNOWN_ICON_IDS = [
-  "office",
-  "room",
-  "exit",
-  "info",
-  "stairs",
-  "elevator",
-  "dining",
-  "help",
-  "departments",
-  "retail",
-  "facility",
-];
+const OUTDOOR_EXTRUSION_ID = "building-extrusion";
+const INDOOR_SPACES_SOURCE = "indoor-spaces";
+const INDOOR_WALLS_SOURCE = "indoor-walls";
+const INDOOR_POI_SOURCE = "indoor-pois";
+const ROUTE_SOURCE = "indoor-route";
+const ROUTE_LAYER = "route-line";
 
-function createMarkerElement(color) {
-  const marker = document.createElement("div");
-  marker.style.width = "16px";
-  marker.style.height = "16px";
-  marker.style.borderRadius = "999px";
-  marker.style.background = color;
-  marker.style.border = "3px solid white";
-  marker.style.boxShadow = "0 8px 20px rgba(15,23,42,0.2)";
-  return marker;
+function solveLinearSystem(matrix, vector) {
+  const n = matrix.length;
+  const augmented = matrix.map((row, index) => [...row, vector[index]]);
+
+  for (let i = 0; i < n; i += 1) {
+    let maxRow = i;
+    for (let j = i + 1; j < n; j += 1) {
+      if (Math.abs(augmented[j][i]) > Math.abs(augmented[maxRow][i])) {
+        maxRow = j;
+      }
+    }
+    if (Math.abs(augmented[maxRow][i]) < 1e-12) return null;
+    [augmented[i], augmented[maxRow]] = [augmented[maxRow], augmented[i]];
+    const pivot = augmented[i][i];
+    for (let col = i; col <= n; col += 1) augmented[i][col] /= pivot;
+    for (let row = 0; row < n; row += 1) {
+      if (row === i) continue;
+      const factor = augmented[row][i];
+      for (let col = i; col <= n; col += 1) {
+        augmented[row][col] -= factor * augmented[i][col];
+      }
+    }
+  }
+
+  return augmented.map((row) => row[n]);
 }
 
-function fallbackIconColor(iconId = "") {
-  const normalized = String(iconId).toLowerCase();
-  if (normalized.includes("exit")) return "#16A34A";
-  if (normalized.includes("dining") || normalized.includes("food")) return "#F59E0B";
-  if (normalized.includes("office") || normalized.includes("room")) return "#2563EB";
-  if (normalized.includes("help") || normalized.includes("info")) return "#64748B";
-  return "#7C3AED";
+function homographyFromCorners(pixelCorners, geoCorners) {
+  if (pixelCorners.length !== 4 || geoCorners.length !== 4) return null;
+  const matrix = [];
+  const vector = [];
+
+  for (let i = 0; i < 4; i += 1) {
+    const [x, y] = pixelCorners[i];
+    const [lng, lat] = geoCorners[i];
+
+    matrix.push([x, y, 1, 0, 0, 0, -x * lng, -y * lng]);
+    vector.push(lng);
+
+    matrix.push([0, 0, 0, x, y, 1, -x * lat, -y * lat]);
+    vector.push(lat);
+  }
+
+  const solved = solveLinearSystem(matrix, vector);
+  if (!solved) return null;
+  return [
+    [solved[0], solved[1], solved[2]],
+    [solved[3], solved[4], solved[5]],
+    [solved[6], solved[7], 1],
+  ];
 }
 
-async function createFallbackIconImageData(iconId) {
-  const color = fallbackIconColor(iconId);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><circle cx="32" cy="32" r="20" fill="${color}" stroke="#FFFFFF" stroke-width="4" /></svg>`;
-  const blob = new Blob([svg], { type: "image/svg+xml;charset=utf-8" });
-  const objectUrl = URL.createObjectURL(blob);
+function applyHomography(H, x, y) {
+  if (!H) return null;
+  const denom = H[2][0] * x + H[2][1] * y + H[2][2];
+  if (Math.abs(denom) < 1e-10) return null;
+  const lng = (H[0][0] * x + H[0][1] * y + H[0][2]) / denom;
+  const lat = (H[1][0] * x + H[1][1] * y + H[1][2]) / denom;
+  return [lng, lat];
+}
 
-  try {
-    const image = await new Promise((resolve, reject) => {
-      const nextImage = new Image();
-      nextImage.onload = () => resolve(nextImage);
-      nextImage.onerror = () => reject(new Error("Unable to load fallback icon SVG."));
-      nextImage.src = objectUrl;
-    });
+function buildHomography(georeference, mapData) {
+  if (Array.isArray(georeference?.transform?.homography)) {
+    return georeference.transform.homography;
+  }
+
+  const corners = Array.isArray(georeference?.corners)
+    ? georeference.corners
+    : [];
+  if (corners.length !== 4) return null;
+
+  const width = Number(mapData?.meta?.imageWidth || 2000);
+  const height = Number(mapData?.meta?.imageHeight || 1500);
+
+  return homographyFromCorners(
+    [
+      [0, 0],
+      [width, 0],
+      [width, height],
+      [0, height],
+    ],
+    corners.map((corner) => [corner.lng, corner.lat]),
+  );
+}
+
+function featureCenter(polygon) {
+  if (!polygon?.length) return [0, 0];
+  const ring = polygon[0] || [];
+  const usable = ring.slice(0, -1);
+  if (!usable.length) return [0, 0];
+  const sum = usable.reduce(
+    (acc, coord) => [acc[0] + coord[0], acc[1] + coord[1]],
+    [0, 0],
+  );
+  return [sum[0] / usable.length, sum[1] / usable.length];
+}
+
+function convertIndoorGeojson(mapData, homography) {
+  const spaces = mapData?.spaces?.features || [];
+  const walls = mapData?.obstructions?.features || [];
+  const objects = mapData?.objects?.features || [];
+
+  const spacesGeo = {
+    type: "FeatureCollection",
+    features: spaces
+      .map((feature) => {
+        const ring = feature?.geometry?.coordinates?.[0] || [];
+        const converted = ring
+          .map((coord) => applyHomography(homography, coord[0], coord[1]))
+          .filter(Boolean);
+        if (converted.length < 4) return null;
+        return {
+          type: "Feature",
+          id: feature.id,
+          properties: {
+            kind: feature.properties?.kind || "room",
+            name: feature.properties?.name || "Room",
+            color: feature.properties?.color || "#8b5cf6",
+          },
+          geometry: {
+            type: "Polygon",
+            coordinates: [converted],
+          },
+        };
+      })
+      .filter(Boolean),
+  };
+
+  const wallsGeo = {
+    type: "FeatureCollection",
+    features: walls
+      .map((feature) => {
+        const coords = feature?.geometry?.coordinates || [];
+        if (coords.length !== 2) return null;
+        const a = applyHomography(homography, coords[0][0], coords[0][1]);
+        const b = applyHomography(homography, coords[1][0], coords[1][1]);
+        if (!a || !b) return null;
+        return {
+          type: "Feature",
+          id: feature.id,
+          properties: { kind: "wall" },
+          geometry: { type: "LineString", coordinates: [a, b] },
+        };
+      })
+      .filter(Boolean),
+  };
+
+  const poiGeo = {
+    type: "FeatureCollection",
+    features: [
+      ...spaces
+        .map((feature) => {
+          const center = featureCenter(feature.geometry?.coordinates);
+          const point = applyHomography(homography, center[0], center[1]);
+          if (!point) return null;
+          const kind = String(
+            feature.properties?.kind || "facility",
+          ).toLowerCase();
+          const category = kind === "corridor" ? "facility" : kind;
+          return {
+            type: "Feature",
+            id: feature.id,
+            properties: {
+              name: feature.properties?.name || "Room",
+              category,
+              kind,
+            },
+            geometry: { type: "Point", coordinates: point },
+          };
+        })
+        .filter(Boolean),
+      ...objects
+        .map((feature) => {
+          const coord = feature?.geometry?.coordinates || [];
+          const point = applyHomography(homography, coord[0], coord[1]);
+          if (!point) return null;
+          const kind = String(
+            feature.properties?.kind || "facility",
+          ).toLowerCase();
+          return {
+            type: "Feature",
+            id: feature.id,
+            properties: {
+              name: feature.properties?.label || kind,
+              category: kind,
+              kind,
+            },
+            geometry: { type: "Point", coordinates: point },
+          };
+        })
+        .filter(Boolean),
+    ],
+  };
+
+  return { spacesGeo, wallsGeo, poiGeo };
+}
+
+function colorForCategory(category) {
+  const value = String(category || "").toLowerCase();
+  if (value.includes("dining") || value.includes("canteen")) return "#f59e0b";
+  if (value.includes("retail") || value.includes("store")) return "#8b5cf6";
+  if (value.includes("exit") || value.includes("entrance")) return "#22c55e";
+  if (value.includes("stairs") || value.includes("elevator")) return "#2563eb";
+  return "#64748b";
+}
+
+function registerGlobalImageMissingHandler(map) {
+  const handler = (event) => {
+    const id = event.id;
+    if (!id?.startsWith("pin-")) return;
+    if (map.hasImage(id)) return;
+
+    const category = id.replace("pin-", "");
     const canvas = document.createElement("canvas");
     canvas.width = 64;
     canvas.height = 64;
     const ctx = canvas.getContext("2d");
+
     ctx.clearRect(0, 0, 64, 64);
-    ctx.drawImage(image, 0, 0, 64, 64);
-    return ctx.getImageData(0, 0, 64, 64);
-  } finally {
-    URL.revokeObjectURL(objectUrl);
-  }
+    ctx.fillStyle = colorForCategory(category);
+    ctx.beginPath();
+    ctx.arc(32, 32, 17, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 5;
+    ctx.stroke();
+
+    map.addImage(id, ctx.getImageData(0, 0, 64, 64));
+  };
+
+  map.on("styleimagemissing", handler);
+  return () => map.off("styleimagemissing", handler);
 }
 
-function registerFallbackIcons(map) {
-  const pending = new Set();
-  const ensureIcon = async (iconId) => {
-    if (!iconId || map.hasImage(iconId) || pending.has(iconId)) return;
-    pending.add(iconId);
-    try {
-      const imageData = await createFallbackIconImageData(iconId);
-      if (!map.hasImage(iconId)) {
-        map.addImage(iconId, imageData);
-      }
-    } catch (error) {
-      console.warn(`Unable to register fallback icon "${iconId}":`, error);
-    } finally {
-      pending.delete(iconId);
-    }
-  };
-
-  KNOWN_ICON_IDS.forEach((iconId) => {
-    void ensureIcon(iconId);
-  });
-
-  const handleMissingImage = (event) => {
-    void ensureIcon(event.id);
-  };
-  map.on("styleimagemissing", handleMissingImage);
-
-  return () => map.off("styleimagemissing", handleMissingImage);
-}
-
-function upsertGeoJsonLine(map, coordinates) {
-  const data = {
-    type: "FeatureCollection",
-    features: coordinates?.length
-      ? [
-          {
-            type: "Feature",
-            geometry: {
-              type: "LineString",
-              coordinates,
-            },
-          },
-        ]
-      : [],
-  };
-
-  const source = map.getSource(ROUTE_SOURCE_ID);
+function updateOrCreateGeoSource(map, id, data) {
+  const source = map.getSource(id);
   if (source) {
     source.setData(data);
     return;
   }
-
-  map.addSource(ROUTE_SOURCE_ID, {
-    type: "geojson",
-    data,
-  });
-
-  map.addLayer({
-    id: ROUTE_LAYER_ID,
-    type: "line",
-    source: ROUTE_SOURCE_ID,
-    paint: {
-      "line-color": "#2563EB",
-      "line-width": 6,
-      "line-opacity": 0.88,
-    },
-    layout: {
-      "line-cap": "round",
-      "line-join": "round",
-    },
-  });
+  map.addSource(id, { type: "geojson", data });
 }
 
-function removeRouteLayer(map) {
-  if (map.getLayer(ROUTE_LAYER_ID)) map.removeLayer(ROUTE_LAYER_ID);
-  if (map.getSource(ROUTE_SOURCE_ID)) map.removeSource(ROUTE_SOURCE_ID);
-}
-
-function normalizeOverlayCoordinates(bounds, corners) {
-  if (Array.isArray(corners) && corners.length >= 4) {
-    const ordered = ["nw", "ne", "se", "sw"]
-      .map((id) => corners.find((corner) => corner.id === id))
-      .filter(Boolean);
-    const usable = ordered.length === 4 ? ordered : corners.slice(0, 4);
-    if (usable.length === 4) {
-      return usable.map((corner) => [corner.lng, corner.lat]);
-    }
+function routeToGeojson(routePath, homography) {
+  if (!Array.isArray(routePath) || !routePath.length || !homography) {
+    return { type: "FeatureCollection", features: [] };
   }
 
-  return bounds ? mapLibreAdapter.getImageOverlayCoordinates(bounds) : null;
-}
+  const coordinates = routePath
+    .map((point) =>
+      applyHomography(homography, Number(point.x), Number(point.y)),
+    )
+    .filter(Boolean);
 
-function boundsFromCorners(corners) {
-  const usable = normalizeOverlayCoordinates(null, corners);
-  if (!usable?.length) return null;
-  const lngs = usable.map((point) => point[0]);
-  const lats = usable.map((point) => point[1]);
-  return {
-    north: Math.max(...lats),
-    south: Math.min(...lats),
-    east: Math.max(...lngs),
-    west: Math.min(...lngs),
-  };
-}
-
-function upsertFloorImageOverlay(map, imageUrl, bounds, corners) {
-  const coordinates = normalizeOverlayCoordinates(bounds, corners);
-  if (!coordinates) return;
-  const existingSource = map.getSource(FLOOR_IMAGE_SOURCE_ID);
-
-  if (existingSource?.updateImage) {
-    existingSource.updateImage({ url: imageUrl, coordinates });
-  } else {
-    if (map.getLayer(FLOOR_IMAGE_LAYER_ID)) map.removeLayer(FLOOR_IMAGE_LAYER_ID);
-    if (map.getSource(FLOOR_IMAGE_SOURCE_ID)) map.removeSource(FLOOR_IMAGE_SOURCE_ID);
-
-    map.addSource(FLOOR_IMAGE_SOURCE_ID, {
-      type: "image",
-      url: imageUrl,
-      coordinates,
-    });
-  }
-
-  if (!map.getLayer(FLOOR_IMAGE_LAYER_ID)) {
-    map.addLayer({
-      id: FLOOR_IMAGE_LAYER_ID,
-      type: "raster",
-      source: FLOOR_IMAGE_SOURCE_ID,
-      paint: {
-        "raster-opacity": 0.28,
-      },
-    });
-  }
-}
-
-function removeFloorImageOverlay(map) {
-  if (map.getLayer(FLOOR_IMAGE_LAYER_ID)) map.removeLayer(FLOOR_IMAGE_LAYER_ID);
-  if (map.getSource(FLOOR_IMAGE_SOURCE_ID)) map.removeSource(FLOOR_IMAGE_SOURCE_ID);
-}
-
-function buildingFeature(bounds, entranceCenter) {
-  const safeBounds = bounds
-    ? bounds
-    : entranceCenter
-      ? {
-          north: entranceCenter[0] + 0.00008,
-          south: entranceCenter[0] - 0.00008,
-          east: entranceCenter[1] + 0.00008,
-          west: entranceCenter[1] - 0.00008,
-        }
-      : null;
-
-  if (!safeBounds) return null;
+  if (coordinates.length < 2)
+    return { type: "FeatureCollection", features: [] };
 
   return {
-    type: "Feature",
-    properties: {
-      extrusionHeight: 28,
-      baseHeight: 0,
-    },
-    geometry: {
-      type: "Polygon",
-      coordinates: [[
-        [safeBounds.west, safeBounds.north],
-        [safeBounds.east, safeBounds.north],
-        [safeBounds.east, safeBounds.south],
-        [safeBounds.west, safeBounds.south],
-        [safeBounds.west, safeBounds.north],
-      ]],
-    },
-  };
-}
-
-function upsertFocusBuildingExtrusion(map, bounds, entranceCenter) {
-  const feature = buildingFeature(bounds, entranceCenter);
-
-  if (!feature) {
-    if (map.getLayer(FOCUS_BUILDING_LAYER_ID)) map.removeLayer(FOCUS_BUILDING_LAYER_ID);
-    if (map.getSource(FOCUS_BUILDING_SOURCE_ID)) map.removeSource(FOCUS_BUILDING_SOURCE_ID);
-    return;
-  }
-
-  const data = {
     type: "FeatureCollection",
-    features: [feature],
-  };
-
-  const source = map.getSource(FOCUS_BUILDING_SOURCE_ID);
-  if (source) {
-    source.setData(data);
-  } else {
-    map.addSource(FOCUS_BUILDING_SOURCE_ID, {
-      type: "geojson",
-      data,
-    });
-  }
-
-  if (!map.getLayer(FOCUS_BUILDING_LAYER_ID)) {
-    map.addLayer({
-      id: FOCUS_BUILDING_LAYER_ID,
-      type: "fill-extrusion",
-      source: FOCUS_BUILDING_SOURCE_ID,
-      minzoom: 15,
-      paint: {
-        "fill-extrusion-color": [
-          "interpolate",
-          ["linear"],
-          ["zoom"],
-          15,
-          "#93C5FD",
-          18.5,
-          "#2563EB",
-        ],
-        "fill-extrusion-height": ["get", "extrusionHeight"],
-        "fill-extrusion-base": ["get", "baseHeight"],
-        "fill-extrusion-opacity": 0.78,
+    features: [
+      {
+        type: "Feature",
+        geometry: { type: "LineString", coordinates },
+        properties: {},
       },
-    });
-  }
-}
-
-function LoadingIndoorState() {
-  return (
-    <div className="flex h-full items-center justify-center px-6">
-      <div className="card-sm flex items-center gap-3">
-        <div className="h-8 w-8 animate-spin rounded-full border-2 border-accent border-t-transparent" />
-        <span className="text-sm subtle-text">Loading indoor map...</span>
-      </div>
-    </div>
-  );
+    ],
+  };
 }
 
 export default function MapLibreNavigationMap({
-  mode,
-  entranceCenter,
   building,
-  floorData,
-  floorImage,
-  currentFloorPath,
-  fromRoom,
-  toRoom,
-  currentFloor,
-  isDark,
-  currentOverlayBounds,
-  roomPickTarget,
-  overlayVisible,
-  selectRoom,
-  hasGeoAnchor,
-  outdoorFitPoints,
-  outdoorRoute,
-  userLocation,
-  viewMode = "2d",
-  sensorPosition = null,
-  showBeacons = true,
+  floors,
+  currentFloorId,
+  onFloorSelect,
+  mapData,
+  georeference,
+  routePath,
+  destinationLabel,
+  onExitBuilding,
+  onPoiDirections,
+  onPoiSelect,
+  infoAction,
 }) {
-  const containerRef = useRef(null);
+  const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
-  const entranceMarkerRef = useRef(null);
-  const userMarkerRef = useRef(null);
   const [mapReady, setMapReady] = useState(false);
-  const [mapBridge, setMapBridge] = useState(null);
-  const [mapZoom, setMapZoom] = useState(17);
+  const [selectedPoi, setSelectedPoi] = useState(null);
 
-  const shouldUseMapOverlay = Boolean(hasGeoAnchor);
-  const autoIndoorReveal = shouldUseMapOverlay && mapZoom >= 18.15;
-  const indoorVisible = shouldUseMapOverlay
-    ? mapZoom >= 18.05 && (mode === "indoor" || autoIndoorReveal)
-    : mode === "indoor" || (!entranceCenter && floorData);
-  const floorImageUrl =
-    floorData?.floor_plan_url ||
-    floorData?.map_data?.floors?.find((entry) => entry.id === floorData?.id)?.backgroundDataUrl ||
-    null;
-  const outdoorRouteCoordinates = useMemo(
-    () => (outdoorRoute || []).map(mapLibreAdapter.toLngLat),
-    [outdoorRoute],
+  const maptilerKey = import.meta.env.VITE_MAPTILER_KEY || "";
+  const style = maptilerKey
+    ? `https://api.maptiler.com/maps/streets/style.json?key=${maptilerKey}`
+    : MAPLIBRE_STYLE;
+
+  const center = useMemo(() => {
+    const lat = Number(building?.entrance_lat);
+    const lng = Number(building?.entrance_lng);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) return [lng, lat];
+    return [72.5714, 23.0225];
+  }, [building?.entrance_lat, building?.entrance_lng]);
+
+  const homography = useMemo(
+    () => buildHomography(georeference, mapData),
+    [georeference, mapData],
   );
-  const currentOverlayCorners = useMemo(() => {
-    const floorEntry =
-      floorData?.map_data?.floors?.find((entry) => entry.id === floorData?.id) ||
-      floorData?.map_data?.floors?.find((entry) => entry.level === floorData?.level) ||
-      floorData?.map_data?.floors?.[0] ||
-      null;
-    return floorEntry?.corners || floorData?.map_data?.georeference?.corners || null;
-  }, [floorData]);
-  const focusBuildingBounds = useMemo(
-    () => currentOverlayBounds || boundsFromCorners(currentOverlayCorners),
-    [currentOverlayBounds, currentOverlayCorners],
+  const indoorGeo = useMemo(
+    () => convertIndoorGeojson(mapData || {}, homography),
+    [mapData, homography],
+  );
+  const routeGeo = useMemo(
+    () => routeToGeojson(routePath, homography),
+    [routePath, homography],
   );
 
   useEffect(() => {
-    if (!containerRef.current || mapRef.current || !entranceCenter) return undefined;
+    if (!mapContainerRef.current || mapRef.current) return;
 
     const map = new maplibregl.Map({
-      container: containerRef.current,
-      ...mapLibreAdapter.getMapOptions(entranceCenter, isDark),
+      container: mapContainerRef.current,
+      style,
+      center,
+      zoom: 15,
+      pitch: 50,
+      bearing: -17,
+      antialias: true,
+      attributionControl: false,
     });
 
     map.addControl(
       new maplibregl.AttributionControl({ compact: true }),
-      "bottom-left",
+      "bottom-right",
     );
 
-    let removeFallbackIcons = () => {};
+    const cleanupImageMissing = registerGlobalImageMissingHandler(map);
+
     map.on("load", () => {
-      removeFallbackIcons = registerFallbackIcons(map);
       setMapReady(true);
-      setMapBridge(mapLibreAdapter.buildProjectionBridge(map));
-      setMapZoom(map.getZoom());
+
+      if (
+        map.getSource("openmaptiles") &&
+        !map.getLayer(OUTDOOR_EXTRUSION_ID)
+      ) {
+        map.addLayer({
+          id: OUTDOOR_EXTRUSION_ID,
+          type: "fill-extrusion",
+          source: "openmaptiles",
+          "source-layer": "building",
+          paint: {
+            "fill-extrusion-color": "#aaaaaa",
+            "fill-extrusion-height": ["coalesce", ["get", "render_height"], 12],
+            "fill-extrusion-base": [
+              "coalesce",
+              ["get", "render_min_height"],
+              0,
+            ],
+            "fill-extrusion-opacity": [
+              "interpolate",
+              ["linear"],
+              ["zoom"],
+              17,
+              1,
+              18,
+              0,
+            ],
+          },
+        });
+      }
+
+      updateOrCreateGeoSource(map, INDOOR_SPACES_SOURCE, indoorGeo.spacesGeo);
+      updateOrCreateGeoSource(map, INDOOR_WALLS_SOURCE, indoorGeo.wallsGeo);
+      updateOrCreateGeoSource(map, INDOOR_POI_SOURCE, indoorGeo.poiGeo);
+      updateOrCreateGeoSource(map, ROUTE_SOURCE, routeGeo);
+
+      if (!map.getLayer("indoor-floor")) {
+        map.addLayer({
+          id: "indoor-floor",
+          type: "fill",
+          source: INDOOR_SPACES_SOURCE,
+          paint: {
+            "fill-color": "#f8fafc",
+            "fill-opacity": [
+              "interpolate",
+              ["linear"],
+              ["zoom"],
+              17,
+              0,
+              18,
+              0.75,
+            ],
+          },
+        });
+      }
+
+      if (!map.getLayer("indoor-rooms")) {
+        map.addLayer({
+          id: "indoor-rooms",
+          type: "fill-extrusion",
+          source: INDOOR_SPACES_SOURCE,
+          paint: {
+            "fill-extrusion-color": ["coalesce", ["get", "color"], "#8b5cf6"],
+            "fill-extrusion-height": 3.5,
+            "fill-extrusion-base": 0,
+            "fill-extrusion-opacity": [
+              "interpolate",
+              ["linear"],
+              ["zoom"],
+              17,
+              0,
+              18,
+              0.85,
+            ],
+          },
+        });
+      }
+
+      if (!map.getLayer("indoor-walls")) {
+        map.addLayer({
+          id: "indoor-walls",
+          type: "line",
+          source: INDOOR_WALLS_SOURCE,
+          paint: {
+            "line-color": "#374151",
+            "line-width": ["interpolate", ["linear"], ["zoom"], 17, 0.5, 18, 2],
+            "line-opacity": ["interpolate", ["linear"], ["zoom"], 17, 0, 18, 1],
+          },
+        });
+      }
+
+      if (!map.getLayer("poi-pins")) {
+        map.addLayer({
+          id: "poi-pins",
+          type: "symbol",
+          source: INDOOR_POI_SOURCE,
+          layout: {
+            "icon-image": ["concat", "pin-", ["get", "category"]],
+            "icon-size": 1.2,
+            "icon-allow-overlap": true,
+            "text-field": ["get", "name"],
+            "text-size": 11,
+            "text-offset": [0, 1.5],
+            "text-anchor": "top",
+          },
+          paint: {
+            "text-color": "#0f172a",
+            "text-halo-color": "#ffffff",
+            "text-halo-width": 1,
+          },
+        });
+      }
+
+      if (!map.getLayer(ROUTE_LAYER)) {
+        map.addLayer({
+          id: ROUTE_LAYER,
+          type: "line",
+          source: ROUTE_SOURCE,
+          paint: {
+            "line-color": "#2563eb",
+            "line-width": 5,
+            "line-dasharray": [2, 8],
+            "line-opacity": 0.95,
+          },
+          layout: {
+            "line-cap": "round",
+            "line-join": "round",
+          },
+        });
+      }
+
+      map.on("click", "poi-pins", (event) => {
+        const feature = event.features?.[0];
+        if (!feature) return;
+        setSelectedPoi({
+          id: feature.id,
+          name: feature.properties?.name,
+          category: feature.properties?.category,
+          kind: feature.properties?.kind,
+          coordinates: feature.geometry?.coordinates,
+        });
+        if (onPoiSelect) onPoiSelect(feature);
+      });
+
+      map.on("mouseenter", "poi-pins", () => {
+        map.getCanvas().style.cursor = "pointer";
+      });
+
+      map.on("mouseleave", "poi-pins", () => {
+        map.getCanvas().style.cursor = "";
+      });
+
+      map.on("zoomend", () => {
+        const zoom = map.getZoom();
+        if (zoom > 18 && map.getPitch() < 45) {
+          map.easeTo({ zoom: 18.5, pitch: 50, duration: 800 });
+        }
+      });
     });
 
-    const syncViewport = () => setMapZoom(map.getZoom());
-    map.on("move", syncViewport);
     mapRef.current = map;
 
     return () => {
-      map.off("move", syncViewport);
-      removeFallbackIcons();
-      entranceMarkerRef.current?.remove();
-      entranceMarkerRef.current = null;
-      userMarkerRef.current?.remove();
-      userMarkerRef.current = null;
-      setMapBridge(null);
-      setMapReady(false);
+      cleanupImageMissing();
       map.remove();
       mapRef.current = null;
     };
-  }, [entranceCenter, isDark]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!mapReady || !map) return;
-
-    if (outdoorFitPoints?.length > 1 && mode === "outdoor") {
-      const bounds = new maplibregl.LngLatBounds();
-      outdoorFitPoints.forEach((point) =>
-        bounds.extend(mapLibreAdapter.toLngLat(point)),
-      );
-      map.fitBounds(bounds, { padding: 46, maxZoom: 20, duration: 800 });
-      map.easeTo({ pitch: 45, bearing: -17, duration: 0 });
-      return;
-    }
-
-    if (entranceCenter && mode === "outdoor") {
-      map.easeTo({
-        center: mapLibreAdapter.toLngLat(entranceCenter),
-        zoom: 18,
-        pitch: 45,
-        bearing: -17,
-        duration: 800,
-      });
-    }
-  }, [entranceCenter, mapReady, mode, outdoorFitPoints]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!mapReady || !map || !entranceCenter || mode !== "indoor") return;
-
-    map.easeTo({
-      center: mapLibreAdapter.toLngLat(entranceCenter),
-      zoom: 19,
-      pitch: 0,
-      bearing: 0,
-      duration: 900,
-    });
-  }, [entranceCenter, mapReady, mode]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!mapReady || !map || !entranceCenter || !roomPickTarget) return;
-    if (map.getZoom() >= 18.2) return;
-
-    map.easeTo({
-      center: mapLibreAdapter.toLngLat(entranceCenter),
-      zoom: 19,
-      pitch: 0,
-      bearing: 0,
-      duration: 650,
-    });
-  }, [entranceCenter, mapReady, roomPickTarget]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!mapReady || !map) return;
-
-    if (!entranceCenter) {
-      entranceMarkerRef.current?.remove();
-      entranceMarkerRef.current = null;
-      return;
-    }
-
-    const lngLat = mapLibreAdapter.toLngLat(entranceCenter);
-
-    if (!entranceMarkerRef.current) {
-      entranceMarkerRef.current = new maplibregl.Marker({
-        element: createMarkerElement("#2563EB"),
-      })
-        .setLngLat(lngLat)
-        .addTo(map);
-      return;
-    }
-
-    entranceMarkerRef.current.setLngLat(lngLat);
-  }, [entranceCenter, mapReady]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!mapReady || !map) return;
-
-    if (!userLocation) {
-      userMarkerRef.current?.remove();
-      userMarkerRef.current = null;
-      return;
-    }
-
-    const lngLat = mapLibreAdapter.toLngLat(userLocation);
-    if (!userMarkerRef.current) {
-      userMarkerRef.current = new maplibregl.Marker({
-        element: createMarkerElement("#16A34A"),
-      })
-        .setLngLat(lngLat)
-        .addTo(map);
-      return;
-    }
-
-    userMarkerRef.current.setLngLat(lngLat);
-  }, [mapReady, userLocation]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!mapReady || !map) return;
-
-    if (!outdoorRouteCoordinates.length) {
-      removeRouteLayer(map);
-      return;
-    }
-
-    upsertGeoJsonLine(map, outdoorRouteCoordinates);
-  }, [mapReady, outdoorRouteCoordinates]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!mapReady || !map) return;
-    upsertFocusBuildingExtrusion(map, focusBuildingBounds, entranceCenter);
-  }, [entranceCenter, focusBuildingBounds, mapReady]);
-
-  useEffect(() => {
-    const map = mapRef.current;
-    if (!mapReady || !map) return;
-
-    const visible =
-      indoorVisible &&
-      shouldUseMapOverlay &&
-      Boolean(currentOverlayBounds || currentOverlayCorners) &&
-      Boolean(floorImageUrl);
-
-    if (!visible) {
-      removeFloorImageOverlay(map);
-      return;
-    }
-
-    upsertFloorImageOverlay(
-      map,
-      floorImageUrl,
-      currentOverlayBounds,
-      currentOverlayCorners,
-    );
   }, [
-    currentOverlayBounds,
-    currentOverlayCorners,
-    floorImageUrl,
-    mapReady,
-    indoorVisible,
-    shouldUseMapOverlay,
+    center,
+    indoorGeo.poiGeo,
+    indoorGeo.spacesGeo,
+    indoorGeo.wallsGeo,
+    onPoiSelect,
+    routeGeo,
+    style,
   ]);
 
-  if (!entranceCenter && mode === "indoor") {
-    return (
-      <div className="absolute inset-0 bg-bg">
-        {floorData ? (
-          <IndoorCanvas
-            floorData={floorData}
-            floorImage={floorImage}
-            pathPoints={currentFloorPath}
-            fromRoom={fromRoom}
-            toRoom={toRoom}
-            currentFloorId={currentFloor?.id}
-            isDark={isDark}
-            interactive={Boolean(roomPickTarget)}
-            onRoomPick={roomPickTarget ? selectRoom : undefined}
-            viewMode={viewMode}
-            sensorPosition={sensorPosition}
-            showBeacons={showBeacons}
-            className="h-full w-full"
-          />
-        ) : (
-          <LoadingIndoorState />
-        )}
-      </div>
-    );
-  }
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map) return;
+    updateOrCreateGeoSource(map, INDOOR_SPACES_SOURCE, indoorGeo.spacesGeo);
+    updateOrCreateGeoSource(map, INDOOR_WALLS_SOURCE, indoorGeo.wallsGeo);
+    updateOrCreateGeoSource(map, INDOOR_POI_SOURCE, indoorGeo.poiGeo);
+  }, [indoorGeo, mapReady]);
 
-  if (!entranceCenter) {
-    return (
-      <div className="flex h-full items-center justify-center px-6">
-        <div className="card max-w-lg text-center">
-          <div className="mx-auto flex h-14 w-14 items-center justify-center rounded-xl bg-accent-light text-accent">
-            <Building2 className="h-6 w-6" />
-          </div>
-          <h2 className="mt-6 text-2xl font-bold tracking-[-0.02em]">
-            Entrance coordinates missing
-          </h2>
-          <p className="mt-3 text-sm subtle-text">
-            Ask an administrator to set the building entrance latitude and
-            longitude before using outdoor navigation.
-          </p>
-        </div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map) return;
+    updateOrCreateGeoSource(map, ROUTE_SOURCE, routeGeo);
+  }, [mapReady, routeGeo]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!mapReady || !map || !routeGeo.features.length) return;
+
+    let frame;
+    const animate = () => {
+      const offset = (Date.now() / 50) % 16;
+      if (map.getLayer(ROUTE_LAYER)) {
+        map.setPaintProperty(ROUTE_LAYER, "line-dasharray", [2, 2 + offset]);
+      }
+      frame = requestAnimationFrame(animate);
+    };
+    frame = requestAnimationFrame(animate);
+
+    return () => {
+      if (frame) cancelAnimationFrame(frame);
+    };
+  }, [mapReady, routeGeo.features.length]);
 
   return (
-    <div className="absolute inset-0">
-      <div ref={containerRef} className="h-full w-full" />
+    <div className="relative h-full w-full">
+      <div ref={mapContainerRef} className="h-full w-full" />
 
-      {mapReady && (
-        <div className="absolute bottom-4 right-4 z-[500] flex flex-col gap-2">
-          <button
-            type="button"
-            onClick={() => mapRef.current?.zoomIn()}
-            className="btn-secondary px-3"
-            title="Zoom in"
-          >
-            <ZoomIn className="h-4 w-4" />
-          </button>
-          <button
-            type="button"
-            onClick={() => mapRef.current?.zoomOut()}
-            className="btn-secondary px-3"
-            title="Zoom out"
-          >
-            <ZoomOut className="h-4 w-4" />
-          </button>
+      <div className="absolute right-4 top-4 z-[700] flex items-center gap-2">
+        <button
+          type="button"
+          onClick={onExitBuilding}
+          className="rounded-full bg-slate-200 px-4 py-2 text-sm font-medium text-slate-700"
+        >
+          Exit {building?.name || "Building"}
+        </button>
+        <button
+          type="button"
+          onClick={infoAction}
+          className="grid h-9 w-9 place-items-center rounded-full bg-white text-slate-700 shadow"
+        >
+          <Info className="h-4 w-4" />
+        </button>
+      </div>
+
+      <div className="absolute right-4 top-20 z-[700] hidden flex-col gap-2 md:flex">
+        {[...floors]
+          .sort((a, b) => Number(b.level || 0) - Number(a.level || 0))
+          .map((floor) => {
+            const active = floor.id === currentFloorId;
+            return (
+              <button
+                key={floor.id}
+                type="button"
+                onClick={() => onFloorSelect?.(floor.id)}
+                className={`min-w-[56px] rounded-md border px-2 py-2 text-sm font-semibold ${
+                  active
+                    ? "border-blue-600 bg-blue-600 text-white"
+                    : "border-slate-300 bg-white text-slate-700"
+                }`}
+              >
+                {floor.name || `L${floor.level}`}
+              </button>
+            );
+          })}
+      </div>
+
+      <div className="absolute bottom-5 right-4 z-[700] flex flex-col gap-2">
+        <button
+          type="button"
+          onClick={() => mapRef.current?.zoomIn()}
+          className="grid h-9 w-9 place-items-center rounded-md bg-white shadow"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+        <button
+          type="button"
+          onClick={() => mapRef.current?.zoomOut()}
+          className="grid h-9 w-9 place-items-center rounded-md bg-white shadow"
+        >
+          <Minus className="h-4 w-4" />
+        </button>
+      </div>
+
+      <div className="absolute bottom-5 left-4 z-[700] rounded-full bg-white px-3 py-2 text-xs text-slate-700 shadow">
+        English (US)
+      </div>
+
+      <div className="absolute bottom-4 left-1/2 z-[700] -translate-x-1/2 text-xs text-slate-700">
+        CampusNav • © Maptiler © OpenStreetMap contributors
+      </div>
+
+      {routeGeo.features.length > 0 && (
+        <div className="absolute bottom-14 left-1/2 z-[710] w-[min(92vw,560px)] -translate-x-1/2 rounded-xl bg-white p-4 shadow">
+          <div className="text-sm font-medium text-slate-900">
+            Follow the line to {destinationLabel || "destination"}
+          </div>
+          <div className="mt-1 text-xs text-slate-500">
+            Route active • animated guidance
+          </div>
         </div>
       )}
 
-      <div
-        className="absolute inset-0"
-        style={{
-          zIndex: indoorVisible ? 10 : -1,
-          pointerEvents:
-            !indoorVisible
-              ? "none"
-              : shouldUseMapOverlay
-                ? roomPickTarget
-                  ? "auto"
-                  : "none"
-                : "auto",
-          opacity: indoorVisible ? (overlayVisible || autoIndoorReveal ? 1 : 0) : 0,
-          transition: "opacity 0.3s ease-out, z-index 0s",
-          mixBlendMode: shouldUseMapOverlay ? "multiply" : "normal",
-        }}
-      >
-        {!shouldUseMapOverlay && <div className="absolute inset-0 bg-bg" />}
-        {floorData ? (
-          <IndoorCanvas
-            floorData={floorData}
-            floorImage={shouldUseMapOverlay ? null : floorImage}
-            pathPoints={currentFloorPath}
-            fromRoom={fromRoom}
-            toRoom={toRoom}
-            currentFloorId={currentFloor?.id}
-            isDark={isDark}
-            mapAdapter={mapBridge}
-            overlayBounds={currentOverlayBounds}
-            overlayCorners={currentOverlayCorners}
-            interactive={Boolean(roomPickTarget)}
-            onRoomPick={roomPickTarget ? selectRoom : undefined}
-            viewMode={viewMode}
-            sensorPosition={sensorPosition}
-            showBeacons={showBeacons}
-            className="h-full w-full"
-          />
-        ) : (
-          <LoadingIndoorState />
-        )}
-      </div>
+      {selectedPoi && (
+        <div className="absolute bottom-0 left-0 right-0 z-[720] rounded-t-2xl bg-white p-4 shadow-2xl transition-transform duration-300 ease-out">
+          <div className="text-base font-semibold text-slate-900">
+            {selectedPoi.name}
+          </div>
+          <div className="mt-1 text-sm text-slate-500">
+            {selectedPoi.category}
+          </div>
+          <div className="mt-4 flex gap-2">
+            <button
+              type="button"
+              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white"
+              onClick={() => onPoiDirections?.(selectedPoi)}
+            >
+              Get Directions
+            </button>
+            <button
+              type="button"
+              className="rounded-md border border-slate-300 px-4 py-2 text-sm"
+              onClick={() => setSelectedPoi(null)}
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
