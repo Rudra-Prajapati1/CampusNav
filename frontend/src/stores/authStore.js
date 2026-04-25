@@ -10,6 +10,7 @@ import { api } from "../utils/api.js";
 export const useAuthStore = create((set, get) => ({
   user: null,
   isAdmin: false,
+  authError: null,
   loading: true,
 
   init: async () => {
@@ -25,7 +26,7 @@ export const useAuthStore = create((set, get) => ({
       if (session?.user) {
         await get().setUser(session.user);
       } else {
-        set({ user: null, isAdmin: false });
+        set({ user: null, isAdmin: false, authError: null });
       }
     });
   },
@@ -33,9 +34,14 @@ export const useAuthStore = create((set, get) => ({
   setUser: async (user) => {
     try {
       await api.auth.me();
-      set({ user, isAdmin: true });
-    } catch {
-      set({ user, isAdmin: false });
+      set({ user, isAdmin: true, authError: null });
+    } catch (error) {
+      if (error?.status === 401 || error?.status === 403) {
+        set({ user, isAdmin: false, authError: null });
+        return;
+      }
+
+      set({ user, isAdmin: false, authError: error });
     }
   },
 
@@ -58,6 +64,6 @@ export const useAuthStore = create((set, get) => ({
 
   signOut: async () => {
     await supabase.auth.signOut();
-    set({ user: null, isAdmin: false });
+    set({ user: null, isAdmin: false, authError: null });
   },
 }));

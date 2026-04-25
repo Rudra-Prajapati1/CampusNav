@@ -46,10 +46,10 @@ const TOOL_KEYS = {
 };
 
 const ROOM_COLORS = {
-  room: "#9370DB40",
-  corridor: "#D3D3D340",
-  stairs: "#FF8C0040",
-  elevator: "#4169E140",
+  room: "rgba(147, 112, 219, 0.35)",
+  corridor: "rgba(211, 211, 211, 0.35)",
+  stairs: "rgba(255, 140, 0, 0.35)",
+  elevator: "rgba(65, 105, 225, 0.35)",
 };
 
 const AI_OPTIONS = [
@@ -178,6 +178,13 @@ function roomPolygon(feature) {
   return ring.slice(0, -1).map(toPointFromCoords);
 }
 
+function spaceFillColor(feature) {
+  const explicitColor = String(feature?.properties?.color || "").trim();
+  if (explicitColor) return explicitColor;
+  const kind = String(feature?.properties?.kind || "room").toLowerCase();
+  return ROOM_COLORS[kind] || ROOM_COLORS.room;
+}
+
 function polygonCenter(points) {
   if (!points.length) return { x: 0, y: 0 };
   const total = points.reduce(
@@ -217,6 +224,42 @@ function nearest(list, point, maxDist = 10) {
     }
   }
   return bestDist <= maxDist ? best : null;
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function nearestWallProjection(point, walls) {
+  let best = null;
+  let bestDistance = Infinity;
+
+  for (const wall of walls) {
+    const coords = wall?.geometry?.coordinates;
+    if (!coords || coords.length < 2) continue;
+
+    const a = toPointFromCoords(coords[0]);
+    const b = toPointFromCoords(coords[1]);
+    const vx = b.x - a.x;
+    const vy = b.y - a.y;
+    const len2 = vx * vx + vy * vy;
+    if (len2 <= 0.0001) continue;
+
+    const t = clamp(((point.x - a.x) * vx + (point.y - a.y) * vy) / len2, 0, 1);
+    const projected = { x: a.x + t * vx, y: a.y + t * vy };
+    const distance = Math.hypot(point.x - projected.x, point.y - projected.y);
+
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      best = {
+        point: projected,
+        wallAngle: (Math.atan2(vy, vx) * 180) / Math.PI,
+        distance,
+      };
+    }
+  }
+
+  return best;
 }
 
 function buildMvfFromFloor(floorData) {
@@ -598,6 +641,21 @@ const MapEditor = forwardRef(function MapEditor(
   useEffect(() => {
     const keyHandler = (event) => {
       const key = event.key.toLowerCase();
+      const targetTag = String(event.target?.tagName || "").toLowerCase();
+      if (
+        targetTag === "input" ||
+        targetTag === "textarea" ||
+        event.target?.isContentEditable
+      ) {
+        return;
+      }
+
+      if ((key === "delete" || key === "backspace") && selected) {
+        event.preventDefault();
+        removeSelection();
+        return;
+      }
+
       if (event.ctrlKey && key === "z") {
         event.preventDefault();
         undo();
@@ -616,7 +674,7 @@ const MapEditor = forwardRef(function MapEditor(
     };
     window.addEventListener("keydown", keyHandler);
     return () => window.removeEventListener("keydown", keyHandler);
-  }, [previewMode]);
+  }, [previewMode, selected]);
 
   const wallEndpoints = useMemo(() => {
     const points = [];
@@ -792,19 +850,16 @@ const MapEditor = forwardRef(function MapEditor(
   }
 
   function addOpening(point, kind) {
-    const closest = nearest(
-      mvf.obstructions.features.flatMap((wall) => {
-        const coords = wall.geometry?.coordinates;
-        if (!coords || coords.length < 2) return [];
-        const a = toPointFromCoords(coords[0]);
-        const b = toPointFromCoords(coords[1]);
-        const center = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
-        return [center];
-      }),
-      point,
-      120,
-    );
-    const placement = closest || point;
+    const nearestWall = nearestWallProjection(point, mvf.obstructions.features);
+    const snappedToWall =
+      nearestWall && nearestWall.distance <= 120 ? nearestWall : null;
+
+    const placement = snappedToWall?.point || point;
+    const rotation = snappedToWall
+      ? kind === "door"
+        ? snappedToWall.wallAngle + 90
+        : snappedToWall.wallAngle
+      : 0;
 
     updateMvf((next) => {
       next.openings.features.push({
@@ -813,7 +868,7 @@ const MapEditor = forwardRef(function MapEditor(
         properties: {
           kind,
           width: kind === "door" ? 40 : 30,
-          rotation: 0,
+          rotation,
         },
         geometry: { type: "Point", coordinates: [placement.x, placement.y] },
       });
@@ -1041,7 +1096,22 @@ const MapEditor = forwardRef(function MapEditor(
       window.clearInterval(timer);
       setAiStep(AI_STEPS.length - 1);
 
-      const result = response?.result;
+      const resultEntries = Array.isArray(response?.results)
+        ? response.results
+        : [];
+      const completedEntries = resultEntries.filter(
+        (entry) => entry?.status === "completed" && isMvf(entry?.result),
+      );
+
+      if (resultEntries.length > 0 && completedEntries.length === 0) {
+        const detail = resultEntries
+          .map((entry) => entry?.message)
+          .filter(Boolean)
+          .join(" ");
+        throw new Error(detail || "AI mapping failed for all selected floors.");
+      }
+
+      const result = completedEntries[0]?.result || response?.result;
       if (!isMvf(result)) {
         throw new Error("AI mapping did not return MVF data.");
       }
@@ -1051,7 +1121,11 @@ const MapEditor = forwardRef(function MapEditor(
       setFuture([]);
       setDirty(true);
       setAiModalOpen(false);
-      toast.success("AI mapping completed.");
+      if (resultEntries.some((entry) => entry?.status === "failed")) {
+        toast("AI mapping completed with warnings.");
+      } else {
+        toast.success("AI mapping completed.");
+      }
     } catch (error) {
       toast.error(error.message || "AI mapping failed.");
     } finally {
@@ -1496,10 +1570,7 @@ const MapEditor = forwardRef(function MapEditor(
               {mvf.spaces.features.map((feature) => {
                 const points = roomPolygon(feature);
                 const center = polygonCenter(points);
-                const kind = String(
-                  feature.properties?.kind || "room",
-                ).toLowerCase();
-                const fill = ROOM_COLORS[kind] || ROOM_COLORS.room;
+                const fill = spaceFillColor(feature);
                 const selectedNow = selected === feature.id;
                 return (
                   <Group key={feature.id}>
@@ -1627,19 +1698,59 @@ const MapEditor = forwardRef(function MapEditor(
                 const point = toPointFromCoords(feature.geometry?.coordinates);
                 const kind = feature.properties?.kind;
                 const selectedNow = selected === feature.id;
+                const rotationDeg = Number(feature.properties?.rotation || 0);
+                const rotation = (rotationDeg * Math.PI) / 180;
+                const ux = Math.cos(rotation);
+                const uy = Math.sin(rotation);
+                const nx = -uy;
+                const ny = ux;
+                const draggable =
+                  !previewMode && tool === "select" && selectedNow;
+
+                const moveOpening = (event) => {
+                  const dx = event.target.x();
+                  const dy = event.target.y();
+                  event.target.position({ x: 0, y: 0 });
+                  updateMvf((next) => {
+                    const target = next.openings.features.find(
+                      (entry) => entry.id === feature.id,
+                    );
+                    if (!target) return;
+                    const coord = target.geometry?.coordinates || [0, 0];
+                    target.geometry.coordinates = [
+                      Number(coord[0] || 0) + dx,
+                      Number(coord[1] || 0) + dy,
+                    ];
+                  });
+                };
+
                 if (kind === "door") {
+                  const doorHalf = 12;
+                  const swing = 8;
                   return (
                     <Group
                       key={feature.id}
                       onClick={() => setSelected(feature.id)}
+                      draggable={draggable}
+                      onDragEnd={moveOpening}
                     >
                       <Line
-                        points={[point.x - 12, point.y, point.x + 12, point.y]}
+                        points={[
+                          point.x - ux * doorHalf,
+                          point.y - uy * doorHalf,
+                          point.x + ux * doorHalf,
+                          point.y + uy * doorHalf,
+                        ]}
                         stroke="#2196F3"
                         strokeWidth={3}
                       />
                       <Line
-                        points={[point.x, point.y, point.x + 8, point.y - 8]}
+                        points={[
+                          point.x,
+                          point.y,
+                          point.x + nx * swing,
+                          point.y + ny * swing,
+                        ]}
                         stroke="#2196F3"
                         strokeWidth={2}
                       />
@@ -1659,23 +1770,25 @@ const MapEditor = forwardRef(function MapEditor(
                   <Group
                     key={feature.id}
                     onClick={() => setSelected(feature.id)}
+                    draggable={draggable}
+                    onDragEnd={moveOpening}
                   >
                     <Line
                       points={[
-                        point.x - 10,
-                        point.y - 3,
-                        point.x + 10,
-                        point.y - 3,
+                        point.x - ux * 10 + nx * 3,
+                        point.y - uy * 10 + ny * 3,
+                        point.x + ux * 10 + nx * 3,
+                        point.y + uy * 10 + ny * 3,
                       ]}
                       stroke="#00BCD4"
                       strokeWidth={2}
                     />
                     <Line
                       points={[
-                        point.x - 10,
-                        point.y + 3,
-                        point.x + 10,
-                        point.y + 3,
+                        point.x - ux * 10 - nx * 3,
+                        point.y - uy * 10 - ny * 3,
+                        point.x + ux * 10 - nx * 3,
+                        point.y + uy * 10 - ny * 3,
                       ]}
                       stroke="#00BCD4"
                       strokeWidth={2}
@@ -1796,6 +1909,7 @@ const MapEditor = forwardRef(function MapEditor(
             <li>P: Place waypoints</li>
             <li>E: Connect waypoints</li>
             <li>Ctrl+Z / Ctrl+Y: Undo / Redo</li>
+            <li>Delete / Backspace: Remove selection</li>
           </ul>
 
           <div className="mt-4 rounded-lg border border-default p-3">

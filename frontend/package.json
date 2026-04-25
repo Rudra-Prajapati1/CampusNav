@@ -9,7 +9,8 @@
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",
-    "konva": "^9.3.16",
+    "campusnav": "file:..",
+    "konva": "^9.3.22",
     "leaflet": "^1.9.4",
     "lucide-react": "^0.263.1",
     "maplibre-gl": "^5.21.1",

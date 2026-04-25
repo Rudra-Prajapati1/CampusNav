@@ -16,8 +16,16 @@ const BASE_URL = import.meta.env.VITE_API_URL || "/api/v1";
 
 // Request timeout in milliseconds
 const REQUEST_TIMEOUT = 15000;
+const AI_TRACE_REQUEST_TIMEOUT = Number.parseInt(
+  import.meta.env.VITE_AI_TRACE_TIMEOUT_MS || "900000",
+  10,
+);
 const AUTH_TIMEOUT = 3000;
 let cachedAccessToken = null;
+
+function safeTimeout(value, fallback) {
+  return Number.isFinite(value) && value > 0 ? value : fallback;
+}
 
 supabase.auth.onAuthStateChange((_event, session) => {
   cachedAccessToken = session?.access_token || null;
@@ -114,6 +122,17 @@ async function request(method, path, body = null) {
       error.status = res.status;
       error.code = data?.code || null;
       error.data = data;
+      error.method = method;
+      error.path = path;
+
+      if (import.meta.env.DEV && path === "/auth/me") {
+        console.warn("[api.auth.me] request failed", {
+          status: res.status,
+          message,
+          data,
+        });
+      }
+
       throw error;
     }
 
@@ -138,13 +157,18 @@ async function request(method, path, body = null) {
   }
 }
 
-async function requestFormData(path, formData) {
+async function requestFormData(path, formData, config = {}) {
+  const timeoutMs = safeTimeout(config.timeoutMs, REQUEST_TIMEOUT);
+  const timeoutMessage =
+    config.timeoutMessage ||
+    "Request timed out. Please check your connection and try again.";
+
   const headers = {
     ...(await getAuthHeaders()),
   };
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), REQUEST_TIMEOUT);
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
     const res = await fetch(`${BASE_URL}${path}`, {
@@ -186,9 +210,7 @@ async function requestFormData(path, formData) {
     clearTimeout(timeoutId);
 
     if (err.name === "AbortError") {
-      throw new Error(
-        "Request timed out. Please check your connection and try again.",
-      );
+      throw new Error(timeoutMessage);
     }
 
     if (err instanceof TypeError && err.message === "Failed to fetch") {
@@ -304,7 +326,12 @@ export const api = {
   },
 
   maps: {
-    aiTrace: (formData) => requestFormData("/maps/ai-trace", formData),
+    aiTrace: (formData) =>
+      requestFormData("/maps/ai-trace", formData, {
+        timeoutMs: AI_TRACE_REQUEST_TIMEOUT,
+        timeoutMessage:
+          "AI mapping is still processing. Please wait and try again.",
+      }),
     latestAiTrace: (floorId) => api.get(`/maps/ai-trace/latest/${floorId}`),
     saveGeoreference: (data) => api.post("/maps/georeference", data),
   },

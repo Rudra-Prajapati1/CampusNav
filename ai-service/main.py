@@ -1,8 +1,10 @@
+import asyncio
+
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from pipeline import trace_floor_plan, warmup_model
+from pipeline import runtime_status_message, trace_floor_plan, warmup_model
 
 app = FastAPI(title="CampusNav AI Trace Service", version="1.0.0")
 
@@ -17,12 +19,21 @@ app.add_middleware(
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "service": "campusnav-ai-trace"}
+    return {
+        "status": "ok",
+        "service": "campusnav-ai-trace",
+        "modelStatus": runtime_status_message(),
+    }
 
 
 @app.on_event("startup")
 async def startup_event():
-    warmup_model()
+    ready = warmup_model()
+    if ready:
+        print("CubiCasa model loaded")
+    else:
+        print("CubiCasa model unavailable; emergency OpenCV fallback ready")
+    print(runtime_status_message())
 
 
 @app.post("/trace")
@@ -32,7 +43,12 @@ async def trace(
 ):
     try:
         content = await file.read()
-        result = trace_floor_plan(content, file.filename or "upload.png", options)
+        result = await asyncio.to_thread(
+            trace_floor_plan,
+            content,
+            file.filename or "upload.png",
+            options,
+        )
         return JSONResponse(result)
     except Exception as exc:  # pragma: no cover - handled by API
         return JSONResponse(

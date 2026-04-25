@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
-import { Info, Plus, Minus } from "lucide-react";
+import { Info, Plus, Minus, ChevronDown, Navigation } from "lucide-react";
 import { MAPLIBRE_STYLE } from "./mapProviderConfig.js";
 
 const OUTDOOR_EXTRUSION_ID = "building-extrusion";
@@ -217,29 +217,74 @@ function colorForCategory(category) {
   return "#64748b";
 }
 
+function floorShortLabel(floor) {
+  const level = Number(floor?.level);
+  if (Number.isFinite(level)) {
+    if (level === 0) return "GF";
+    if (level === -1) return "LG";
+    if (level < -1) return `L${Math.abs(level)}G`;
+    return `${level}F`;
+  }
+
+  const name = String(floor?.name || "").trim();
+  if (!name) return "FL";
+  if (/ground/i.test(name)) return "GF";
+  const levelMatch = name.match(/level\s*(-?\d+)/i);
+  if (levelMatch) {
+    const parsed = Number(levelMatch[1]);
+    if (Number.isFinite(parsed)) {
+      if (parsed === 0) return "GF";
+      if (parsed < 0) return parsed === -1 ? "LG" : `L${Math.abs(parsed)}G`;
+      return `${parsed}F`;
+    }
+  }
+  return name.slice(0, 3).toUpperCase();
+}
+
+function buildPinSvgDataUrl(category) {
+  const color = colorForCategory(category);
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><circle cx="32" cy="32" r="18" fill="${color}"/><circle cx="32" cy="32" r="18" fill="none" stroke="#ffffff" stroke-width="5"/></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
 function registerGlobalImageMissingHandler(map) {
+  const pending = new Set();
+
   const handler = (event) => {
     const id = event.id;
     if (!id?.startsWith("pin-")) return;
     if (map.hasImage(id)) return;
+    if (pending.has(id)) return;
 
     const category = id.replace("pin-", "");
-    const canvas = document.createElement("canvas");
-    canvas.width = 64;
-    canvas.height = 64;
-    const ctx = canvas.getContext("2d");
+    pending.add(id);
+    const image = new window.Image(64, 64);
+    image.onload = () => {
+      const canvas = document.createElement("canvas");
+      canvas.width = 64;
+      canvas.height = 64;
+      const ctx = canvas.getContext("2d");
 
-    ctx.clearRect(0, 0, 64, 64);
-    ctx.fillStyle = colorForCategory(category);
-    ctx.beginPath();
-    ctx.arc(32, 32, 17, 0, Math.PI * 2);
-    ctx.fill();
+      if (!ctx) {
+        pending.delete(id);
+        return;
+      }
 
-    ctx.strokeStyle = "#ffffff";
-    ctx.lineWidth = 5;
-    ctx.stroke();
+      ctx.clearRect(0, 0, 64, 64);
+      ctx.drawImage(image, 0, 0, 64, 64);
 
-    map.addImage(id, ctx.getImageData(0, 0, 64, 64));
+      if (!map.hasImage(id)) {
+        map.addImage(id, ctx.getImageData(0, 0, 64, 64));
+      }
+
+      pending.delete(id);
+    };
+
+    image.onerror = () => {
+      pending.delete(id);
+    };
+
+    image.src = buildPinSvgDataUrl(category);
   };
 
   map.on("styleimagemissing", handler);
@@ -290,6 +335,8 @@ export default function MapLibreNavigationMap({
   georeference,
   routePath,
   destinationLabel,
+  routeDistanceMeters,
+  routeEtaMinutes,
   onExitBuilding,
   onPoiDirections,
   onPoiSelect,
@@ -324,6 +371,17 @@ export default function MapLibreNavigationMap({
     () => routeToGeojson(routePath, homography),
     [routePath, homography],
   );
+  const routeDistanceLabel = useMemo(() => {
+    const meters = Number(routeDistanceMeters);
+    if (!Number.isFinite(meters) || meters <= 0) return "--";
+    if (meters >= 1000) return `${(meters / 1000).toFixed(1)} km`;
+    return `${Math.round(meters)} m`;
+  }, [routeDistanceMeters]);
+  const routeEtaLabel = useMemo(() => {
+    const minutes = Number(routeEtaMinutes);
+    if (!Number.isFinite(minutes) || minutes <= 0) return "--";
+    return `${Math.max(1, Math.round(minutes))} min`;
+  }, [routeEtaMinutes]);
 
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
@@ -589,13 +647,14 @@ export default function MapLibreNavigationMap({
                 key={floor.id}
                 type="button"
                 onClick={() => onFloorSelect?.(floor.id)}
+                title={floor.name || `Level ${floor.level}`}
                 className={`min-w-[56px] rounded-md border px-2 py-2 text-sm font-semibold ${
                   active
                     ? "border-blue-600 bg-blue-600 text-white"
                     : "border-slate-300 bg-white text-slate-700"
                 }`}
               >
-                {floor.name || `L${floor.level}`}
+                {floorShortLabel(floor)}
               </button>
             );
           })}
@@ -618,8 +677,9 @@ export default function MapLibreNavigationMap({
         </button>
       </div>
 
-      <div className="absolute bottom-5 left-4 z-[700] rounded-full bg-white px-3 py-2 text-xs text-slate-700 shadow">
-        English (US)
+      <div className="absolute bottom-5 left-4 z-[700] flex items-center gap-1 rounded-full bg-white px-3 py-2 text-xs text-slate-700 shadow">
+        <span>English (US)</span>
+        <ChevronDown className="h-3.5 w-3.5" />
       </div>
 
       <div className="absolute bottom-4 left-1/2 z-[700] -translate-x-1/2 text-xs text-slate-700">
@@ -628,41 +688,48 @@ export default function MapLibreNavigationMap({
 
       {routeGeo.features.length > 0 && (
         <div className="absolute bottom-14 left-1/2 z-[710] w-[min(92vw,560px)] -translate-x-1/2 rounded-xl bg-white p-4 shadow">
-          <div className="text-sm font-medium text-slate-900">
-            Follow the line to {destinationLabel || "destination"}
+          <div className="flex items-center gap-2 text-sm font-medium text-slate-900">
+            <Navigation className="h-4 w-4 text-blue-600" />
+            <span>Walk to {destinationLabel || "destination"}</span>
           </div>
           <div className="mt-1 text-xs text-slate-500">
-            Route active • animated guidance
+            {routeDistanceLabel} • ETA {routeEtaLabel}
           </div>
         </div>
       )}
 
-      {selectedPoi && (
-        <div className="absolute bottom-0 left-0 right-0 z-[720] rounded-t-2xl bg-white p-4 shadow-2xl transition-transform duration-300 ease-out">
-          <div className="text-base font-semibold text-slate-900">
-            {selectedPoi.name}
-          </div>
-          <div className="mt-1 text-sm text-slate-500">
-            {selectedPoi.category}
-          </div>
-          <div className="mt-4 flex gap-2">
-            <button
-              type="button"
-              className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white"
-              onClick={() => onPoiDirections?.(selectedPoi)}
-            >
-              Get Directions
-            </button>
-            <button
-              type="button"
-              className="rounded-md border border-slate-300 px-4 py-2 text-sm"
-              onClick={() => setSelectedPoi(null)}
-            >
-              Close
-            </button>
-          </div>
-        </div>
-      )}
+      <div
+        className={`absolute bottom-0 left-0 right-0 z-[720] rounded-t-2xl bg-white p-4 shadow-2xl transition-transform duration-300 ease-out ${
+          selectedPoi ? "translate-y-0" : "translate-y-full pointer-events-none"
+        }`}
+      >
+        {selectedPoi && (
+          <>
+            <div className="text-base font-semibold text-slate-900">
+              {selectedPoi.name}
+            </div>
+            <div className="mt-1 text-sm text-slate-500">
+              {selectedPoi.category}
+            </div>
+            <div className="mt-4 flex gap-2">
+              <button
+                type="button"
+                className="rounded-md bg-blue-600 px-4 py-2 text-sm font-medium text-white"
+                onClick={() => onPoiDirections?.(selectedPoi)}
+              >
+                Get Directions
+              </button>
+              <button
+                type="button"
+                className="rounded-md border border-slate-300 px-4 py-2 text-sm"
+                onClick={() => setSelectedPoi(null)}
+              >
+                Close
+              </button>
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }

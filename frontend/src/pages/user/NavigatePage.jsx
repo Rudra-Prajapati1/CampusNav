@@ -106,7 +106,7 @@ function Panel({
               className="rounded-xl border border-slate-200 py-2"
             >
               <Star className="mx-auto h-4 w-4" />
-              Depts
+              Departments
             </button>
             <button
               type="button"
@@ -338,6 +338,8 @@ export default function NavigatePage() {
         georeference={georeference}
         routePath={currentFloorRoute}
         destinationLabel={toRoom?.name || toQuery}
+        routeDistanceMeters={route?.distance}
+        routeEtaMinutes={route?.estimated_time || route?.duration}
         onExitBuilding={() => {
           setRoute(null);
           setRoutingMode(false);

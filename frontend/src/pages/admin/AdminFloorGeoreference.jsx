@@ -7,6 +7,26 @@ import toast from "react-hot-toast";
 import { api } from "../../utils/api.js";
 import { MAPLIBRE_STYLE } from "../../components/navigation/mapProviderConfig.js";
 
+const MAP_RASTER_FALLBACK_STYLE = {
+  version: 8,
+  sources: {
+    osm: {
+      type: "raster",
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org">OpenStreetMap</a> contributors',
+    },
+  },
+  layers: [
+    {
+      id: "osm-raster",
+      type: "raster",
+      source: "osm",
+    },
+  ],
+};
+
 function toNumber(value, fallback = 0) {
   const parsed =
     typeof value === "number" ? value : Number.parseFloat(String(value));
@@ -183,6 +203,7 @@ export default function AdminFloorGeoreference() {
   const [pinMode, setPinMode] = useState(false);
   const [pendingUv, setPendingUv] = useState(null);
   const [pairs, setPairs] = useState([]);
+  const [mapLoaded, setMapLoaded] = useState(false);
 
   const [state, setState] = useState({
     centerLat: 23.0225,
@@ -263,6 +284,8 @@ export default function AdminFloorGeoreference() {
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
+    let fallbackStyleApplied = false;
+
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
       style: MAPLIBRE_STYLE,
@@ -277,8 +300,28 @@ export default function AdminFloorGeoreference() {
     });
 
     map.on("load", () => {
+      setMapLoaded(true);
       map.setPitch(0);
       map.setBearing(0);
+    });
+
+    map.on("error", (event) => {
+      const error = event?.error;
+      const status = error?.status || error?.response?.status;
+      const message = String(error?.message || "").toLowerCase();
+      const shouldFallback =
+        status === 401 ||
+        status === 403 ||
+        status === 404 ||
+        message.includes("401") ||
+        message.includes("403") ||
+        message.includes("404") ||
+        message.includes("failed to load");
+
+      if (!fallbackStyleApplied && shouldFallback) {
+        fallbackStyleApplied = true;
+        map.setStyle(MAP_RASTER_FALLBACK_STYLE);
+      }
     });
 
     const syncCenter = () => {
@@ -307,6 +350,7 @@ export default function AdminFloorGeoreference() {
     syncCenter();
 
     return () => {
+      setMapLoaded(false);
       map.remove();
       mapRef.current = null;
     };
@@ -546,8 +590,39 @@ export default function AdminFloorGeoreference() {
     toast.success("Affine pin transform applied.");
   }
 
+  function currentCornerLngLats() {
+    const map = mapRef.current;
+    if (!map || !projectedCenter) return [];
+
+    const corners = cornersFromState(
+      projectedCenter,
+      imageWidth,
+      imageHeight,
+      state,
+    );
+    if (corners.length !== 4) return [];
+
+    return corners.map((corner) => {
+      const ll = map.unproject([corner.x, corner.y]);
+      return [ll.lng, ll.lat];
+    });
+  }
+
   async function completeWorldPosition() {
-    if (!floor || cornerLngLats.length !== 4) {
+    if (!floor?.floor_plan_url) {
+      toast.error("Floor plan image is required before georeferencing.");
+      return;
+    }
+
+    if (!mapLoaded) {
+      toast.error("Map is still loading. Please wait a moment and try again.");
+      return;
+    }
+
+    const resolvedCorners =
+      cornerLngLats.length === 4 ? cornerLngLats : currentCornerLngLats();
+
+    if (!floor || resolvedCorners.length !== 4) {
       toast.error("Overlay corners are not ready.");
       return;
     }
@@ -559,7 +634,7 @@ export default function AdminFloorGeoreference() {
       [0, imageHeight],
     ];
 
-    const H = homographyFromCorners(pixelCorners, cornerLngLats);
+    const H = homographyFromCorners(pixelCorners, resolvedCorners);
     if (!H) {
       toast.error("Failed to compute homography matrix.");
       return;
@@ -580,26 +655,26 @@ export default function AdminFloorGeoreference() {
           {
             id: "tl",
             label: "TL",
-            lat: cornerLngLats[0][1],
-            lng: cornerLngLats[0][0],
+            lat: resolvedCorners[0][1],
+            lng: resolvedCorners[0][0],
           },
           {
             id: "tr",
             label: "TR",
-            lat: cornerLngLats[1][1],
-            lng: cornerLngLats[1][0],
+            lat: resolvedCorners[1][1],
+            lng: resolvedCorners[1][0],
           },
           {
             id: "br",
             label: "BR",
-            lat: cornerLngLats[2][1],
-            lng: cornerLngLats[2][0],
+            lat: resolvedCorners[2][1],
+            lng: resolvedCorners[2][0],
           },
           {
             id: "bl",
             label: "BL",
-            lat: cornerLngLats[3][1],
-            lng: cornerLngLats[3][0],
+            lat: resolvedCorners[3][1],
+            lng: resolvedCorners[3][0],
           },
         ],
         controlPoints: pairs,
@@ -750,6 +825,11 @@ export default function AdminFloorGeoreference() {
               <input
                 value={address}
                 onChange={(event) => setAddress(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter") return;
+                  event.preventDefault();
+                  searchAddress();
+                }}
                 className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
                 placeholder="Search address"
               />

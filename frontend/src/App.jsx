@@ -15,7 +15,7 @@ import AdminLogin from "./pages/admin/AdminLogin.jsx";
 import NavigatePage from "./pages/user/NavigatePage.jsx";
 
 function ProtectedRoute({ children }) {
-  const { user, isAdmin, loading } = useAuthStore();
+  const { user, isAdmin, loading, authError } = useAuthStore();
 
   if (loading) {
     return (
@@ -28,6 +28,20 @@ function ProtectedRoute({ children }) {
               Checking your CampusNav access.
             </p>
           </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (user && authError && !isAdmin) {
+    return (
+      <div className="page-shell flex min-h-screen items-center justify-center px-6">
+        <div className="card-sm max-w-md text-center">
+          <div className="text-base font-semibold">Admin access check failed</div>
+          <p className="mt-2 text-sm subtle-text">
+            {authError.message ||
+              "CampusNav could not verify your admin access right now."}
+          </p>
         </div>
       </div>
     );

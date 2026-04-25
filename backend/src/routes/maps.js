@@ -311,58 +311,94 @@ router.post(
       const results = [];
 
       for (const floor of floorsToTrace) {
-        const currentFile =
-          req.file && floor.id === targetFloor.id
-            ? createUploadedFilePayload(req.file)
-            : floor.floor_plan_url
-              ? {
-                  ...(await fetchRemoteFile(floor.floor_plan_url)),
-                  filename: `floor-${floor.id}.png`,
-                }
-              : null;
+        try {
+          const currentFile =
+            req.file && floor.id === targetFloor.id
+              ? createUploadedFilePayload(req.file)
+              : floor.floor_plan_url
+                ? {
+                    ...(await fetchRemoteFile(floor.floor_plan_url)),
+                    filename: `floor-${floor.id}.png`,
+                  }
+                : null;
 
-        if (!currentFile) {
+          if (!currentFile) {
+            results.push({
+              floor_id: floor.id,
+              floor_name: floor.name,
+              status: "skipped",
+              message: "No floor plan asset was attached to this floor.",
+              result: emptyMvf(),
+            });
+            continue;
+          }
+
+          const trace = normalizeMvf(
+            await callAiTraceService({
+              file: currentFile,
+              options,
+            }),
+          );
+
+          await insertAiTraceRecord({
+            floor_id: floor.id,
+            status: "completed",
+            options,
+            result: trace,
+            confidence_summary: confidenceSummary(trace),
+            created_by: req.user.id,
+          });
+
           results.push({
             floor_id: floor.id,
             floor_name: floor.name,
-            status: "skipped",
-            message: "No floor plan asset was attached to this floor.",
-            result: emptyMvf(),
+            status: "completed",
+            result: trace,
+            confidence_summary: confidenceSummary(trace),
           });
-          continue;
-        }
+        } catch (floorError) {
+          console.error(
+            `[maps/ai-trace] floor ${floor.id} failed:`,
+            floorError?.message || floorError,
+          );
+          if (floorError?.cause) {
+            console.error(
+              "[maps/ai-trace] floor error cause:",
+              floorError.cause,
+            );
+          }
 
-        const trace = normalizeMvf(
-          await callAiTraceService({
-            file: currentFile,
+          const fallbackResult = emptyMvf();
+          await insertAiTraceRecord({
+            floor_id: floor.id,
+            status: "failed",
             options,
-          }),
-        );
+            result: fallbackResult,
+            confidence_summary: confidenceSummary(fallbackResult),
+            created_by: req.user.id,
+          });
 
-        await insertAiTraceRecord({
-          floor_id: floor.id,
-          status: "completed",
-          options,
-          result: trace,
-          confidence_summary: confidenceSummary(trace),
-          created_by: req.user.id,
-        });
-
-        results.push({
-          floor_id: floor.id,
-          floor_name: floor.name,
-          status: "completed",
-          result: trace,
-          confidence_summary: confidenceSummary(trace),
-        });
+          results.push({
+            floor_id: floor.id,
+            floor_name: floor.name,
+            status: "failed",
+            message: floorError.message || "AI trace failed for this floor.",
+            result: fallbackResult,
+            confidence_summary: confidenceSummary(fallbackResult),
+          });
+        }
       }
+
+      const firstCompleted = results.find(
+        (entry) => entry.status === "completed" && entry.result,
+      );
 
       return res.json({
         floor_id: floorId,
         scope,
         floor_plan_url: uploadedUrl || targetFloor.floor_plan_url || null,
         results,
-        result: results[0]?.result || emptyMvf(),
+        result: firstCompleted?.result || results[0]?.result || emptyMvf(),
       });
     } catch (error) {
       return res.status(400).json({

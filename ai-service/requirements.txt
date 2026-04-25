@@ -1,6 +1,5 @@
 torch
 torchvision
-detectron2
 opencv-python
 numpy
 Pillow
@@ -10,3 +9,4 @@ uvicorn
 python-multipart
 scipy
 scikit-image
+gdown
