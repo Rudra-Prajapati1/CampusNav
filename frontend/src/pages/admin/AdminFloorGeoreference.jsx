@@ -5,27 +5,54 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { ArrowLeft, RotateCw, Search, Target } from "lucide-react";
 import toast from "react-hot-toast";
 import { api } from "../../utils/api.js";
-import { MAPLIBRE_STYLE } from "../../components/navigation/mapProviderConfig.js";
 
-const MAP_RASTER_FALLBACK_STYLE = {
+const FALLBACK_STYLE = {
   version: 8,
   sources: {
     osm: {
       type: "raster",
       tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
       tileSize: 256,
-      attribution:
-        '&copy; <a href="https://www.openstreetmap.org">OpenStreetMap</a> contributors',
+      attribution: "© OpenStreetMap contributors",
     },
   },
   layers: [
     {
-      id: "osm-raster",
+      id: "osm-tiles",
       type: "raster",
       source: "osm",
+      minzoom: 0,
+      maxzoom: 19,
     },
   ],
 };
+
+const MAPTILER_KEY = String(import.meta.env.VITE_MAPTILER_KEY || "").trim();
+const MAPTILER_STYLE_URL = String(
+  import.meta.env.VITE_MAPTILER_MAPLIBRE_STYLE_URL || "",
+).trim();
+const PRIMARY_STYLE = MAPTILER_KEY
+  ? MAPTILER_STYLE_URL ||
+    `https://api.maptiler.com/maps/streets-v2/style.json?key=${MAPTILER_KEY}`
+  : FALLBACK_STYLE;
+
+function shouldFallbackToOsm(event) {
+  const error = event?.error;
+  const status = error?.status || error?.response?.status;
+  const message = String(error?.message || "").toLowerCase();
+
+  return (
+    status === 401 ||
+    status === 403 ||
+    status === 404 ||
+    message.includes("401") ||
+    message.includes("403") ||
+    message.includes("404") ||
+    message.includes("maptiler") ||
+    message.includes("failed to load") ||
+    message.includes("style")
+  );
+}
 
 function toNumber(value, fallback = 0) {
   const parsed =
@@ -244,7 +271,7 @@ export default function AdminFloorGeoreference() {
         ]);
 
         if (cancelled) return;
-        const georef = floorData?.map_data?.georeference || null;
+        const georef = floorData?.georeference || null;
         const centerLat = toNumber(
           georef?.anchorLat,
           toNumber(buildingData?.entrance_lat, 23.0225),
@@ -284,11 +311,19 @@ export default function AdminFloorGeoreference() {
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
-    let fallbackStyleApplied = false;
+    let fallbackStyleApplied = !MAPTILER_KEY;
+
+    if (!MAPTILER_KEY) {
+      console.warn(
+        "VITE_MAPTILER_KEY is not set. Using OpenStreetMap fallback.",
+      );
+    }
+
+    setMapLoaded(false);
 
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
-      style: MAPLIBRE_STYLE,
+      style: PRIMARY_STYLE,
       center: [centerRef.current.lng, centerRef.current.lat],
       zoom: 18,
       pitch: 0,
@@ -297,6 +332,10 @@ export default function AdminFloorGeoreference() {
       touchPitch: false,
       pitchWithRotate: false,
       attributionControl: true,
+      fadeDuration: 0,
+      trackResize: true,
+      renderWorldCopies: false,
+      maxTileCacheSize: 50,
     });
 
     map.on("load", () => {
@@ -306,21 +345,13 @@ export default function AdminFloorGeoreference() {
     });
 
     map.on("error", (event) => {
-      const error = event?.error;
-      const status = error?.status || error?.response?.status;
-      const message = String(error?.message || "").toLowerCase();
-      const shouldFallback =
-        status === 401 ||
-        status === 403 ||
-        status === 404 ||
-        message.includes("401") ||
-        message.includes("403") ||
-        message.includes("404") ||
-        message.includes("failed to load");
+      console.error("MapLibre error:", event);
 
-      if (!fallbackStyleApplied && shouldFallback) {
+      if (fallbackStyleApplied) return;
+      if (shouldFallbackToOsm(event)) {
         fallbackStyleApplied = true;
-        map.setStyle(MAP_RASTER_FALLBACK_STYLE);
+        setMapLoaded(false);
+        map.setStyle(FALLBACK_STYLE);
       }
     });
 
@@ -738,6 +769,15 @@ export default function AdminFloorGeoreference() {
       </button>
 
       <div ref={mapContainerRef} className="h-full w-full" />
+
+      {!mapLoaded && (
+        <div className="pointer-events-none absolute inset-0 z-[690] grid place-items-center bg-white/40">
+          <div className="flex items-center gap-2 rounded-md bg-white/90 px-4 py-2 text-sm font-medium text-slate-700 shadow">
+            <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-blue-600" />
+            <span>Loading map...</span>
+          </div>
+        </div>
+      )}
 
       {projectedCenter && floor?.floor_plan_url && (
         <>

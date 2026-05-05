@@ -53,7 +53,19 @@ function fallbackOutdoorRoute(fromLat, fromLng, toLat, toLng, message) {
     distance,
     duration: Math.max(1, Math.round(distance / 84)),
     fallback: true,
+    is_fallback: true,
     message,
+  };
+}
+
+function outdoorRouteResponse(coordinates, distance, duration) {
+  return {
+    coordinates,
+    distance,
+    duration,
+    fallback: false,
+    is_fallback: false,
+    message: null,
   };
 }
 
@@ -182,11 +194,13 @@ router.get("/outdoor-route", async (req, res) => {
     const data = await response.json();
     const coords = data.features?.[0]?.geometry?.coordinates || [];
     const summary = data.features?.[0]?.properties?.summary || {};
-    res.json({
-      coordinates: coords,
-      distance: Math.round(summary.distance || 0),
-      duration: Math.round((summary.duration || 0) / 60),
-    });
+    res.json(
+      outdoorRouteResponse(
+        coords,
+        Math.round(summary.distance || 0),
+        Math.round((summary.duration || 0) / 60),
+      ),
+    );
   } catch (err) {
     console.error("ORS proxy error:", err);
     res.json(

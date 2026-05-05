@@ -54,14 +54,6 @@ export const useAuthStore = create((set, get) => ({
     if (data.user) await get().setUser(data.user);
   },
 
-  signInWithGoogle: async () => {
-    const { error } = await supabase.auth.signInWithOAuth({
-      provider: "google",
-      options: { redirectTo: `${window.location.origin}/admin` },
-    });
-    if (error) throw error;
-  },
-
   signOut: async () => {
     await supabase.auth.signOut();
     set({ user: null, isAdmin: false, authError: null });

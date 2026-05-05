@@ -84,6 +84,38 @@ function formatDate(dateValue) {
   }).format(new Date(dateValue));
 }
 
+function formatDateTime(dateValue) {
+  if (!dateValue) return "Not available";
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(dateValue));
+}
+
+function summarizeAiTrace(trace) {
+  const summary = trace?.confidence_summary;
+  if (!summary || typeof summary !== "object") return "";
+
+  const parts = [];
+  if (Number.isFinite(Number(summary.rooms))) {
+    parts.push(`${summary.rooms} rooms`);
+  }
+  if (Number.isFinite(Number(summary.doors))) {
+    parts.push(`${summary.doors} doors`);
+  }
+  if (Number.isFinite(Number(summary.objects))) {
+    parts.push(`${summary.objects} objects`);
+  }
+  if (!parts.length && Number.isFinite(Number(summary.walls))) {
+    parts.push(`${summary.walls} walls`);
+  }
+
+  return parts.slice(0, 2).join(" • ");
+}
+
 function ModalShell({ title, children, onClose, width = "max-w-2xl" }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 px-4 py-8">
@@ -478,6 +510,7 @@ export default function AdminBuildings() {
   const [modal, setModal] = useState(null);
   const [deleteState, setDeleteState] = useState(null);
   const [deleting, setDeleting] = useState(false);
+  const [aiTraceByFloor, setAiTraceByFloor] = useState({});
 
   const loadBuildings = async () => {
     setLoading(true);
@@ -524,9 +557,53 @@ export default function AdminBuildings() {
     setSearchParams(next, { replace: true });
   };
 
+  const loadLatestAiTraceForFloors = async (floors) => {
+    const uncachedFloors = floors.filter((floor) => !aiTraceByFloor[floor.id]);
+    if (!uncachedFloors.length) return;
+
+    setAiTraceByFloor((current) => ({
+      ...current,
+      ...Object.fromEntries(
+        uncachedFloors.map((floor) => [floor.id, { status: "loading" }]),
+      ),
+    }));
+
+    const results = await Promise.all(
+      uncachedFloors.map(async (floor) => {
+        try {
+          const data = await api.maps.latestAiTrace(floor.id);
+          return [floor.id, { status: "loaded", data }];
+        } catch (error) {
+          if (error?.status === 404) {
+            return [floor.id, { status: "empty", data: null }];
+          }
+          console.error(error);
+          return [
+            floor.id,
+            {
+              status: "error",
+              message: error.message || "Unable to load AI trace status.",
+            },
+          ];
+        }
+      }),
+    );
+
+    const hasErrors = results.some(([, value]) => value.status === "error");
+    setAiTraceByFloor((current) => ({
+      ...current,
+      ...Object.fromEntries(results),
+    }));
+
+    if (hasErrors) {
+      toast.error("Some AI trace statuses could not be loaded.");
+    }
+  };
+
   const loadFloors = async (buildingId) => {
     const floors = await api.floors.byBuilding(buildingId).catch(() => []);
     setFloorsByBuilding((current) => ({ ...current, [buildingId]: floors }));
+    void loadLatestAiTraceForFloors(floors);
   };
 
   const moveFloor = async (buildingId, floorId, direction) => {
@@ -800,7 +877,42 @@ export default function AdminBuildings() {
                           </div>
                           <div className="min-w-0 flex-1">
                             <div className="font-semibold text-primary">{floor.name}</div>
-                            <div className="text-sm subtle-text">Level {floor.level}</div>
+                            <div className="mt-1 flex flex-wrap items-center gap-2 text-sm subtle-text">
+                              <span>Level {floor.level}</span>
+                              {aiTraceByFloor[floor.id]?.status === "loading" && (
+                                <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                                  Last AI trace: Loading...
+                                </span>
+                              )}
+                              {aiTraceByFloor[floor.id]?.status === "empty" && (
+                                <span className="rounded-full bg-slate-200 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                                  Last AI trace: No AI trace yet
+                                </span>
+                              )}
+                              {aiTraceByFloor[floor.id]?.status === "error" && (
+                                <span className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-medium text-rose-700">
+                                  Last AI trace: Unavailable
+                                </span>
+                              )}
+                              {aiTraceByFloor[floor.id]?.status === "loaded" && (
+                                <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
+                                  Last AI trace:{" "}
+                                  {aiTraceByFloor[floor.id].data?.status === "failed"
+                                    ? "Failed"
+                                    : "Completed"}
+                                </span>
+                              )}
+                            </div>
+                            {aiTraceByFloor[floor.id]?.status === "loaded" && (
+                              <div className="mt-1 text-xs subtle-text">
+                                {formatDateTime(
+                                  aiTraceByFloor[floor.id].data?.created_at,
+                                )}
+                                {summarizeAiTrace(aiTraceByFloor[floor.id].data)
+                                  ? ` • ${summarizeAiTrace(aiTraceByFloor[floor.id].data)}`
+                                  : ""}
+                              </div>
+                            )}
                           </div>
                           <div className="flex flex-wrap gap-2">
                             <button

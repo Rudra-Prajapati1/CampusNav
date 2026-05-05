@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { Info, Plus, Minus, ChevronDown, Navigation } from "lucide-react";
-import { MAPLIBRE_STYLE } from "./mapProviderConfig.js";
 
 const OUTDOOR_EXTRUSION_ID = "building-extrusion";
 const INDOOR_SPACES_SOURCE = "indoor-spaces";
@@ -10,6 +9,45 @@ const INDOOR_WALLS_SOURCE = "indoor-walls";
 const INDOOR_POI_SOURCE = "indoor-pois";
 const ROUTE_SOURCE = "indoor-route";
 const ROUTE_LAYER = "route-line";
+
+const FALLBACK_STYLE = {
+  version: 8,
+  sources: {
+    osm: {
+      type: "raster",
+      tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+      tileSize: 256,
+      attribution: "© OpenStreetMap contributors",
+    },
+  },
+  layers: [
+    {
+      id: "osm-tiles",
+      type: "raster",
+      source: "osm",
+      minzoom: 0,
+      maxzoom: 19,
+    },
+  ],
+};
+
+function shouldFallbackToOsm(event) {
+  const error = event?.error;
+  const status = error?.status || error?.response?.status;
+  const message = String(error?.message || "").toLowerCase();
+
+  return (
+    status === 401 ||
+    status === 403 ||
+    status === 404 ||
+    message.includes("401") ||
+    message.includes("403") ||
+    message.includes("404") ||
+    message.includes("maptiler") ||
+    message.includes("failed to load") ||
+    message.includes("style")
+  );
+}
 
 function solveLinearSystem(matrix, vector) {
   const n = matrix.length;
@@ -170,6 +208,13 @@ function convertIndoorGeojson(mapData, homography) {
             feature.properties?.kind || "facility",
           ).toLowerCase();
           const category = kind === "corridor" ? "facility" : kind;
+          const routeRoomId =
+            feature.properties?.linkedRoomId ||
+            feature.properties?.linked_room_id ||
+            feature.properties?.roomId ||
+            feature.properties?.room_id ||
+            feature.id ||
+            null;
           return {
             type: "Feature",
             id: feature.id,
@@ -177,6 +222,7 @@ function convertIndoorGeojson(mapData, homography) {
               name: feature.properties?.name || "Room",
               category,
               kind,
+              route_room_id: routeRoomId,
             },
             geometry: { type: "Point", coordinates: point },
           };
@@ -190,6 +236,12 @@ function convertIndoorGeojson(mapData, homography) {
           const kind = String(
             feature.properties?.kind || "facility",
           ).toLowerCase();
+          const routeRoomId =
+            feature.properties?.linkedRoomId ||
+            feature.properties?.linked_room_id ||
+            feature.properties?.roomId ||
+            feature.properties?.room_id ||
+            null;
           return {
             type: "Feature",
             id: feature.id,
@@ -197,6 +249,7 @@ function convertIndoorGeojson(mapData, homography) {
               name: feature.properties?.label || kind,
               category: kind,
               kind,
+              route_room_id: routeRoomId,
             },
             geometry: { type: "Point", coordinates: point },
           };
@@ -347,10 +400,14 @@ export default function MapLibreNavigationMap({
   const [mapReady, setMapReady] = useState(false);
   const [selectedPoi, setSelectedPoi] = useState(null);
 
-  const maptilerKey = import.meta.env.VITE_MAPTILER_KEY || "";
+  const maptilerKey = String(import.meta.env.VITE_MAPTILER_KEY || "").trim();
+  const maptilerStyleUrl = String(
+    import.meta.env.VITE_MAPTILER_MAPLIBRE_STYLE_URL || "",
+  ).trim();
   const style = maptilerKey
-    ? `https://api.maptiler.com/maps/streets/style.json?key=${maptilerKey}`
-    : MAPLIBRE_STYLE;
+    ? maptilerStyleUrl ||
+      `https://api.maptiler.com/maps/streets-v2/style.json?key=${maptilerKey}`
+    : FALLBACK_STYLE;
 
   const center = useMemo(() => {
     const lat = Number(building?.entrance_lat);
@@ -386,6 +443,14 @@ export default function MapLibreNavigationMap({
   useEffect(() => {
     if (!mapContainerRef.current || mapRef.current) return;
 
+    let fallbackStyleApplied = !maptilerKey;
+
+    if (!maptilerKey) {
+      console.warn(
+        "VITE_MAPTILER_KEY is not set. Using OpenStreetMap fallback.",
+      );
+    }
+
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
       style,
@@ -395,6 +460,21 @@ export default function MapLibreNavigationMap({
       bearing: -17,
       antialias: true,
       attributionControl: false,
+      fadeDuration: 0,
+      trackResize: true,
+      renderWorldCopies: false,
+      maxTileCacheSize: 50,
+    });
+
+    map.on("error", (event) => {
+      console.error("MapLibre error:", event);
+
+      if (fallbackStyleApplied) return;
+      if (!shouldFallbackToOsm(event)) return;
+
+      fallbackStyleApplied = true;
+      setMapReady(false);
+      map.setStyle(FALLBACK_STYLE);
     });
 
     map.addControl(
@@ -545,6 +625,7 @@ export default function MapLibreNavigationMap({
           name: feature.properties?.name,
           category: feature.properties?.category,
           kind: feature.properties?.kind,
+          route_room_id: feature.properties?.route_room_id || null,
           coordinates: feature.geometry?.coordinates,
         });
         if (onPoiSelect) onPoiSelect(feature);
@@ -578,6 +659,7 @@ export default function MapLibreNavigationMap({
     indoorGeo.poiGeo,
     indoorGeo.spacesGeo,
     indoorGeo.wallsGeo,
+    maptilerKey,
     onPoiSelect,
     routeGeo,
     style,

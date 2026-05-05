@@ -165,6 +165,8 @@ function updateFloorMapData(mapData = {}, floor, georeference, overlayBounds) {
   }
 
   nextMapData.floors = floors;
+  // Temporary compatibility mirror while clients move to map_georeferences
+  // as the canonical georeference source.
   nextMapData.georeference = georeference;
   return nextMapData;
 }
@@ -494,6 +496,8 @@ router.post("/georeference", requireAdmin, async (req, res) => {
         rotation: toNumber(rotation, 0) || 0,
         scaleX: toNumber(scaleX, 1) || 1,
         scaleY: toNumber(scaleY, 1) || 1,
+        address,
+        mode,
       },
       address,
       mode,
@@ -529,7 +533,11 @@ router.post("/georeference", requireAdmin, async (req, res) => {
       opacity: georeference.opacity,
       corners: georeference.corners,
       control_points: georeference.controlPoints,
-      transform: georeference.transform,
+      transform: {
+        ...georeference.transform,
+        address: georeference.address,
+        mode: georeference.mode,
+      },
       created_by: req.user.id,
     });
 

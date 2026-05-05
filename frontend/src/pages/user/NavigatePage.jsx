@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams, useSearchParams } from "react-router-dom";
 import {
   Search,
   Utensils,
@@ -9,34 +9,9 @@ import {
   ArrowUpDown,
   Navigation,
 } from "lucide-react";
+import toast from "react-hot-toast";
 import MapLibreNavigationMap from "../../components/navigation/MapLibreNavigationMap.jsx";
 import { api } from "../../utils/api.js";
-
-function ensureArray(value) {
-  return Array.isArray(value) ? value : [];
-}
-
-function extractPois(mapData) {
-  const spaces = ensureArray(mapData?.spaces?.features);
-  const objects = ensureArray(mapData?.objects?.features);
-
-  return [
-    ...spaces.map((feature) => ({
-      id: feature.id,
-      name: feature.properties?.name || "Room",
-      category: feature.properties?.kind || "facility",
-      type: "space",
-      roomId: feature.id,
-    })),
-    ...objects.map((feature) => ({
-      id: feature.id,
-      name: feature.properties?.label || feature.properties?.kind || "POI",
-      category: feature.properties?.kind || "facility",
-      type: "object",
-      roomId: null,
-    })),
-  ];
-}
 
 function routePathForFloor(route, floorId) {
   if (!route?.path) return [];
@@ -44,6 +19,37 @@ function routePathForFloor(route, floorId) {
     if (!point.floor_id) return true;
     return point.floor_id === floorId;
   });
+}
+
+function deriveRouteRoomId(result) {
+  if (result?.route_room_id) return result.route_room_id;
+  if (
+    result?.kind === "room" ||
+    result?.entity_kind === "room" ||
+    result?.floors
+  ) {
+    return result.id || null;
+  }
+  return null;
+}
+
+function normalizeSelection(result) {
+  if (!result) return null;
+  return {
+    id: result.id || null,
+    name: result.name || "Untitled",
+    category:
+      result.category ||
+      result.type ||
+      result.kind ||
+      result.entity_kind ||
+      "room",
+    kind: result.kind || result.entity_kind || result.type || "room",
+    type: result.type || result.kind || result.entity_kind || "room",
+    floor_id: result.floor_id || result.floors?.id || null,
+    floor_name: result.floor_name || result.floors?.name || null,
+    route_room_id: deriveRouteRoomId(result),
+  };
 }
 
 function Panel({
@@ -55,6 +61,8 @@ function Panel({
   toQuery,
   onFromQuery,
   onToQuery,
+  onFromFocus,
+  onToFocus,
   onSwap,
   routingMode,
   onStartRouting,
@@ -62,10 +70,19 @@ function Panel({
   onRoute,
   loadingRoute,
   mobile,
+  searchText,
+  searching,
+  searchError,
+  activeSearchTarget,
 }) {
   const className = mobile
     ? "absolute bottom-0 left-0 right-0 z-[730] rounded-t-2xl bg-white p-4 shadow-2xl"
-    : "absolute left-4 top-4 z-[730] w-[min(380px,92vw)] rounded-2xl bg-white p-4 shadow-lg";
+    : "absolute left-4 top-4 z-[730] w-[min(420px,92vw)] rounded-2xl bg-white p-4 shadow-lg";
+
+  const showResults = Boolean(searchText.trim());
+  const emptyMessage = routingMode
+    ? "No matching rooms or POIs found in this building."
+    : "No results found in this building.";
 
   return (
     <div className={className}>
@@ -77,7 +94,7 @@ function Panel({
               <input
                 value={query}
                 onChange={(event) => onQuery(event.target.value)}
-                placeholder="Search here..."
+                placeholder="Search rooms, departments, dining..."
                 className="w-full bg-transparent text-sm outline-none"
               />
             </div>
@@ -118,27 +135,6 @@ function Panel({
             </button>
           </div>
 
-          <div className="mt-3 max-h-72 space-y-2 overflow-auto">
-            {results.map((result) => (
-              <button
-                key={result.id}
-                type="button"
-                onClick={() => onSelectResult(result)}
-                className="block w-full rounded-lg border border-slate-200 px-3 py-2 text-left text-sm"
-              >
-                <div className="font-medium text-slate-900">{result.name}</div>
-                <div className="text-xs text-slate-500">
-                  {result.category || result.type}
-                </div>
-              </button>
-            ))}
-            {!results.length && query.trim() && (
-              <div className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-500">
-                No results found.
-              </div>
-            )}
-          </div>
-
           <button
             type="button"
             onClick={onStartRouting}
@@ -156,7 +152,13 @@ function Panel({
             <input
               value={fromQuery}
               onChange={(event) => onFromQuery(event.target.value)}
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              onFocus={onFromFocus}
+              placeholder="Choose a starting room"
+              className={`w-full rounded-md border px-3 py-2 text-sm ${
+                activeSearchTarget === "from"
+                  ? "border-blue-500 ring-2 ring-blue-100"
+                  : "border-slate-300"
+              }`}
             />
             <label className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-500">
               To
@@ -164,7 +166,13 @@ function Panel({
             <input
               value={toQuery}
               onChange={(event) => onToQuery(event.target.value)}
-              className="w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              onFocus={onToFocus}
+              placeholder="Choose a destination"
+              className={`w-full rounded-md border px-3 py-2 text-sm ${
+                activeSearchTarget === "to"
+                  ? "border-blue-500 ring-2 ring-blue-100"
+                  : "border-slate-300"
+              }`}
             />
           </div>
 
@@ -180,7 +188,7 @@ function Panel({
               type="button"
               onClick={onRoute}
               disabled={loadingRoute}
-              className="flex-1 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white"
+              className="flex-1 rounded-md bg-blue-600 px-3 py-2 text-sm font-medium text-white disabled:opacity-70"
             >
               <Navigation className="mr-1 inline h-4 w-4" />
               {loadingRoute ? "Routing..." : "Get Directions"}
@@ -195,12 +203,66 @@ function Panel({
           </div>
         </>
       )}
+
+      {showResults && (
+        <div className="mt-3 max-h-72 space-y-2 overflow-auto">
+          {searching && (
+            <div className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-500">
+              Searching the building...
+            </div>
+          )}
+
+          {!searching &&
+            results.map((result) => {
+              const disabled = routingMode && !result.route_room_id;
+
+              return (
+                <button
+                  key={result.id}
+                  type="button"
+                  onClick={() => onSelectResult(result)}
+                  disabled={disabled}
+                  className={`block w-full rounded-lg border px-3 py-2 text-left text-sm ${
+                    disabled
+                      ? "cursor-not-allowed border-slate-200 bg-slate-50 text-slate-400"
+                      : "border-slate-200"
+                  }`}
+                >
+                  <div className="font-medium text-slate-900">{result.name}</div>
+                  <div className="text-xs text-slate-500">
+                    {[result.category || result.type, result.floor_name]
+                      .filter(Boolean)
+                      .join(" • ")}
+                  </div>
+                  {disabled && (
+                    <div className="mt-1 text-[11px] text-slate-400">
+                      Directions unavailable for this POI.
+                    </div>
+                  )}
+                </button>
+              );
+            })}
+
+          {!searching && searchError && (
+            <div className="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-sm text-rose-700">
+              {searchError}
+            </div>
+          )}
+
+          {!searching && !searchError && !results.length && (
+            <div className="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-500">
+              {emptyMessage}
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
 
 export default function NavigatePage() {
   const { buildingId } = useParams();
+  const [searchParams] = useSearchParams();
   const [building, setBuilding] = useState(null);
   const [floors, setFloors] = useState([]);
   const [currentFloorId, setCurrentFloorId] = useState(null);
@@ -210,14 +272,32 @@ export default function NavigatePage() {
 
   const [query, setQuery] = useState("");
   const [routingMode, setRoutingMode] = useState(false);
+  const [activeSearchTarget, setActiveSearchTarget] = useState("browse");
   const [fromQuery, setFromQuery] = useState("");
   const [toQuery, setToQuery] = useState("");
   const [fromRoom, setFromRoom] = useState(null);
   const [toRoom, setToRoom] = useState(null);
   const [route, setRoute] = useState(null);
   const [routeLoading, setRouteLoading] = useState(false);
+  const [searchResults, setSearchResults] = useState([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== "undefined" ? window.innerWidth < 768 : false,
+  );
+  const [pendingAutoRoute, setPendingAutoRoute] = useState(false);
 
-  const mobile = window.innerWidth < 768;
+  const deeplinkFromId = searchParams.get("from");
+
+  useEffect(() => {
+    function handleResize() {
+      setIsMobile(window.innerWidth < 768);
+    }
+
+    handleResize();
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -240,6 +320,7 @@ export default function NavigatePage() {
         setCurrentFloorId((current) => current || orderedFloors[0]?.id || null);
       } catch (error) {
         console.error(error);
+        toast.error(error.message || "Unable to load navigation data.");
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -260,28 +341,104 @@ export default function NavigatePage() {
       .then((payload) => {
         if (cancelled) return;
         setFloorMapData(payload.map_data || null);
-        setGeoreference(
-          payload.georeference || payload.map_data?.georeference || null,
-        );
+        setGeoreference(payload.georeference || null);
       })
-      .catch((error) => console.error(error));
+      .catch((error) => {
+        if (cancelled) return;
+        console.error(error);
+        toast.error(error.message || "Unable to load floor map.");
+        setFloorMapData(null);
+        setGeoreference(null);
+      });
 
     return () => {
       cancelled = true;
     };
   }, [currentFloorId]);
 
-  const pois = useMemo(() => extractPois(floorMapData || {}), [floorMapData]);
+  useEffect(() => {
+    if (!deeplinkFromId) return;
+    let cancelled = false;
 
-  const filteredResults = useMemo(() => {
-    if (!query.trim()) return [];
-    const text = query.toLowerCase();
-    return pois
-      .filter((item) =>
-        `${item.name} ${item.category}`.toLowerCase().includes(text),
-      )
-      .slice(0, 24);
-  }, [pois, query]);
+    async function loadDeeplinkRoom() {
+      try {
+        const room = await api.rooms.get(deeplinkFromId);
+        if (cancelled) return;
+        const selection = normalizeSelection(room);
+        if (!selection?.route_room_id) {
+          toast.error("That QR code does not point to a routable room.");
+          return;
+        }
+        setRoutingMode(true);
+        setActiveSearchTarget("to");
+        setFromRoom(selection);
+        setFromQuery(selection.name);
+        if (selection.floor_id) {
+          setCurrentFloorId(selection.floor_id);
+        }
+        setPendingAutoRoute(Boolean(toRoom?.route_room_id));
+      } catch (error) {
+        if (cancelled) return;
+        console.error(error);
+        toast.error(error.message || "Unable to load the QR starting point.");
+      }
+    }
+
+    loadDeeplinkRoom();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [deeplinkFromId]);
+
+  const searchText = useMemo(() => {
+    if (!routingMode) return query;
+    if (activeSearchTarget === "from") return fromQuery;
+    if (activeSearchTarget === "to") return toQuery;
+    return "";
+  }, [activeSearchTarget, fromQuery, query, routingMode, toQuery]);
+
+  useEffect(() => {
+    const trimmed = searchText.trim();
+    if (!trimmed) {
+      setSearchLoading(false);
+      setSearchError("");
+      setSearchResults([]);
+      return;
+    }
+
+    let cancelled = false;
+    const timeoutId = window.setTimeout(async () => {
+      setSearchLoading(true);
+      setSearchError("");
+      try {
+        const results = await api.rooms.search(buildingId, trimmed);
+        if (cancelled) return;
+        setSearchResults((results || []).map(normalizeSelection).filter(Boolean));
+      } catch (error) {
+        if (cancelled) return;
+        console.error(error);
+        setSearchResults([]);
+        setSearchError(error.message || "Unable to search this building right now.");
+      } finally {
+        if (!cancelled) setSearchLoading(false);
+      }
+    }, 250);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [buildingId, searchText]);
+
+  useEffect(() => {
+    if (!pendingAutoRoute || !fromRoom?.route_room_id || !toRoom?.route_room_id) {
+      return;
+    }
+
+    setPendingAutoRoute(false);
+    void runRoute();
+  }, [fromRoom, pendingAutoRoute, toRoom]);
 
   const currentFloorRoute = useMemo(
     () => routePathForFloor(route, currentFloorId),
@@ -289,34 +446,75 @@ export default function NavigatePage() {
   );
 
   async function runRoute() {
-    if (!fromRoom || !toRoom) return;
+    if (!fromRoom?.route_room_id || !toRoom?.route_room_id) {
+      toast("Choose both a start and destination before routing.");
+      return;
+    }
+
+    if (fromRoom.route_room_id === toRoom.route_room_id) {
+      toast("Start and destination are the same room.");
+      return;
+    }
+
     setRouteLoading(true);
     try {
       const result = await api.navigation.route(
-        fromRoom.id,
-        toRoom.id,
+        fromRoom.route_room_id,
+        toRoom.route_room_id,
         buildingId,
       );
       setRoute(result);
     } catch (error) {
-      alert(error.message || "Unable to calculate route");
+      toast.error(error.message || "Unable to calculate route.");
     } finally {
       setRouteLoading(false);
     }
   }
 
   function selectSearchResult(result) {
-    setQuery(result.name || "");
-    if (!routingMode) return;
-
-    if (!fromRoom) {
-      setFromRoom(result);
-      setFromQuery(result.name || "");
+    const selection = normalizeSelection(result);
+    if (!selection?.route_room_id) {
+      toast("Directions are not available for this POI yet.");
       return;
     }
 
-    setToRoom(result);
-    setToQuery(result.name || "");
+    setRoute(null);
+
+    if (!routingMode) {
+      setQuery(selection.name || "");
+      setRoutingMode(true);
+      setActiveSearchTarget(fromRoom?.route_room_id ? "to" : "from");
+      setToRoom(selection);
+      setToQuery(selection.name || "");
+      if (selection.floor_id) {
+        setCurrentFloorId(selection.floor_id);
+      }
+      return;
+    }
+
+    if (activeSearchTarget === "from") {
+      setFromRoom(selection);
+      setFromQuery(selection.name || "");
+    } else {
+      setToRoom(selection);
+      setToQuery(selection.name || "");
+    }
+
+    if (selection.floor_id) {
+      setCurrentFloorId(selection.floor_id);
+    }
+  }
+
+  function startRouting() {
+    setRoutingMode(true);
+    setRoute(null);
+    setActiveSearchTarget(fromRoom?.route_room_id ? "to" : "from");
+  }
+
+  function endRouting() {
+    setRoutingMode(false);
+    setActiveSearchTarget("browse");
+    setRoute(null);
   }
 
   if (loading) {
@@ -343,29 +541,55 @@ export default function NavigatePage() {
         onExitBuilding={() => {
           setRoute(null);
           setRoutingMode(false);
+          setActiveSearchTarget("browse");
         }}
         onPoiDirections={(poi) => {
-          setRoutingMode(true);
-          if (!fromRoom && pois.length) {
-            setFromRoom(pois[0]);
-            setFromQuery(pois[0].name || "Start");
+          const selection = normalizeSelection(poi);
+          if (!selection?.route_room_id) {
+            toast("Directions are not available for this POI yet.");
+            return;
           }
-          setToRoom({ id: poi.id, name: poi.name });
-          setToQuery(poi.name || "");
+
+          setRoutingMode(true);
+          setRoute(null);
+          setToRoom(selection);
+          setToQuery(selection.name || "");
+
+          if (!fromRoom?.route_room_id) {
+            setActiveSearchTarget("from");
+            toast("Choose your starting room to get directions.");
+          } else {
+            setActiveSearchTarget("to");
+          }
         }}
         onPoiSelect={() => {}}
-        infoAction={() => alert("CampusNav indoor/outdoor 3D navigation")}
+        infoAction={() => toast("CampusNav indoor/outdoor 3D navigation")}
       />
 
       <Panel
         query={query}
-        onQuery={setQuery}
-        results={filteredResults}
+        onQuery={(value) => {
+          setActiveSearchTarget("browse");
+          setQuery(value);
+        }}
+        results={searchResults}
         onSelectResult={selectSearchResult}
         fromQuery={fromQuery}
         toQuery={toQuery}
-        onFromQuery={setFromQuery}
-        onToQuery={setToQuery}
+        onFromQuery={(value) => {
+          setActiveSearchTarget("from");
+          setFromQuery(value);
+          setFromRoom(null);
+          setRoute(null);
+        }}
+        onToQuery={(value) => {
+          setActiveSearchTarget("to");
+          setToQuery(value);
+          setToRoom(null);
+          setRoute(null);
+        }}
+        onFromFocus={() => setActiveSearchTarget("from")}
+        onToFocus={() => setActiveSearchTarget("to")}
         onSwap={() => {
           const oldFrom = fromRoom;
           const oldFromText = fromQuery;
@@ -376,20 +600,15 @@ export default function NavigatePage() {
           setRoute(null);
         }}
         routingMode={routingMode}
-        onStartRouting={() => {
-          setRoutingMode(true);
-          if (!fromRoom && filteredResults.length) {
-            setFromRoom(filteredResults[0]);
-            setFromQuery(filteredResults[0].name || "");
-          }
-        }}
-        onEndRouting={() => {
-          setRoutingMode(false);
-          setRoute(null);
-        }}
+        onStartRouting={startRouting}
+        onEndRouting={endRouting}
         onRoute={runRoute}
         loadingRoute={routeLoading}
-        mobile={mobile}
+        mobile={isMobile}
+        searchText={searchText}
+        searching={searchLoading}
+        searchError={searchError}
+        activeSearchTarget={activeSearchTarget}
       />
     </div>
   );

@@ -29,6 +29,33 @@ function ensureArray(value) {
   return Array.isArray(value) ? value : [];
 }
 
+function normalizeGeoreferenceRecord(record) {
+  if (!record) return null;
+  const transform =
+    record.transform && typeof record.transform === "object"
+      ? record.transform
+      : {};
+
+  return {
+    id: record.id,
+    floorId: record.floor_id,
+    anchorLat: toNumber(record.anchor_lat, null),
+    anchorLng: toNumber(record.anchor_lng, null),
+    rotation: toNumber(record.rotation, 0) || 0,
+    scaleX: toNumber(record.scale_x, 1) || 1,
+    scaleY: toNumber(record.scale_y, 1) || 1,
+    level: record.level || null,
+    opacity: toNumber(record.opacity, 0.55) || 0.55,
+    corners: ensureArray(record.corners),
+    controlPoints: ensureArray(record.control_points),
+    transform,
+    address: transform.address || "",
+    mode: transform.mode || null,
+    createdAt: record.created_at || null,
+    updatedAt: record.updated_at || null,
+  };
+}
+
 function isFeatureCollection(value) {
   return (
     value &&
@@ -253,7 +280,19 @@ router.get("/:id", async (req, res) => {
     .select("*")
     .eq("floor_id", req.params.id);
 
-  res.json({ ...floor, rooms, waypoints, connections });
+  const { data: georeference } = await supabase
+    .from("map_georeferences")
+    .select("*")
+    .eq("floor_id", req.params.id)
+    .maybeSingle();
+
+  res.json({
+    ...floor,
+    rooms,
+    waypoints,
+    connections,
+    georeference: normalizeGeoreferenceRecord(georeference),
+  });
 });
 
 // Public: Get floor MVF map-data and georeference
@@ -281,7 +320,7 @@ router.get("/:id/map-data", async (req, res) => {
       name: floor.name,
       level: floor.level,
       map_data: floor.map_data || null,
-      georeference: georeference || null,
+      georeference: normalizeGeoreferenceRecord(georeference),
       scale_pixels_per_meter: floor.scale_pixels_per_meter,
     });
   } catch (error) {
@@ -346,7 +385,8 @@ router.put("/:id", requireAdmin, async (req, res) => {
   res.json(data);
 });
 
-// Admin: Generate an editable draft from the uploaded floor plan image
+// Admin (legacy): Generate an editable draft from the uploaded floor plan image.
+// Prefer POST /api/v1/maps/ai-trace for the active AI-assisted tracing flow.
 router.post("/:id/auto-trace", requireAdmin, async (req, res) => {
   try {
     const { data: floor, error } = await supabase

@@ -293,6 +293,7 @@ export const api = {
     update: (id, data) => api.put(`/floors/${id}`, data),
     delete: (id) => api.delete(`/floors/${id}`),
     saveMap: (id, data) => api.post(`/floors/${id}/save-map`, data),
+    // Legacy draft tracer. Prefer api.maps.aiTrace() for active AI tracing.
     autoTrace: (id) => api.post(`/floors/${id}/auto-trace`, {}),
   },
 
@@ -314,6 +315,10 @@ export const api = {
         to_room_id: toRoomId,
         building_id: buildingId,
       }),
+    outdoorRoute: ({ fromLat, fromLng, toLat, toLng }) =>
+      api.get(
+        `/navigation/outdoor-route?fromLat=${encodeURIComponent(fromLat)}&fromLng=${encodeURIComponent(fromLng)}&toLat=${encodeURIComponent(toLat)}&toLng=${encodeURIComponent(toLng)}`,
+      ),
     invalidateCache: (buildingId) =>
       api.post("/navigation/invalidate-cache", { building_id: buildingId }),
     cacheStats: () => api.get("/navigation/cache-stats"),
