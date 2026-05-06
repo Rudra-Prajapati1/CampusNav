@@ -9,7 +9,7 @@ import { api } from "../../utils/api.js";
 const FALLBACK_STYLE = {
   version: 8,
   sources: {
-    osm: {
+    "osm-tiles": {
       type: "raster",
       tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
       tileSize: 256,
@@ -18,23 +18,15 @@ const FALLBACK_STYLE = {
   },
   layers: [
     {
-      id: "osm-tiles",
+      id: "osm-tiles-layer",
       type: "raster",
-      source: "osm",
+      source: "osm-tiles",
       minzoom: 0,
       maxzoom: 19,
     },
   ],
+  glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
 };
-
-const MAPTILER_KEY = String(import.meta.env.VITE_MAPTILER_KEY || "").trim();
-const MAPTILER_STYLE_URL = String(
-  import.meta.env.VITE_MAPTILER_MAPLIBRE_STYLE_URL || "",
-).trim();
-const PRIMARY_STYLE = MAPTILER_KEY
-  ? MAPTILER_STYLE_URL ||
-    `https://api.maptiler.com/maps/streets-v2/style.json?key=${MAPTILER_KEY}`
-  : FALLBACK_STYLE;
 
 function shouldFallbackToOsm(event) {
   const error = event?.error;
@@ -309,11 +301,18 @@ export default function AdminFloorGeoreference() {
   }, [buildingId, floorId]);
 
   useEffect(() => {
-    if (!mapContainerRef.current || mapRef.current) return;
+    if (mapRef.current) return;
 
-    let fallbackStyleApplied = !MAPTILER_KEY;
+    if (!mapContainerRef.current) return;
 
-    if (!MAPTILER_KEY) {
+    const maptilerKey = String(import.meta.env.VITE_MAPTILER_KEY || "").trim();
+    const mapStyle = maptilerKey
+      ? `https://api.maptiler.com/maps/streets/style.json?key=${maptilerKey}`
+      : FALLBACK_STYLE;
+
+    let fallbackStyleApplied = !maptilerKey;
+
+    if (!maptilerKey) {
       console.warn(
         "VITE_MAPTILER_KEY is not set. Using OpenStreetMap fallback.",
       );
@@ -323,9 +322,9 @@ export default function AdminFloorGeoreference() {
 
     const map = new maplibregl.Map({
       container: mapContainerRef.current,
-      style: PRIMARY_STYLE,
+      style: mapStyle,
       center: [centerRef.current.lng, centerRef.current.lat],
-      zoom: 18,
+      zoom: 17,
       pitch: 0,
       bearing: 0,
       dragRotate: false,
@@ -736,14 +735,6 @@ export default function AdminFloorGeoreference() {
     });
   }, [pairs, state.centerLat, state.centerLng, projectedCenter]);
 
-  if (loading) {
-    return (
-      <div className="flex h-screen items-center justify-center bg-bg text-sm text-secondary">
-        Loading georeference workspace...
-      </div>
-    );
-  }
-
   return (
     <div className="relative h-screen w-full overflow-hidden bg-bg">
       <div className="absolute left-3 top-3 z-[700]">
@@ -770,11 +761,13 @@ export default function AdminFloorGeoreference() {
 
       <div ref={mapContainerRef} className="h-full w-full" />
 
-      {!mapLoaded && (
-        <div className="pointer-events-none absolute inset-0 z-[690] grid place-items-center bg-white/40">
+      {(loading || !mapLoaded) && (
+        <div className="absolute inset-0 z-[710] grid place-items-center bg-white/40">
           <div className="flex items-center gap-2 rounded-md bg-white/90 px-4 py-2 text-sm font-medium text-slate-700 shadow">
             <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-blue-600" />
-            <span>Loading map...</span>
+            <span>
+              {loading ? "Loading georeference workspace..." : "Loading map..."}
+            </span>
           </div>
         </div>
       )}
