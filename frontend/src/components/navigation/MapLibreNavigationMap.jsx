@@ -8,10 +8,26 @@ const INDOOR_SPACES_SOURCE = "indoor-spaces";
 const INDOOR_WALLS_SOURCE = "indoor-walls";
 const INDOOR_POI_SOURCE = "indoor-pois";
 const ROUTE_SOURCE = "indoor-route";
+const OVERLAY_SOURCE = "floor-overlay";
+const OVERLAY_LAYER = "floor-overlay-layer";
+const INDOOR_FLOOR_LAYER = "indoor-floor";
+const INDOOR_ROOMS_LAYER = "indoor-rooms";
+const INDOOR_WALLS_LAYER = "indoor-walls";
+const POI_CIRCLE_LAYER = "poi-circles";
+const POI_LABEL_LAYER = "poi-labels";
 const ROUTE_LAYER = "route-line";
+const POI_INTERACTIVE_LAYERS = [POI_CIRCLE_LAYER, POI_LABEL_LAYER];
+
+const MINIMAL_STYLE = {
+  version: 8,
+  projection: { type: "mercator" },
+  sources: {},
+  layers: [],
+  glyphs: "https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf",
+};
 
 const FALLBACK_STYLE = {
-  version: 8,
+  ...MINIMAL_STYLE,
   sources: {
     osm: {
       type: "raster",
@@ -31,6 +47,10 @@ const FALLBACK_STYLE = {
   ],
 };
 
+function deepClone(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
 function shouldFallbackToOsm(event) {
   const error = event?.error;
   const status = error?.status || error?.response?.status;
@@ -47,6 +67,56 @@ function shouldFallbackToOsm(event) {
     message.includes("failed to load") ||
     message.includes("style")
   );
+}
+
+function validateStyleCandidate(styleCandidate) {
+  if (
+    !styleCandidate ||
+    typeof styleCandidate !== "object" ||
+    Array.isArray(styleCandidate) ||
+    styleCandidate.version !== 8 ||
+    !styleCandidate.sources ||
+    typeof styleCandidate.sources !== "object" ||
+    !Array.isArray(styleCandidate.layers) ||
+    !styleCandidate.projection
+  ) {
+    return null;
+  }
+
+  const nextStyle = deepClone(styleCandidate);
+  if (!nextStyle.glyphs) {
+    nextStyle.glyphs = MINIMAL_STYLE.glyphs;
+  }
+  return nextStyle;
+}
+
+async function resolveMapStyle(styleCandidate) {
+  if (typeof styleCandidate === "string") {
+    try {
+      const response = await fetch(styleCandidate);
+      if (!response.ok) {
+        throw new Error(`Style request failed with status ${response.status}`);
+      }
+
+      const parsed = await response.json();
+      const validated = validateStyleCandidate(parsed);
+      if (!validated) {
+        return { style: deepClone(FALLBACK_STYLE), usedFallback: true };
+      }
+
+      return { style: validated, usedFallback: false };
+    } catch (error) {
+      console.warn("Falling back to the local raster style.", error);
+      return { style: deepClone(FALLBACK_STYLE), usedFallback: true };
+    }
+  }
+
+  const validated = validateStyleCandidate(styleCandidate);
+  if (!validated) {
+    return { style: deepClone(FALLBACK_STYLE), usedFallback: true };
+  }
+
+  return { style: validated, usedFallback: false };
 }
 
 function solveLinearSystem(matrix, vector) {
@@ -101,12 +171,12 @@ function homographyFromCorners(pixelCorners, geoCorners) {
   ];
 }
 
-function applyHomography(H, x, y) {
-  if (!H) return null;
-  const denom = H[2][0] * x + H[2][1] * y + H[2][2];
+function applyHomography(matrix, x, y) {
+  if (!matrix) return null;
+  const denom = matrix[2][0] * x + matrix[2][1] * y + matrix[2][2];
   if (Math.abs(denom) < 1e-10) return null;
-  const lng = (H[0][0] * x + H[0][1] * y + H[0][2]) / denom;
-  const lat = (H[1][0] * x + H[1][1] * y + H[1][2]) / denom;
+  const lng = (matrix[0][0] * x + matrix[0][1] * y + matrix[0][2]) / denom;
+  const lat = (matrix[1][0] * x + matrix[1][1] * y + matrix[1][2]) / denom;
   return [lng, lat];
 }
 
@@ -144,6 +214,15 @@ function featureCenter(polygon) {
     [0, 0],
   );
   return [sum[0] / usable.length, sum[1] / usable.length];
+}
+
+function colorForCategory(category) {
+  const value = String(category || "").toLowerCase();
+  if (value.includes("dining") || value.includes("canteen")) return "#f59e0b";
+  if (value.includes("retail") || value.includes("store")) return "#8b5cf6";
+  if (value.includes("exit") || value.includes("entrance")) return "#22c55e";
+  if (value.includes("stairs") || value.includes("elevator")) return "#2563eb";
+  return "#64748b";
 }
 
 function convertIndoorGeojson(mapData, homography) {
@@ -222,6 +301,7 @@ function convertIndoorGeojson(mapData, homography) {
               name: feature.properties?.name || "Room",
               category,
               kind,
+              color: colorForCategory(category),
               route_room_id: routeRoomId,
             },
             geometry: { type: "Point", coordinates: point },
@@ -249,6 +329,7 @@ function convertIndoorGeojson(mapData, homography) {
               name: feature.properties?.label || kind,
               category: kind,
               kind,
+              color: colorForCategory(kind),
               route_room_id: routeRoomId,
             },
             geometry: { type: "Point", coordinates: point },
@@ -261,13 +342,31 @@ function convertIndoorGeojson(mapData, homography) {
   return { spacesGeo, wallsGeo, poiGeo };
 }
 
-function colorForCategory(category) {
-  const value = String(category || "").toLowerCase();
-  if (value.includes("dining") || value.includes("canteen")) return "#f59e0b";
-  if (value.includes("retail") || value.includes("store")) return "#8b5cf6";
-  if (value.includes("exit") || value.includes("entrance")) return "#22c55e";
-  if (value.includes("stairs") || value.includes("elevator")) return "#2563eb";
-  return "#64748b";
+function routeToGeojson(routePath, homography) {
+  if (!Array.isArray(routePath) || !routePath.length || !homography) {
+    return { type: "FeatureCollection", features: [] };
+  }
+
+  const coordinates = routePath
+    .map((point) =>
+      applyHomography(homography, Number(point.x), Number(point.y)),
+    )
+    .filter(Boolean);
+
+  if (coordinates.length < 2) {
+    return { type: "FeatureCollection", features: [] };
+  }
+
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        geometry: { type: "LineString", coordinates },
+        properties: {},
+      },
+    ],
+  };
 }
 
 function floorShortLabel(floor) {
@@ -294,88 +393,88 @@ function floorShortLabel(floor) {
   return name.slice(0, 3).toUpperCase();
 }
 
-function buildPinSvgDataUrl(category) {
-  const color = colorForCategory(category);
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64"><circle cx="32" cy="32" r="18" fill="${color}"/><circle cx="32" cy="32" r="18" fill="none" stroke="#ffffff" stroke-width="5"/></svg>`;
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+function isStyleReady(map, styleLoadedRef) {
+  return Boolean(map) && styleLoadedRef.current && map.isStyleLoaded();
 }
 
-function registerGlobalImageMissingHandler(map) {
-  const pending = new Set();
-
-  const handler = (event) => {
-    const id = event.id;
-    if (!id?.startsWith("pin-")) return;
-    if (map.hasImage(id)) return;
-    if (pending.has(id)) return;
-
-    const category = id.replace("pin-", "");
-    pending.add(id);
-    const image = new window.Image(64, 64);
-    image.onload = () => {
-      const canvas = document.createElement("canvas");
-      canvas.width = 64;
-      canvas.height = 64;
-      const ctx = canvas.getContext("2d");
-
-      if (!ctx) {
-        pending.delete(id);
-        return;
-      }
-
-      ctx.clearRect(0, 0, 64, 64);
-      ctx.drawImage(image, 0, 0, 64, 64);
-
-      if (!map.hasImage(id)) {
-        map.addImage(id, ctx.getImageData(0, 0, 64, 64));
-      }
-
-      pending.delete(id);
-    };
-
-    image.onerror = () => {
-      pending.delete(id);
-    };
-
-    image.src = buildPinSvgDataUrl(category);
-  };
-
-  map.on("styleimagemissing", handler);
-  return () => map.off("styleimagemissing", handler);
+function getStyleSource(map, id, styleLoadedRef) {
+  if (!isStyleReady(map, styleLoadedRef)) return null;
+  return map.getSource(id);
 }
 
-function updateOrCreateGeoSource(map, id, data) {
+function hasStyleLayer(map, id, styleLoadedRef) {
+  if (!isStyleReady(map, styleLoadedRef)) return false;
+  return Boolean(map.getLayer(id));
+}
+
+function updateOrCreateGeoSource(map, id, data, styleLoadedRef) {
+  if (!isStyleReady(map, styleLoadedRef)) return;
   const source = map.getSource(id);
-  if (source) {
+  if (source && typeof source.setData === "function") {
     source.setData(data);
     return;
   }
   map.addSource(id, { type: "geojson", data });
 }
 
-function routeToGeojson(routePath, homography) {
-  if (!Array.isArray(routePath) || !routePath.length || !homography) {
-    return { type: "FeatureCollection", features: [] };
+function ensureLayer(map, layerConfig, styleLoadedRef, beforeId = null) {
+  if (!isStyleReady(map, styleLoadedRef)) return;
+  if (map.getLayer(layerConfig.id)) return;
+
+  if (beforeId && map.getLayer(beforeId)) {
+    map.addLayer(layerConfig, beforeId);
+    return;
   }
 
-  const coordinates = routePath
-    .map((point) =>
-      applyHomography(homography, Number(point.x), Number(point.y)),
+  map.addLayer(layerConfig);
+}
+
+function findFloorEntry(mapData, currentFloorId) {
+  const floors = Array.isArray(mapData?.floors) ? mapData.floors : [];
+  return (
+    floors.find((entry) => entry.id === currentFloorId) ||
+    floors.find((entry) => entry.level === mapData?.level) ||
+    floors[0] ||
+    null
+  );
+}
+
+function resolveOverlayConfig(mapData, georeference, currentFloorId) {
+  const floorEntry = findFloorEntry(mapData, currentFloorId);
+  const imageUrl =
+    floorEntry?.backgroundDataUrl || mapData?.meta?.backgroundDataUrl || null;
+  const corners = Array.isArray(georeference?.corners)
+    ? georeference.corners
+    : Array.isArray(floorEntry?.corners)
+      ? floorEntry.corners
+      : [];
+
+  if (!imageUrl || corners.length < 4) return null;
+
+  const coordinates = corners
+    .slice(0, 4)
+    .map((corner) => [Number(corner.lng), Number(corner.lat)]);
+
+  if (
+    coordinates.some(
+      (coord) => !Number.isFinite(coord[0]) || !Number.isFinite(coord[1]),
     )
-    .filter(Boolean);
+  ) {
+    return null;
+  }
 
-  if (coordinates.length < 2)
-    return { type: "FeatureCollection", features: [] };
+  return { url: imageUrl, coordinates };
+}
 
+function buildPoiSelection(feature) {
+  if (!feature) return null;
   return {
-    type: "FeatureCollection",
-    features: [
-      {
-        type: "Feature",
-        geometry: { type: "LineString", coordinates },
-        properties: {},
-      },
-    ],
+    id: feature.id,
+    name: feature.properties?.name,
+    category: feature.properties?.category,
+    kind: feature.properties?.kind,
+    route_room_id: feature.properties?.route_room_id || null,
+    coordinates: feature.geometry?.coordinates || null,
   };
 }
 
@@ -397,6 +496,18 @@ export default function MapLibreNavigationMap({
 }) {
   const mapContainerRef = useRef(null);
   const mapRef = useRef(null);
+  const styleLoadedRef = useRef(false);
+  const mapLoadedRef = useRef(false);
+  const fallbackStyleAppliedRef = useRef(false);
+  const pendingStyledataListenersRef = useRef([]);
+  const poiLayerListenersRef = useRef([]);
+  const styleRequestTokenRef = useRef(0);
+  const latestStateRef = useRef({
+    indoorGeo: null,
+    routeGeo: null,
+    overlayConfig: null,
+    onPoiSelect: null,
+  });
   const [mapReady, setMapReady] = useState(false);
   const [selectedPoi, setSelectedPoi] = useState(null);
 
@@ -404,7 +515,7 @@ export default function MapLibreNavigationMap({
   const maptilerStyleUrl = String(
     import.meta.env.VITE_MAPTILER_MAPLIBRE_STYLE_URL || "",
   ).trim();
-  const style = maptilerKey
+  const primaryStyleRequest = maptilerKey
     ? maptilerStyleUrl ||
       `https://api.maptiler.com/maps/streets-v2/style.json?key=${maptilerKey}`
     : FALLBACK_STYLE;
@@ -428,6 +539,10 @@ export default function MapLibreNavigationMap({
     () => routeToGeojson(routePath, homography),
     [routePath, homography],
   );
+  const overlayConfig = useMemo(
+    () => resolveOverlayConfig(mapData, georeference, currentFloorId),
+    [currentFloorId, georeference, mapData],
+  );
   const routeDistanceLabel = useMemo(() => {
     const meters = Number(routeDistanceMeters);
     if (!Number.isFinite(meters) || meters <= 0) return "--";
@@ -440,65 +555,175 @@ export default function MapLibreNavigationMap({
     return `${Math.max(1, Math.round(minutes))} min`;
   }, [routeEtaMinutes]);
 
-  useEffect(() => {
-    if (!mapContainerRef.current || mapRef.current) return;
+  latestStateRef.current = {
+    indoorGeo,
+    routeGeo,
+    overlayConfig,
+    onPoiSelect,
+  };
 
-    let fallbackStyleApplied = !maptilerKey;
-
-    if (!maptilerKey) {
-      console.warn(
-        "VITE_MAPTILER_KEY is not set. Using OpenStreetMap fallback.",
-      );
+  const cancelPendingStyledataListeners = (map) => {
+    if (!map) {
+      pendingStyledataListenersRef.current = [];
+      return;
     }
 
-    const map = new maplibregl.Map({
-      container: mapContainerRef.current,
-      style,
-      center,
-      zoom: 15,
-      pitch: 50,
-      bearing: -17,
-      antialias: true,
-      attributionControl: false,
-      fadeDuration: 0,
-      trackResize: true,
-      renderWorldCopies: false,
-      maxTileCacheSize: 50,
+    pendingStyledataListenersRef.current.forEach((listener) => {
+      map.off("styledata", listener);
     });
+    pendingStyledataListenersRef.current = [];
+  };
 
-    map.on("error", (event) => {
-      console.error("MapLibre error:", event);
+  const registerStyledataListener = (map, listener) => {
+    pendingStyledataListenersRef.current.push(listener);
+    map.once("styledata", listener);
+  };
 
-      if (fallbackStyleApplied) return;
-      if (!shouldFallbackToOsm(event)) return;
+  const clearPoiLayerListeners = (map) => {
+    if (!map) {
+      poiLayerListenersRef.current = [];
+      return;
+    }
 
-      fallbackStyleApplied = true;
-      setMapReady(false);
-      map.setStyle(FALLBACK_STYLE);
+    poiLayerListenersRef.current.forEach(({ event, layerId, handler }) => {
+      map.off(event, layerId, handler);
     });
+    poiLayerListenersRef.current = [];
+  };
 
-    map.addControl(
-      new maplibregl.AttributionControl({ compact: true }),
-      "bottom-right",
+  const scheduleWhenStyleReady = (map, callback) => {
+    if (!map) return;
+    if (isStyleReady(map, styleLoadedRef)) {
+      callback();
+      return;
+    }
+
+    const queuedListener = () => {
+      pendingStyledataListenersRef.current =
+        pendingStyledataListenersRef.current.filter(
+          (entry) => entry !== queuedListener,
+        );
+      callback();
+    };
+
+    registerStyledataListener(map, queuedListener);
+  };
+
+  const bindPoiInteractions = (map) => {
+    if (!isStyleReady(map, styleLoadedRef)) return;
+    clearPoiLayerListeners(map);
+
+    if (
+      !hasStyleLayer(map, POI_CIRCLE_LAYER, styleLoadedRef) ||
+      !hasStyleLayer(map, POI_LABEL_LAYER, styleLoadedRef)
+    ) {
+      return;
+    }
+
+    const handlePoiClick = (event) => {
+      const feature = event.features?.[0];
+      const selection = buildPoiSelection(feature);
+      if (!selection) return;
+      setSelectedPoi(selection);
+      latestStateRef.current.onPoiSelect?.(feature);
+    };
+
+    const handlePointerEnter = () => {
+      map.getCanvas().style.cursor = "pointer";
+    };
+
+    const handlePointerLeave = () => {
+      map.getCanvas().style.cursor = "";
+    };
+
+    POI_INTERACTIVE_LAYERS.forEach((layerId) => {
+      map.on("click", layerId, handlePoiClick);
+      poiLayerListenersRef.current.push({
+        event: "click",
+        layerId,
+        handler: handlePoiClick,
+      });
+
+      map.on("mouseenter", layerId, handlePointerEnter);
+      poiLayerListenersRef.current.push({
+        event: "mouseenter",
+        layerId,
+        handler: handlePointerEnter,
+      });
+
+      map.on("mouseleave", layerId, handlePointerLeave);
+      poiLayerListenersRef.current.push({
+        event: "mouseleave",
+        layerId,
+        handler: handlePointerLeave,
+      });
+    });
+  };
+
+  const reapplyImageOverlay = (map) => {
+    if (!isStyleReady(map, styleLoadedRef)) return;
+
+    const existingLayer = map.getLayer(OVERLAY_LAYER);
+    const existingSource = getStyleSource(map, OVERLAY_SOURCE, styleLoadedRef);
+    const nextOverlay = latestStateRef.current.overlayConfig;
+
+    if (!nextOverlay) {
+      if (existingLayer) map.removeLayer(OVERLAY_LAYER);
+      if (existingSource) map.removeSource(OVERLAY_SOURCE);
+      return;
+    }
+
+    if (existingSource && typeof existingSource.updateImage === "function") {
+      existingSource.updateImage({
+        url: nextOverlay.url,
+        coordinates: nextOverlay.coordinates,
+      });
+    } else {
+      if (existingLayer) map.removeLayer(OVERLAY_LAYER);
+      if (existingSource) map.removeSource(OVERLAY_SOURCE);
+      map.addSource(OVERLAY_SOURCE, {
+        type: "image",
+        url: nextOverlay.url,
+        coordinates: nextOverlay.coordinates,
+      });
+    }
+
+    ensureLayer(
+      map,
+      {
+        id: OVERLAY_LAYER,
+        type: "raster",
+        source: OVERLAY_SOURCE,
+        paint: {
+          "raster-opacity": 0.4,
+        },
+      },
+      styleLoadedRef,
+      INDOOR_FLOOR_LAYER,
     );
+  };
 
-    const cleanupImageMissing = registerGlobalImageMissingHandler(map);
+  const rehydrateStyle = (map) => {
+    if (!isStyleReady(map, styleLoadedRef)) return;
 
-    map.on("load", () => {
-      setMapReady(true);
-
-      if (
-        map.getSource("openmaptiles") &&
-        !map.getLayer(OUTDOOR_EXTRUSION_ID)
-      ) {
-        map.addLayer({
+    if (
+      getStyleSource(map, "openmaptiles", styleLoadedRef) &&
+      !hasStyleLayer(map, OUTDOOR_EXTRUSION_ID, styleLoadedRef)
+    ) {
+      ensureLayer(
+        map,
+        {
           id: OUTDOOR_EXTRUSION_ID,
           type: "fill-extrusion",
           source: "openmaptiles",
           "source-layer": "building",
           paint: {
             "fill-extrusion-color": "#aaaaaa",
-            "fill-extrusion-height": ["coalesce", ["get", "render_height"], 12],
+            "fill-extrusion-height": [
+              "coalesce",
+              ["get", "render_height"],
+              12,
+            ],
             "fill-extrusion-base": [
               "coalesce",
               ["get", "render_min_height"],
@@ -514,183 +739,358 @@ export default function MapLibreNavigationMap({
               0,
             ],
           },
-        });
-      }
+        },
+        styleLoadedRef,
+      );
+    }
 
-      updateOrCreateGeoSource(map, INDOOR_SPACES_SOURCE, indoorGeo.spacesGeo);
-      updateOrCreateGeoSource(map, INDOOR_WALLS_SOURCE, indoorGeo.wallsGeo);
-      updateOrCreateGeoSource(map, INDOOR_POI_SOURCE, indoorGeo.poiGeo);
-      updateOrCreateGeoSource(map, ROUTE_SOURCE, routeGeo);
+    updateOrCreateGeoSource(
+      map,
+      INDOOR_SPACES_SOURCE,
+      latestStateRef.current.indoorGeo.spacesGeo,
+      styleLoadedRef,
+    );
+    updateOrCreateGeoSource(
+      map,
+      INDOOR_WALLS_SOURCE,
+      latestStateRef.current.indoorGeo.wallsGeo,
+      styleLoadedRef,
+    );
+    updateOrCreateGeoSource(
+      map,
+      INDOOR_POI_SOURCE,
+      latestStateRef.current.indoorGeo.poiGeo,
+      styleLoadedRef,
+    );
+    updateOrCreateGeoSource(
+      map,
+      ROUTE_SOURCE,
+      latestStateRef.current.routeGeo,
+      styleLoadedRef,
+    );
 
-      if (!map.getLayer("indoor-floor")) {
-        map.addLayer({
-          id: "indoor-floor",
-          type: "fill",
-          source: INDOOR_SPACES_SOURCE,
-          paint: {
-            "fill-color": "#f8fafc",
-            "fill-opacity": [
-              "interpolate",
-              ["linear"],
-              ["zoom"],
-              17,
-              0,
-              18,
-              0.75,
-            ],
-          },
-        });
-      }
+    reapplyImageOverlay(map);
 
-      if (!map.getLayer("indoor-rooms")) {
-        map.addLayer({
-          id: "indoor-rooms",
-          type: "fill-extrusion",
-          source: INDOOR_SPACES_SOURCE,
-          paint: {
-            "fill-extrusion-color": ["coalesce", ["get", "color"], "#8b5cf6"],
-            "fill-extrusion-height": 3.5,
-            "fill-extrusion-base": 0,
-            "fill-extrusion-opacity": [
-              "interpolate",
-              ["linear"],
-              ["zoom"],
-              17,
-              0,
-              18,
-              0.85,
-            ],
-          },
-        });
-      }
+    ensureLayer(
+      map,
+      {
+        id: INDOOR_FLOOR_LAYER,
+        type: "fill",
+        source: INDOOR_SPACES_SOURCE,
+        paint: {
+          "fill-color": "#f8fafc",
+          "fill-opacity": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            17,
+            0,
+            18,
+            0.75,
+          ],
+        },
+      },
+      styleLoadedRef,
+    );
 
-      if (!map.getLayer("indoor-walls")) {
-        map.addLayer({
-          id: "indoor-walls",
-          type: "line",
-          source: INDOOR_WALLS_SOURCE,
-          paint: {
-            "line-color": "#374151",
-            "line-width": ["interpolate", ["linear"], ["zoom"], 17, 0.5, 18, 2],
-            "line-opacity": ["interpolate", ["linear"], ["zoom"], 17, 0, 18, 1],
-          },
-        });
-      }
+    ensureLayer(
+      map,
+      {
+        id: INDOOR_ROOMS_LAYER,
+        type: "fill-extrusion",
+        source: INDOOR_SPACES_SOURCE,
+        paint: {
+          "fill-extrusion-color": ["coalesce", ["get", "color"], "#8b5cf6"],
+          "fill-extrusion-height": 3.5,
+          "fill-extrusion-base": 0,
+          "fill-extrusion-opacity": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            17,
+            0,
+            18,
+            0.85,
+          ],
+        },
+      },
+      styleLoadedRef,
+    );
 
-      if (!map.getLayer("poi-pins")) {
-        map.addLayer({
-          id: "poi-pins",
-          type: "symbol",
-          source: INDOOR_POI_SOURCE,
-          layout: {
-            "icon-image": ["concat", "pin-", ["get", "category"]],
-            "icon-size": 1.2,
-            "icon-allow-overlap": true,
-            "text-field": ["get", "name"],
-            "text-size": 11,
-            "text-offset": [0, 1.5],
-            "text-anchor": "top",
-          },
-          paint: {
-            "text-color": "#0f172a",
-            "text-halo-color": "#ffffff",
-            "text-halo-width": 1,
-          },
-        });
-      }
+    ensureLayer(
+      map,
+      {
+        id: INDOOR_WALLS_LAYER,
+        type: "line",
+        source: INDOOR_WALLS_SOURCE,
+        paint: {
+          "line-color": "#374151",
+          "line-width": ["interpolate", ["linear"], ["zoom"], 17, 0.5, 18, 2],
+          "line-opacity": ["interpolate", ["linear"], ["zoom"], 17, 0, 18, 1],
+        },
+      },
+      styleLoadedRef,
+    );
 
-      if (!map.getLayer(ROUTE_LAYER)) {
-        map.addLayer({
-          id: ROUTE_LAYER,
-          type: "line",
-          source: ROUTE_SOURCE,
-          paint: {
-            "line-color": "#2563eb",
-            "line-width": 5,
-            "line-dasharray": [2, 8],
-            "line-opacity": 0.95,
-          },
-          layout: {
-            "line-cap": "round",
-            "line-join": "round",
-          },
-        });
-      }
+    ensureLayer(
+      map,
+      {
+        id: ROUTE_LAYER,
+        type: "line",
+        source: ROUTE_SOURCE,
+        paint: {
+          "line-color": "#2563eb",
+          "line-width": 5,
+          "line-dasharray": [2, 8],
+          "line-opacity": 0.95,
+        },
+        layout: {
+          "line-cap": "round",
+          "line-join": "round",
+        },
+      },
+      styleLoadedRef,
+    );
 
-      map.on("click", "poi-pins", (event) => {
-        const feature = event.features?.[0];
-        if (!feature) return;
-        setSelectedPoi({
-          id: feature.id,
-          name: feature.properties?.name,
-          category: feature.properties?.category,
-          kind: feature.properties?.kind,
-          route_room_id: feature.properties?.route_room_id || null,
-          coordinates: feature.geometry?.coordinates,
-        });
-        if (onPoiSelect) onPoiSelect(feature);
-      });
+    ensureLayer(
+      map,
+      {
+        id: POI_CIRCLE_LAYER,
+        type: "circle",
+        source: INDOOR_POI_SOURCE,
+        paint: {
+          "circle-radius": 7,
+          "circle-color": ["coalesce", ["get", "color"], "#64748b"],
+          "circle-stroke-color": "#ffffff",
+          "circle-stroke-width": 2,
+        },
+      },
+      styleLoadedRef,
+    );
 
-      map.on("mouseenter", "poi-pins", () => {
-        map.getCanvas().style.cursor = "pointer";
-      });
+    ensureLayer(
+      map,
+      {
+        id: POI_LABEL_LAYER,
+        type: "symbol",
+        source: INDOOR_POI_SOURCE,
+        layout: {
+          "text-field": ["get", "name"],
+          "text-size": 11,
+          "text-offset": [0, 1.4],
+          "text-anchor": "top",
+          "text-allow-overlap": true,
+          "text-ignore-placement": true,
+        },
+        paint: {
+          "text-color": "#0f172a",
+          "text-halo-color": "#ffffff",
+          "text-halo-width": 1,
+        },
+      },
+      styleLoadedRef,
+    );
 
-      map.on("mouseleave", "poi-pins", () => {
-        map.getCanvas().style.cursor = "";
-      });
+    bindPoiInteractions(map);
+  };
 
-      map.on("zoomend", () => {
-        const zoom = map.getZoom();
-        if (zoom > 18 && map.getPitch() < 45) {
-          map.easeTo({ zoom: 18.5, pitch: 50, duration: 800 });
+  const applyStyleChangeRef = useRef(async () => {});
+  applyStyleChangeRef.current = async (styleCandidate) => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    const requestToken = ++styleRequestTokenRef.current;
+    const { style: nextStyle, usedFallback } = await resolveMapStyle(
+      styleCandidate,
+    );
+
+    if (!mapRef.current || map !== mapRef.current) return;
+    if (requestToken !== styleRequestTokenRef.current) return;
+
+    cancelPendingStyledataListeners(map);
+    clearPoiLayerListeners(map);
+    fallbackStyleAppliedRef.current = !maptilerKey || usedFallback;
+    setSelectedPoi(null);
+    setMapReady(false);
+
+    const onStyleData = () => {
+      pendingStyledataListenersRef.current =
+        pendingStyledataListenersRef.current.filter(
+          (listener) => listener !== onStyleData,
+        );
+
+      if (!mapRef.current || map !== mapRef.current) return;
+
+      styleLoadedRef.current = true;
+
+      const finishRehydrate = () => {
+        if (!mapRef.current || map !== mapRef.current) return;
+        if (!isStyleReady(map, styleLoadedRef)) {
+          scheduleWhenStyleReady(map, finishRehydrate);
+          return;
         }
-      });
+
+        rehydrateStyle(map);
+        setMapReady(true);
+      };
+
+      finishRehydrate();
+    };
+
+    registerStyledataListener(map, onStyleData);
+    styleLoadedRef.current = false;
+    map.setStyle(nextStyle);
+    styleLoadedRef.current = false;
+  };
+
+  useEffect(() => {
+    if (!mapContainerRef.current || mapRef.current) return;
+
+    let cancelled = false;
+    fallbackStyleAppliedRef.current = !maptilerKey;
+
+    if (!maptilerKey) {
+      console.warn(
+        "VITE_MAPTILER_KEY is not set. Using OpenStreetMap fallback.",
+      );
+    }
+
+    const map = new maplibregl.Map({
+      container: mapContainerRef.current,
+      style: deepClone(FALLBACK_STYLE),
+      center,
+      zoom: 15,
+      pitch: 50,
+      bearing: -17,
+      antialias: true,
+      attributionControl: false,
+      fadeDuration: 0,
+      trackResize: true,
+      renderWorldCopies: false,
+      maxTileCacheSize: 50,
     });
 
     mapRef.current = map;
 
+    const handleError = (event) => {
+      console.error("MapLibre error:", event);
+
+      if (fallbackStyleAppliedRef.current) return;
+      if (!shouldFallbackToOsm(event)) return;
+
+      fallbackStyleAppliedRef.current = true;
+      void applyStyleChangeRef.current(FALLBACK_STYLE);
+    };
+
+    const handleZoomEnd = () => {
+      const zoom = map.getZoom();
+      if (zoom > 18 && map.getPitch() < 45) {
+        map.easeTo({ zoom: 18.5, pitch: 50, duration: 800 });
+      }
+    };
+
+    const handleLoad = () => {
+      if (cancelled) return;
+      mapLoadedRef.current = true;
+      styleLoadedRef.current = true;
+      setMapReady(true);
+      void applyStyleChangeRef.current(primaryStyleRequest);
+    };
+
+    map.on("error", handleError);
+    map.on("zoomend", handleZoomEnd);
+    map.on("load", handleLoad);
+
+    map.addControl(
+      new maplibregl.AttributionControl({ compact: true }),
+      "bottom-right",
+    );
+
     return () => {
-      cleanupImageMissing();
+      cancelled = true;
+      setMapReady(false);
+      styleLoadedRef.current = false;
+      mapLoadedRef.current = false;
+      cancelPendingStyledataListeners(map);
+      clearPoiLayerListeners(map);
+      map.off("error", handleError);
+      map.off("zoomend", handleZoomEnd);
+      map.off("load", handleLoad);
       map.remove();
       mapRef.current = null;
     };
-  }, [
-    center,
-    indoorGeo.poiGeo,
-    indoorGeo.spacesGeo,
-    indoorGeo.wallsGeo,
-    maptilerKey,
-    onPoiSelect,
-    routeGeo,
-    style,
-  ]);
+  }, [center, maptilerKey, primaryStyleRequest]);
+
+  useEffect(() => {
+    if (!mapLoadedRef.current || !mapRef.current || !currentFloorId) return;
+    void applyStyleChangeRef.current(primaryStyleRequest);
+  }, [currentFloorId, primaryStyleRequest]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!mapReady || !map) return;
-    updateOrCreateGeoSource(map, INDOOR_SPACES_SOURCE, indoorGeo.spacesGeo);
-    updateOrCreateGeoSource(map, INDOOR_WALLS_SOURCE, indoorGeo.wallsGeo);
-    updateOrCreateGeoSource(map, INDOOR_POI_SOURCE, indoorGeo.poiGeo);
-  }, [indoorGeo, mapReady]);
+    if (!map) return;
+
+    scheduleWhenStyleReady(map, () => {
+      updateOrCreateGeoSource(
+        map,
+        INDOOR_SPACES_SOURCE,
+        indoorGeo.spacesGeo,
+        styleLoadedRef,
+      );
+      updateOrCreateGeoSource(
+        map,
+        INDOOR_WALLS_SOURCE,
+        indoorGeo.wallsGeo,
+        styleLoadedRef,
+      );
+      updateOrCreateGeoSource(
+        map,
+        INDOOR_POI_SOURCE,
+        indoorGeo.poiGeo,
+        styleLoadedRef,
+      );
+    });
+  }, [indoorGeo]);
 
   useEffect(() => {
     const map = mapRef.current;
-    if (!mapReady || !map) return;
-    updateOrCreateGeoSource(map, ROUTE_SOURCE, routeGeo);
-  }, [mapReady, routeGeo]);
+    if (!map) return;
+
+    scheduleWhenStyleReady(map, () => {
+      updateOrCreateGeoSource(map, ROUTE_SOURCE, routeGeo, styleLoadedRef);
+    });
+  }, [routeGeo]);
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map) return;
+
+    scheduleWhenStyleReady(map, () => {
+      reapplyImageOverlay(map);
+    });
+  }, [overlayConfig]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!mapReady || !map || !routeGeo.features.length) return;
 
-    let frame;
+    let frame = null;
+
     const animate = () => {
-      const offset = (Date.now() / 50) % 16;
-      if (map.getLayer(ROUTE_LAYER)) {
+      if (!mapRef.current || map !== mapRef.current) return;
+      if (!isStyleReady(map, styleLoadedRef)) {
+        frame = requestAnimationFrame(animate);
+        return;
+      }
+
+      if (hasStyleLayer(map, ROUTE_LAYER, styleLoadedRef)) {
+        const offset = (Date.now() / 50) % 16;
         map.setPaintProperty(ROUTE_LAYER, "line-dasharray", [2, 2 + offset]);
       }
+
       frame = requestAnimationFrame(animate);
     };
+
     frame = requestAnimationFrame(animate);
 
     return () => {
@@ -765,7 +1165,7 @@ export default function MapLibreNavigationMap({
       </div>
 
       <div className="absolute bottom-4 left-1/2 z-[700] -translate-x-1/2 text-xs text-slate-700">
-        CampusNav • © Maptiler © OpenStreetMap contributors
+        CampusNav • © MapTiler © OpenStreetMap contributors
       </div>
 
       {routeGeo.features.length > 0 && (
@@ -782,7 +1182,7 @@ export default function MapLibreNavigationMap({
 
       <div
         className={`absolute bottom-0 left-0 right-0 z-[720] rounded-t-2xl bg-white p-4 shadow-2xl transition-transform duration-300 ease-out ${
-          selectedPoi ? "translate-y-0" : "translate-y-full pointer-events-none"
+          selectedPoi ? "translate-y-0" : "pointer-events-none translate-y-full"
         }`}
       >
         {selectedPoi && (
