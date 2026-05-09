@@ -105,6 +105,8 @@ function bboxFromPolygon(points) {
 }
 
 function deriveWaypointTypeFromNode(feature) {
+  const explicitType = String(feature?.properties?.type || "").toLowerCase().trim();
+  if (explicitType) return explicitType;
   const explicit = String(feature?.properties?.kind || "").toLowerCase();
   if (["stairs", "elevator", "entrance"].includes(explicit)) return explicit;
   if (feature?.properties?.spaceId) return "room_center";
@@ -117,10 +119,7 @@ function deriveFromMvf(mapData, floorId) {
   const rooms = mapData.spaces.features
     .filter(
       (feature) =>
-        feature?.geometry?.type === "Polygon" &&
-        ["room", "corridor"].includes(
-          String(feature?.properties?.kind || "").toLowerCase(),
-        ),
+        feature?.geometry?.type === "Polygon",
     )
     .map((feature, index) => {
       const id = ensureUuid(feature.id);

@@ -37,6 +37,8 @@ import {
   Move,
   Pencil,
   Plus,
+  RotateCcw,
+  RotateCw,
   Save,
   Sparkles,
   Square,
@@ -118,6 +120,7 @@ const ROOM_TYPE_OPTIONS = [
   { value: "corridor", label: "Corridor" },
   { value: "stairs", label: "Stairs" },
   { value: "elevator", label: "Elevator" },
+  { value: "escalator", label: "Escalator" },
   { value: "restroom", label: "Restroom" },
   { value: "exit", label: "Exit" },
   { value: "other", label: "Other" },
@@ -136,6 +139,7 @@ const ROOM_TYPE_STYLES = {
   corridor: { fill: "#ECEFF3", selectedFill: "#E2E8F0", stroke: "#94A3B8" },
   stairs: { fill: "#FFF1E2", selectedFill: "#FFE3C2", stroke: "#F59E0B" },
   elevator: { fill: "#F1EAFE", selectedFill: "#E6DBFF", stroke: "#8B5CF6" },
+  escalator: { fill: "#FFF7E5", selectedFill: "#FFE7C7", stroke: "#F59E0B" },
   restroom: { fill: "#E7F5F1", selectedFill: "#D3ECE5", stroke: "#14B8A6" },
   exit: { fill: "#E8F7EC", selectedFill: "#D5F0DD", stroke: "#22C55E" },
   other: { fill: "#E8F0F7", selectedFill: "#DBEAF8", stroke: "#94B4CC" },
@@ -160,7 +164,7 @@ const ROOM_COLOR_SWATCHES = [
 ];
 
 const WAYPOINT_TYPE_OPTIONS = [
-  { value: "room_center", label: "Room Center" },
+  { value: "room_center", label: "Room Entry" },
   { value: "corridor", label: "Corridor" },
   { value: "stairs", label: "Stairs" },
   { value: "elevator", label: "Elevator" },
@@ -177,13 +181,23 @@ const WAYPOINT_TYPE_COLORS = {
   entrance: "#16A34A",
 };
 
+const FRONT_ROOM_TYPES = new Set(["stairs", "elevator", "escalator"]);
+const FRONT_TYPE_TO_WAYPOINT_TYPE = {
+  escalator: "stairs",
+};
+const AUTO_ROUTE_SAMPLE_STEP = 12;
+const AUTO_ROUTE_CORNER_OFFSET = 16;
+const AUTO_ROUTE_MAX_NEIGHBORS = 8;
+const AUTO_ROUTE_OUTSIDE_CORRIDOR_PENALTY = 0.35;
+const GEOMETRY_EPSILON = 1.5;
+
 const PRIMARY_TOOL_OPTIONS = [
   {
     id: "select",
     label: "Select",
     key: "V",
     Icon: Move,
-    tooltip: "Select items and drag to pan",
+    tooltip: "Select items. Hold Space to pan",
   },
   {
     id: "room",
@@ -318,6 +332,27 @@ function distanceBetween(a, b) {
   return Math.hypot((a?.x || 0) - (b?.x || 0), (a?.y || 0) - (b?.y || 0));
 }
 
+function normalizeAngle(angle) {
+  const value = Number(angle || 0);
+  if (!Number.isFinite(value)) return 0;
+  return ((value % 360) + 360) % 360;
+}
+
+function rotatePoint(point, center, degrees = 0) {
+  const radians = (Number(degrees || 0) * Math.PI) / 180;
+  if (Math.abs(radians) < 0.0001) return { x: point.x, y: point.y };
+
+  const cos = Math.cos(radians);
+  const sin = Math.sin(radians);
+  const dx = point.x - center.x;
+  const dy = point.y - center.y;
+
+  return {
+    x: center.x + dx * cos - dy * sin,
+    y: center.y + dx * sin + dy * cos,
+  };
+}
+
 function polygonCenter(points) {
   if (!points.length) return { x: 0, y: 0 };
   const total = points.reduce(
@@ -346,6 +381,35 @@ function polygonBounds(points) {
   };
 }
 
+function midpoint(a, b) {
+  return {
+    x: (a.x + b.x) / 2,
+    y: (a.y + b.y) / 2,
+  };
+}
+
+function movePointTowards(point, target, distance) {
+  const dx = target.x - point.x;
+  const dy = target.y - point.y;
+  const length = Math.hypot(dx, dy);
+  if (length <= 0.0001) return { ...point };
+  return {
+    x: point.x + (dx / length) * distance,
+    y: point.y + (dy / length) * distance,
+  };
+}
+
+function movePointAwayFrom(point, origin, distance) {
+  return movePointTowards(
+    point,
+    {
+      x: point.x + (point.x - origin.x),
+      y: point.y + (point.y - origin.y),
+    },
+    distance,
+  );
+}
+
 function truncateLabel(value, maxLength = 18) {
   const text = String(value || "").trim();
   if (!text) return "";
@@ -354,7 +418,10 @@ function truncateLabel(value, maxLength = 18) {
 }
 
 function roomTypeStyle(kind) {
-  return ROOM_TYPE_STYLES[String(kind || "room").toLowerCase()] || ROOM_TYPE_STYLES.room;
+  return (
+    ROOM_TYPE_STYLES[String(kind || "room").toLowerCase()] ||
+    ROOM_TYPE_STYLES.room
+  );
 }
 
 function roomTypeLabel(kind) {
@@ -367,10 +434,72 @@ function waypointTypeLabel(kind) {
   return match?.label || "Waypoint";
 }
 
+function normalizeRoomKind(feature) {
+  return String(
+    feature?.properties?.kind || feature?.properties?.category || "room",
+  ).toLowerCase();
+}
+
+function resolveRoomFront(feature) {
+  const front = feature?.properties?.front || feature?.properties?.front_point;
+  const x = Number(front?.x);
+  const y = Number(front?.y);
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+  const angle = Number(front?.angle || 0);
+  return {
+    x,
+    y,
+    angle: Number.isFinite(angle) ? angle : 0,
+  };
+}
+
 function roomPolygon(feature) {
   const ring = feature?.geometry?.coordinates?.[0] || [];
   if (!Array.isArray(ring) || ring.length < 4) return [];
   return ring.slice(0, -1).map(toPointFromCoords);
+}
+
+function roomTransformCenter(features) {
+  const points = features.flatMap((feature) => roomPolygon(feature));
+  const bounds = polygonBounds(points);
+  return {
+    x: bounds.x + bounds.width / 2,
+    y: bounds.y + bounds.height / 2,
+  };
+}
+
+function transformRoomFront(front, transform) {
+  const nextPoint = transform.point(front);
+  const direction = transform.point({
+    x: front.x + Math.cos((front.angle * Math.PI) / 180) * 20,
+    y: front.y + Math.sin((front.angle * Math.PI) / 180) * 20,
+  });
+
+  return {
+    x: nextPoint.x,
+    y: nextPoint.y,
+    angle: normalizeAngle(
+      (Math.atan2(direction.y - nextPoint.y, direction.x - nextPoint.x) * 180) /
+        Math.PI,
+    ),
+  };
+}
+
+function translateRoomFront(front, dx, dy) {
+  return {
+    x: front.x + dx,
+    y: front.y + dy,
+    angle: normalizeAngle(front.angle),
+  };
+}
+
+function rotateRoomFront(front, center, degrees) {
+  const nextPoint = rotatePoint(front, center, degrees);
+  return {
+    x: nextPoint.x,
+    y: nextPoint.y,
+    angle: normalizeAngle(front.angle + degrees),
+  };
 }
 
 function edgeKey(a, b) {
@@ -433,6 +562,98 @@ function projectPointToSegment(point, start, end) {
   };
 }
 
+function pointOnSegment(point, start, end, tolerance = GEOMETRY_EPSILON) {
+  return projectPointToSegment(point, start, end).distance <= tolerance;
+}
+
+function pointNear(a, b, tolerance = GEOMETRY_EPSILON) {
+  return distanceBetween(a, b) <= tolerance;
+}
+
+function pointInPolygon(point, polygon = []) {
+  let inside = false;
+
+  for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+    const current = polygon[i];
+    const previous = polygon[j];
+
+    if (
+      current.y > point.y !== previous.y > point.y &&
+      point.x <
+        ((previous.x - current.x) * (point.y - current.y)) /
+          (previous.y - current.y) +
+          current.x
+    ) {
+      inside = !inside;
+    }
+  }
+
+  return inside;
+}
+
+function pointOnPolygonEdge(point, polygon, tolerance = GEOMETRY_EPSILON) {
+  return polygon.some((current, index) =>
+    pointOnSegment(
+      point,
+      current,
+      polygon[(index + 1) % polygon.length],
+      tolerance,
+    ),
+  );
+}
+
+function pointStrictlyInsidePolygon(point, polygon) {
+  return pointInPolygon(point, polygon) && !pointOnPolygonEdge(point, polygon);
+}
+
+function pointInsideAnyPolygon(point, polygons = []) {
+  return polygons.some(
+    (polygon) =>
+      pointStrictlyInsidePolygon(point, polygon) ||
+      pointOnPolygonEdge(point, polygon),
+  );
+}
+
+function pointKey(point) {
+  return `${Number(point.x || 0).toFixed(2)}:${Number(point.y || 0).toFixed(2)}`;
+}
+
+function sampleSegmentInterior(start, end, step = AUTO_ROUTE_SAMPLE_STEP) {
+  const distance = distanceBetween(start, end);
+  const count = Math.max(1, Math.ceil(distance / Math.max(step, 1)));
+  const points = [];
+
+  for (let index = 1; index < count; index += 1) {
+    const t = index / count;
+    points.push({
+      x: start.x + (end.x - start.x) * t,
+      y: start.y + (end.y - start.y) * t,
+    });
+  }
+
+  return points;
+}
+
+function orientation(a, b, c) {
+  const value = (b.y - a.y) * (c.x - b.x) - (b.x - a.x) * (c.y - b.y);
+  if (Math.abs(value) <= 0.0001) return 0;
+  return value > 0 ? 1 : 2;
+}
+
+function segmentsIntersect(a, b, c, d) {
+  const o1 = orientation(a, b, c);
+  const o2 = orientation(a, b, d);
+  const o3 = orientation(c, d, a);
+  const o4 = orientation(c, d, b);
+
+  if (o1 !== o2 && o3 !== o4) return true;
+  if (o1 === 0 && pointOnSegment(c, a, b)) return true;
+  if (o2 === 0 && pointOnSegment(d, a, b)) return true;
+  if (o3 === 0 && pointOnSegment(a, c, d)) return true;
+  if (o4 === 0 && pointOnSegment(b, c, d)) return true;
+  return false;
+}
+
 function roomSegments(feature) {
   const points = roomPolygon(feature);
   if (points.length < 2) return [];
@@ -456,7 +677,11 @@ function findNearestRoomWall(point, rooms, maxDistance) {
 
   rooms.forEach((feature) => {
     roomSegments(feature).forEach((segment) => {
-      const projected = projectPointToSegment(point, segment.start, segment.end);
+      const projected = projectPointToSegment(
+        point,
+        segment.start,
+        segment.end,
+      );
       if (!best || projected.distance < best.distance) {
         best = {
           ...segment,
@@ -504,11 +729,7 @@ function resolveDoorPlacement(feature, roomMap) {
   const edgeIndex = Number(
     feature?.properties?.edgeIndex ?? feature?.properties?.edge_index,
   );
-  const offset = clamp(
-    Number(feature?.properties?.offset ?? 0.5) || 0.5,
-    0,
-    1,
-  );
+  const offset = clamp(Number(feature?.properties?.offset ?? 0.5) || 0.5, 0, 1);
 
   if (linkedRoomId && Number.isInteger(edgeIndex)) {
     const room = roomMap.get(linkedRoomId);
@@ -555,6 +776,128 @@ function syncDoorsForRoom(next, roomId) {
     feature.properties.rotation = placement.wallAngle + 90;
     feature.properties.roomName = placement.roomName;
   });
+}
+
+function wallSegmentsFromFeatures(features) {
+  return features
+    .map((feature) => {
+      const coords = feature?.geometry?.coordinates || [];
+      if (coords.length < 2) return null;
+      return {
+        start: toPointFromCoords(coords[0]),
+        end: toPointFromCoords(coords[1]),
+      };
+    })
+    .filter(Boolean);
+}
+
+function segmentCrossesWall(start, end, wallSegments) {
+  return wallSegments.some((segment) => {
+    if (!segmentsIntersect(start, end, segment.start, segment.end))
+      return false;
+    const touchesSharedEndpoint =
+      pointNear(start, segment.start) ||
+      pointNear(start, segment.end) ||
+      pointNear(end, segment.start) ||
+      pointNear(end, segment.end);
+    return !touchesSharedEndpoint;
+  });
+}
+
+function segmentPassesBlockedSpace(start, end, blockedPolygons) {
+  const samples = sampleSegmentInterior(start, end);
+  return blockedPolygons.some((polygon) => {
+    if (pointStrictlyInsidePolygon(start, polygon)) return true;
+    if (pointStrictlyInsidePolygon(end, polygon)) return true;
+    return samples.some((sample) =>
+      pointStrictlyInsidePolygon(sample, polygon),
+    );
+  });
+}
+
+function segmentCorridorPenalty(start, end, corridorPolygons) {
+  if (!corridorPolygons.length) return 1;
+  const samples = [
+    midpoint(start, end),
+    ...sampleSegmentInterior(start, end, 24),
+  ];
+  const insideCount = samples.filter((sample) =>
+    pointInsideAnyPolygon(sample, corridorPolygons),
+  ).length;
+  const insideRatio = samples.length ? insideCount / samples.length : 0;
+  return 1 + (1 - insideRatio) * AUTO_ROUTE_OUTSIDE_CORRIDOR_PENALTY;
+}
+
+function buildAdjacencyMap(edges) {
+  const adjacency = new Map();
+
+  edges.forEach((edge) => {
+    if (!adjacency.has(edge.from)) adjacency.set(edge.from, []);
+    if (!adjacency.has(edge.to)) adjacency.set(edge.to, []);
+
+    adjacency.get(edge.from).push({
+      id: edge.to,
+      weight: edge.weight,
+      key: edge.key,
+    });
+    adjacency.get(edge.to).push({
+      id: edge.from,
+      weight: edge.weight,
+      key: edge.key,
+    });
+  });
+
+  return adjacency;
+}
+
+function shortestPathToTargets(sourceId, targetIds, adjacency) {
+  if (targetIds.has(sourceId)) {
+    return { distance: 0, pathIds: [sourceId] };
+  }
+
+  const distances = new Map([[sourceId, 0]]);
+  const previous = new Map();
+  const visited = new Set();
+  const queue = [{ id: sourceId, distance: 0 }];
+
+  while (queue.length) {
+    queue.sort((a, b) => a.distance - b.distance);
+    const current = queue.shift();
+    if (!current || visited.has(current.id)) continue;
+    visited.add(current.id);
+
+    if (targetIds.has(current.id)) {
+      const pathIds = [];
+      let cursor = current.id;
+
+      while (cursor) {
+        pathIds.unshift(cursor);
+        cursor = previous.get(cursor) || null;
+      }
+
+      return {
+        distance: current.distance,
+        pathIds,
+      };
+    }
+
+    const neighbors = adjacency.get(current.id) || [];
+    neighbors.forEach((neighbor) => {
+      if (visited.has(neighbor.id)) return;
+      const nextDistance = current.distance + neighbor.weight;
+      if (
+        nextDistance >= (distances.get(neighbor.id) ?? Number.POSITIVE_INFINITY)
+      ) {
+        return;
+      }
+
+      distances.set(neighbor.id, nextDistance);
+      previous.set(neighbor.id, current.id);
+      queue.push({ id: neighbor.id, distance: nextDistance });
+    });
+  }
+
+  return null;
 }
 
 function collectWorldBounds(mvf, backgroundImage) {
@@ -922,6 +1265,7 @@ const MapEditor = forwardRef(function MapEditor(
   const [backgroundImage, setBackgroundImage] = useState(null);
   const [backgroundOpacity, setBackgroundOpacity] = useState(0.4);
   const [contextMenu, setContextMenu] = useState(null);
+  const [frontPlacement, setFrontPlacement] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [spacePressed, setSpacePressed] = useState(false);
   const [aiModalOpen, setAiModalOpen] = useState(false);
@@ -955,6 +1299,7 @@ const MapEditor = forwardRef(function MapEditor(
     setPosition({ x: 40, y: 40 });
     setLayerVisibility(LAYER_VISIBILITY_DEFAULTS);
     setSnapEnabled(true);
+    setFrontPlacement(null);
   }, [floorData]);
 
   useEffect(() => {
@@ -972,6 +1317,7 @@ const MapEditor = forwardRef(function MapEditor(
       setPolygonDraft([]);
       setPathDraft(null);
       setContextMenu(null);
+      setFrontPlacement(null);
     }
   }, [previewMode]);
 
@@ -1024,7 +1370,9 @@ const MapEditor = forwardRef(function MapEditor(
 
   const wallMap = useMemo(
     () =>
-      new Map(mvf.obstructions.features.map((feature) => [feature.id, feature])),
+      new Map(
+        mvf.obstructions.features.map((feature) => [feature.id, feature]),
+      ),
     [mvf.obstructions.features],
   );
 
@@ -1056,7 +1404,12 @@ const MapEditor = forwardRef(function MapEditor(
       ).length,
       beacons: 0,
     }),
-    [mvf.nodes.features.length, mvf.openings.features, mvf.spaces.features.length, navEdges.length],
+    [
+      mvf.nodes.features.length,
+      mvf.openings.features,
+      mvf.spaces.features.length,
+      navEdges.length,
+    ],
   );
 
   const gridStep = safeGridStep(scale);
@@ -1075,36 +1428,43 @@ const MapEditor = forwardRef(function MapEditor(
     );
   }, [cursor, mvf.spaces.features, scale, tool]);
 
-  const allSelectableIds = useMemo(
-    () => [
-      ...mvf.spaces.features.map((feature) => feature.id),
-      ...mvf.obstructions.features.map((feature) => feature.id),
-      ...mvf.openings.features.map((feature) => feature.id),
-      ...mvf.nodes.features.map((feature) => feature.id),
-    ],
-    [mvf.nodes.features, mvf.obstructions.features, mvf.openings.features, mvf.spaces.features],
+  const allRoomIds = useMemo(
+    () => mvf.spaces.features.map((feature) => feature.id),
+    [mvf.spaces.features],
   );
+
+  const selectedRoomIds = useMemo(() => {
+    if (selection?.kind === "room") {
+      return roomMap.has(selection.id) ? [selection.id] : [];
+    }
+    if (selection?.kind === "multi") {
+      return ensureArray(selection.ids).filter((id) => roomMap.has(id));
+    }
+    return [];
+  }, [roomMap, selection]);
 
   useEffect(() => {
     const transformer = transformerRef.current;
     if (!transformer) return;
 
-    if (selection?.kind !== "room") {
+    if (!selectedRoomIds.length) {
       transformer.nodes([]);
       transformer.getLayer()?.batchDraw();
       return;
     }
 
-    const node = roomRefs.current.get(selection.id);
-    if (!node) {
+    const nodes = selectedRoomIds
+      .map((id) => roomRefs.current.get(id))
+      .filter(Boolean);
+    if (!nodes.length) {
       transformer.nodes([]);
       transformer.getLayer()?.batchDraw();
       return;
     }
 
-    transformer.nodes([node]);
+    transformer.nodes(nodes);
     transformer.getLayer()?.batchDraw();
-  }, [mvf, selection]);
+  }, [mvf, selectedRoomIds]);
 
   const getWorldPoint = (event) => {
     const stage = event?.target?.getStage?.() || stageRef.current;
@@ -1137,6 +1497,19 @@ const MapEditor = forwardRef(function MapEditor(
     if (nextTool !== "polygon") setPolygonDraft([]);
     if (nextTool !== "path") setPathDraft(null);
     if (nextTool !== "room" && nextTool !== "wall") setDrawing(null);
+  };
+
+  const startFrontPlacement = (roomId) => {
+    if (!roomId || previewMode) return;
+    setFrontPlacement({ roomId });
+    setToolMode("select");
+  };
+
+  const clearFrontPoint = (roomId) => {
+    if (!roomId) return;
+    updateRoomFeature(roomId, (feature) => {
+      delete feature.properties.front;
+    });
   };
 
   const pushHistoryState = (previousState) => {
@@ -1196,6 +1569,45 @@ const MapEditor = forwardRef(function MapEditor(
     feature.geometry.coordinates = [closed];
   };
 
+  const writeRoomFront = (feature, front) => {
+    if (!front) {
+      delete feature.properties.front;
+      delete feature.properties.front_point;
+      return;
+    }
+
+    feature.properties.front = {
+      x: front.x,
+      y: front.y,
+      angle: normalizeAngle(front.angle),
+    };
+    delete feature.properties.front_point;
+  };
+
+  const translateRoomFeature = (feature, dx, dy) => {
+    const moved = roomPolygon(feature).map((point) => ({
+      x: point.x + dx,
+      y: point.y + dy,
+    }));
+    writeRoomPoints(feature, moved);
+
+    const front = resolveRoomFront(feature);
+    if (front) {
+      writeRoomFront(feature, translateRoomFront(front, dx, dy));
+    }
+  };
+
+  const transformRoomFeature = (feature, transform) => {
+    const sourcePoints = roomPolygon(feature);
+    const transformed = sourcePoints.map((point) => transform.point(point));
+    writeRoomPoints(feature, transformed);
+
+    const front = resolveRoomFront(feature);
+    if (front) {
+      writeRoomFront(feature, transformRoomFront(front, transform));
+    }
+  };
+
   const updateRoomFeature = (id, updater, track = true) => {
     updateMvf((next) => {
       const feature = next.spaces.features.find((entry) => entry.id === id);
@@ -1223,7 +1635,9 @@ const MapEditor = forwardRef(function MapEditor(
 
   const updateWallFeature = (id, updater, track = true) => {
     updateMvf((next) => {
-      const feature = next.obstructions.features.find((entry) => entry.id === id);
+      const feature = next.obstructions.features.find(
+        (entry) => entry.id === id,
+      );
       if (!feature) return;
       updater(feature, next);
     }, track);
@@ -1237,7 +1651,10 @@ const MapEditor = forwardRef(function MapEditor(
     const y1 = Math.min(start.y, end.y);
     const x2 = Math.max(start.x, end.x);
     const y2 = Math.max(start.y, end.y);
-    if (Math.abs(x2 - x1) < MIN_ROOM_SIZE || Math.abs(y2 - y1) < MIN_ROOM_SIZE) {
+    if (
+      Math.abs(x2 - x1) < MIN_ROOM_SIZE ||
+      Math.abs(y2 - y1) < MIN_ROOM_SIZE
+    ) {
       return;
     }
 
@@ -1259,7 +1676,15 @@ const MapEditor = forwardRef(function MapEditor(
         },
         geometry: {
           type: "Polygon",
-          coordinates: [[[x1, y1], [x2, y1], [x2, y2], [x1, y2], [x1, y1]]],
+          coordinates: [
+            [
+              [x1, y1],
+              [x2, y1],
+              [x2, y2],
+              [x1, y2],
+              [x1, y1],
+            ],
+          ],
         },
       });
     });
@@ -1436,17 +1861,21 @@ const MapEditor = forwardRef(function MapEditor(
     if (!edge) return;
 
     updateMvf((next) => {
-      const source = next.nodes.features.find((feature) => feature.id === edge.from);
-      const target = next.nodes.features.find((feature) => feature.id === edge.to);
+      const source = next.nodes.features.find(
+        (feature) => feature.id === edge.from,
+      );
+      const target = next.nodes.features.find(
+        (feature) => feature.id === edge.to,
+      );
       if (source) {
-        source.properties.neighbors = ensureArray(source.properties?.neighbors).filter(
-          (entry) => entry.id !== edge.to,
-        );
+        source.properties.neighbors = ensureArray(
+          source.properties?.neighbors,
+        ).filter((entry) => entry.id !== edge.to);
       }
       if (target) {
-        target.properties.neighbors = ensureArray(target.properties?.neighbors).filter(
-          (entry) => entry.id !== edge.from,
-        );
+        target.properties.neighbors = ensureArray(
+          target.properties?.neighbors,
+        ).filter((entry) => entry.id !== edge.from);
       }
     });
   };
@@ -1470,7 +1899,8 @@ const MapEditor = forwardRef(function MapEditor(
       );
       next.openings.features = next.openings.features.filter((feature) => {
         const linkedRoomId =
-          feature.properties?.linkedRoomId || feature.properties?.linked_room_id;
+          feature.properties?.linkedRoomId ||
+          feature.properties?.linked_room_id;
         return !idSet.has(feature.id) && !removedRoomIds.has(linkedRoomId);
       });
       next.nodes.features = next.nodes.features.filter(
@@ -1478,9 +1908,9 @@ const MapEditor = forwardRef(function MapEditor(
       );
 
       next.nodes.features.forEach((feature) => {
-        feature.properties.neighbors = ensureArray(feature.properties?.neighbors).filter(
-          (entry) => !idSet.has(entry.id),
-        );
+        feature.properties.neighbors = ensureArray(
+          feature.properties?.neighbors,
+        ).filter((entry) => !idSet.has(entry.id));
         if (removedRoomIds.has(feature.properties?.spaceId)) {
           feature.properties.spaceId = null;
         }
@@ -1534,13 +1964,23 @@ const MapEditor = forwardRef(function MapEditor(
     }));
 
     updateMvf((next) => {
+      const properties = {
+        ...deepClone(feature.properties || {}),
+        name: `${feature.properties?.name || "Room"} Copy`,
+      };
+      const front = resolveRoomFront({ properties });
+      if (front) {
+        properties.front = translateRoomFront(
+          front,
+          ROOM_DUPLICATE_OFFSET,
+          ROOM_DUPLICATE_OFFSET,
+        );
+      }
+
       next.spaces.features.push({
         type: "Feature",
         id,
-        properties: {
-          ...deepClone(feature.properties || {}),
-          name: `${feature.properties?.name || "Room"} Copy`,
-        },
+        properties,
         geometry: {
           type: "Polygon",
           coordinates: [[...points.map(toCoords), toCoords(points[0])]],
@@ -1550,6 +1990,44 @@ const MapEditor = forwardRef(function MapEditor(
 
     setSelection({ kind: "room", id });
     focusNameField();
+  };
+
+  const rotateSelectedRooms = (degrees) => {
+    if (!selectedRoomIds.length) return;
+
+    const features = selectedRoomIds
+      .map((roomId) => roomMap.get(roomId))
+      .filter(Boolean);
+    if (!features.length) return;
+
+    updateMvf((next) => {
+      const center = roomTransformCenter(
+        selectedRoomIds
+          .map((roomId) =>
+            next.spaces.features.find((feature) => feature.id === roomId),
+          )
+          .filter(Boolean),
+      );
+
+      selectedRoomIds.forEach((roomId) => {
+        const feature = next.spaces.features.find(
+          (entry) => entry.id === roomId,
+        );
+        if (!feature) return;
+
+        const rotated = roomPolygon(feature).map((point) =>
+          rotatePoint(point, center, degrees),
+        );
+        writeRoomPoints(feature, rotated);
+
+        const front = resolveRoomFront(feature);
+        if (front) {
+          writeRoomFront(feature, rotateRoomFront(front, center, degrees));
+        }
+
+        syncDoorsForRoom(next, roomId);
+      });
+    });
   };
 
   const updateSelectedName = (value) => {
@@ -1586,7 +2064,10 @@ const MapEditor = forwardRef(function MapEditor(
       const nextDefault = roomTypeStyle(value).fill;
       feature.properties.kind = value;
       feature.properties.category = value;
-      if (!feature.properties.color || feature.properties.color === previousDefault) {
+      if (
+        !feature.properties.color ||
+        feature.properties.color === previousDefault
+      ) {
         feature.properties.color = nextDefault;
       }
     });
@@ -1659,47 +2140,526 @@ const MapEditor = forwardRef(function MapEditor(
   };
 
   const autoGenerateWaypoints = () => {
+    const missingDoorRooms = new Set();
+    const missingFrontRooms = new Set();
+    const disconnectedRooms = new Set();
+
     updateMvf((next) => {
-      const nodes = [];
-      for (const space of next.spaces.features) {
-        const center = polygonCenter(roomPolygon(space));
-        nodes.push({
-          type: "Feature",
+      const candidateMap = new Map();
+      const roomMap = new Map(
+        next.spaces.features.map((feature) => [feature.id, feature]),
+      );
+      const corridorSpaces = next.spaces.features.filter(
+        (feature) => normalizeRoomKind(feature) === "corridor",
+      );
+      const blockedSpaces = next.spaces.features.filter(
+        (feature) => normalizeRoomKind(feature) !== "corridor",
+      );
+      const corridorPolygons = corridorSpaces
+        .map((feature) => roomPolygon(feature))
+        .filter((polygon) => polygon.length >= 3);
+      const blockedPolygons = blockedSpaces
+        .map((feature) => roomPolygon(feature))
+        .filter((polygon) => polygon.length >= 3);
+      const wallSegments = wallSegmentsFromFeatures(next.obstructions.features);
+      const doorPointsByRoom = new Map();
+
+      next.openings.features.forEach((feature) => {
+        if (feature.properties?.kind !== "door") return;
+        const placement = resolveDoorPlacement(feature, roomMap);
+        let roomId = placement.roomId;
+        if (!roomId) {
+          const nearest = findNearestRoomWall(
+            placement.point,
+            next.spaces.features,
+            Number.POSITIVE_INFINITY,
+          );
+          roomId = nearest?.roomId;
+        }
+        if (!roomId) return;
+        const points = doorPointsByRoom.get(roomId) || [];
+        points.push(placement.point);
+        doorPointsByRoom.set(roomId, points);
+      });
+
+      const findCorridorSpaceId = (point) => {
+        const corridor = corridorSpaces.find((space) => {
+          const polygon = roomPolygon(space);
+          return (
+            polygon.length >= 3 &&
+            (pointStrictlyInsidePolygon(point, polygon) ||
+              pointOnPolygonEdge(point, polygon))
+          );
+        });
+        return corridor?.id || null;
+      };
+
+      const uniquePoints = (points) => {
+        const seen = new Set();
+        return points.filter((point) => {
+          const key = `${Math.round(point.x)}:${Math.round(point.y)}`;
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      };
+
+      const addCandidate = ({
+        point,
+        type = "corridor",
+        name = "",
+        spaceId = null,
+        priority = 0,
+        isAnchor = false,
+        roomName = "",
+      }) => {
+        if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return;
+        if (
+          blockedPolygons.some((polygon) =>
+            pointStrictlyInsidePolygon(point, polygon),
+          )
+        ) {
+          return;
+        }
+
+        const key = pointKey(point);
+        const existing = candidateMap.get(key);
+        const nextSpaceId = spaceId || findCorridorSpaceId(point) || null;
+
+        if (existing) {
+          if (priority > existing.priority) {
+            existing.type = type;
+            existing.name = name;
+            existing.spaceId = nextSpaceId;
+            existing.priority = priority;
+            existing.isAnchor = isAnchor;
+            existing.roomName = roomName || existing.roomName;
+          } else if (!existing.spaceId && nextSpaceId) {
+            existing.spaceId = nextSpaceId;
+          }
+          return;
+        }
+
+        candidateMap.set(key, {
           id: uuidv4(),
-          properties: {
-            kind: "waypoint",
-            type: "room_center",
-            name: space.properties?.name || `Waypoint ${nodes.length + 1}`,
+          point: { x: point.x, y: point.y },
+          type,
+          name,
+          spaceId: nextSpaceId,
+          priority,
+          isAnchor,
+          roomName,
+        });
+      };
+
+      const addAnchorWaypoint = ({
+        point,
+        type,
+        name,
+        spaceId,
+        roomFeature,
+        roomName,
+      }) => {
+        addCandidate({
+          point,
+          type,
+          name,
+          spaceId,
+          priority: 5,
+          isAnchor: true,
+          roomName,
+        });
+
+        const polygon = roomPolygon(roomFeature);
+        if (polygon.length < 3) return;
+        const helper = movePointAwayFrom(
+          point,
+          polygonCenter(polygon),
+          AUTO_ROUTE_CORNER_OFFSET,
+        );
+        addCandidate({
+          point: helper,
+          type: "corridor",
+          name: "",
+          spaceId: findCorridorSpaceId(helper),
+          priority: 1,
+          roomName,
+        });
+      };
+
+      const addCorridorGuides = (space) => {
+        const polygon = roomPolygon(space);
+        if (polygon.length < 3) return;
+        const center = polygonCenter(polygon);
+
+        addCandidate({
+          point: center,
+          type: "corridor",
+          name: String(space.properties?.name || "Corridor"),
+          spaceId: space.id,
+          priority: 3,
+        });
+
+        polygon.forEach((vertex, index) => {
+          const nextVertex = polygon[(index + 1) % polygon.length];
+          addCandidate({
+            point: movePointTowards(
+              vertex,
+              center,
+              AUTO_ROUTE_CORNER_OFFSET * 0.7,
+            ),
+            type: "corridor",
+            name: "",
             spaceId: space.id,
-            neighbors: [],
-          },
-          geometry: { type: "Point", coordinates: [center.x, center.y] },
+            priority: 1,
+          });
+          addCandidate({
+            point: movePointTowards(
+              midpoint(vertex, nextVertex),
+              center,
+              AUTO_ROUTE_CORNER_OFFSET * 0.4,
+            ),
+            type: "corridor",
+            name: "",
+            spaceId: space.id,
+            priority: 1,
+          });
+        });
+      };
+
+      const addBlockedRoomDetours = (space) => {
+        const polygon = roomPolygon(space);
+        if (polygon.length < 3) return;
+        const center = polygonCenter(polygon);
+
+        polygon.forEach((vertex) => {
+          const detour = movePointAwayFrom(
+            vertex,
+            center,
+            AUTO_ROUTE_CORNER_OFFSET,
+          );
+          addCandidate({
+            point: detour,
+            type: "corridor",
+            name: "",
+            spaceId: findCorridorSpaceId(detour),
+            priority: 1,
+          });
+        });
+      };
+
+      wallSegments.forEach((segment) => {
+        const dx = segment.end.x - segment.start.x;
+        const dy = segment.end.y - segment.start.y;
+        const length = Math.hypot(dx, dy);
+        const normal =
+          length > 0.0001
+            ? {
+                x: (-dy / length) * AUTO_ROUTE_CORNER_OFFSET,
+                y: (dx / length) * AUTO_ROUTE_CORNER_OFFSET,
+              }
+            : null;
+
+        [segment.start, segment.end].forEach((endpoint) => {
+          addCandidate({
+            point: endpoint,
+            type: "corridor",
+            name: "",
+            spaceId: findCorridorSpaceId(endpoint),
+            priority: 1,
+          });
+          if (!normal) return;
+          addCandidate({
+            point: {
+              x: endpoint.x + normal.x,
+              y: endpoint.y + normal.y,
+            },
+            type: "corridor",
+            name: "",
+            spaceId: findCorridorSpaceId({
+              x: endpoint.x + normal.x,
+              y: endpoint.y + normal.y,
+            }),
+            priority: 1,
+          });
+          addCandidate({
+            point: {
+              x: endpoint.x - normal.x,
+              y: endpoint.y - normal.y,
+            },
+            type: "corridor",
+            name: "",
+            spaceId: findCorridorSpaceId({
+              x: endpoint.x - normal.x,
+              y: endpoint.y - normal.y,
+            }),
+            priority: 1,
+          });
+        });
+      });
+
+      next.spaces.features.forEach((space) => {
+        const kind = normalizeRoomKind(space);
+        const roomName =
+          String(space.properties?.name || "Room").trim() || "Room";
+        const doorPoints = uniquePoints(doorPointsByRoom.get(space.id) || []);
+
+        if (kind === "corridor") {
+          addCorridorGuides(space);
+          return;
+        }
+
+        if (doorPoints.length > 0) {
+          doorPoints.forEach((point, index) => {
+            addAnchorWaypoint({
+              point,
+              type: "room_center",
+              name: `${roomName} Entry ${index + 1}`,
+              spaceId: space.id,
+              roomFeature: space,
+              roomName,
+            });
+          });
+        } else if (FRONT_ROOM_TYPES.has(kind)) {
+          const front = resolveRoomFront(space);
+          if (front) {
+            const waypointType = FRONT_TYPE_TO_WAYPOINT_TYPE[kind] || kind;
+            addAnchorWaypoint({
+              point: front,
+              type: waypointType,
+              name: `${roomName} Front`,
+              spaceId: space.id,
+              roomFeature: space,
+              roomName,
+            });
+          } else {
+            missingFrontRooms.add(roomName);
+          }
+        } else {
+          missingDoorRooms.add(roomName);
+        }
+
+        addBlockedRoomDetours(space);
+      });
+
+      const candidates = Array.from(candidateMap.values());
+      const allEdges = [];
+
+      for (let index = 0; index < candidates.length; index += 1) {
+        const source = candidates[index];
+        for (
+          let targetIndex = index + 1;
+          targetIndex < candidates.length;
+          targetIndex += 1
+        ) {
+          const target = candidates[targetIndex];
+          const distance = distanceBetween(source.point, target.point);
+          if (distance <= 2) continue;
+          if (segmentCrossesWall(source.point, target.point, wallSegments))
+            continue;
+          if (
+            segmentPassesBlockedSpace(
+              source.point,
+              target.point,
+              blockedPolygons,
+            )
+          ) {
+            continue;
+          }
+
+          const weight = Math.max(
+            1,
+            Math.round(
+              distance *
+                segmentCorridorPenalty(
+                  source.point,
+                  target.point,
+                  corridorPolygons,
+                ),
+            ),
+          );
+
+          allEdges.push({
+            key: edgeKey(source.id, target.id),
+            from: source.id,
+            to: target.id,
+            weight,
+          });
+        }
+      }
+
+      const adjacency = buildAdjacencyMap(allEdges);
+      const anchorCandidates = candidates.filter(
+        (candidate) => candidate.isAnchor,
+      );
+      const anchorIds = new Set(
+        anchorCandidates.map((candidate) => candidate.id),
+      );
+      const finalEdgeKeys = new Set();
+      const components = [];
+      const remainingAnchorIds = anchorCandidates.map(
+        (candidate) => candidate.id,
+      );
+
+      while (remainingAnchorIds.length > 0) {
+        const componentNodeIds = new Set([remainingAnchorIds[0]]);
+        const componentAnchorIds = new Set([remainingAnchorIds[0]]);
+        const componentEdgeKeys = new Set();
+
+        while (true) {
+          let bestPath = null;
+
+          anchorCandidates.forEach((candidate) => {
+            if (componentAnchorIds.has(candidate.id)) return;
+            const path = shortestPathToTargets(
+              candidate.id,
+              componentNodeIds,
+              adjacency,
+            );
+            if (!path) return;
+            if (!bestPath || path.distance < bestPath.distance) {
+              bestPath = {
+                anchorId: candidate.id,
+                distance: path.distance,
+                pathIds: path.pathIds,
+              };
+            }
+          });
+
+          if (!bestPath) break;
+
+          bestPath.pathIds.forEach((id) => {
+            componentNodeIds.add(id);
+            if (anchorIds.has(id)) componentAnchorIds.add(id);
+          });
+
+          for (let index = 0; index < bestPath.pathIds.length - 1; index += 1) {
+            componentEdgeKeys.add(
+              edgeKey(bestPath.pathIds[index], bestPath.pathIds[index + 1]),
+            );
+          }
+        }
+
+        components.push({
+          nodeIds: componentNodeIds,
+          anchorIds: componentAnchorIds,
+          edgeKeys: componentEdgeKeys,
+        });
+
+        for (
+          let index = remainingAnchorIds.length - 1;
+          index >= 0;
+          index -= 1
+        ) {
+          if (componentAnchorIds.has(remainingAnchorIds[index])) {
+            remainingAnchorIds.splice(index, 1);
+          }
+        }
+      }
+
+      components.forEach((component) => {
+        component.edgeKeys.forEach((key) => finalEdgeKeys.add(key));
+      });
+
+      const finalEdges = allEdges.filter((edge) => finalEdgeKeys.has(edge.key));
+      const primaryComponent =
+        components
+          .slice()
+          .sort((a, b) => b.anchorIds.size - a.anchorIds.size)[0] || null;
+
+      if (
+        anchorCandidates.length > 1 &&
+        primaryComponent &&
+        components.length > 1
+      ) {
+        anchorCandidates.forEach((candidate) => {
+          if (!primaryComponent.anchorIds.has(candidate.id)) {
+            disconnectedRooms.add(
+              candidate.roomName || candidate.name || "Room",
+            );
+          }
         });
       }
 
-      for (const node of nodes) {
-        const currentPoint = toPointFromCoords(node.geometry.coordinates);
-        const nearby = nodes
-          .filter((entry) => entry.id !== node.id)
-          .map((entry) => ({
-            node: entry,
-            distance: distanceBetween(
-              currentPoint,
-              toPointFromCoords(entry.geometry.coordinates),
-            ),
-          }))
-          .sort((a, b) => a.distance - b.distance)
-          .slice(0, 2);
+      const nodeMap = new Map();
+      const ensureNode = (candidate) => {
+        if (nodeMap.has(candidate.id)) return nodeMap.get(candidate.id);
+        const node = {
+          type: "Feature",
+          id: candidate.id,
+          properties: {
+            kind: "waypoint",
+            type: candidate.type,
+            name: candidate.name,
+            spaceId: candidate.spaceId,
+            neighbors: [],
+            autoGenerated: true,
+            generatedSupport: !candidate.isAnchor,
+          },
+          geometry: {
+            type: "Point",
+            coordinates: [candidate.point.x, candidate.point.y],
+          },
+        };
+        nodeMap.set(candidate.id, node);
+        return node;
+      };
 
-        node.properties.neighbors = nearby.map((entry) => ({
-          id: entry.node.id,
-          weight: Math.round(entry.distance),
-        }));
-      }
+      const candidateById = new Map(
+        candidates.map((candidate) => [candidate.id, candidate]),
+      );
+      anchorCandidates.forEach((candidate) => {
+        ensureNode(candidate);
+      });
+      finalEdges.forEach((edge) => {
+        const source = candidateById.get(edge.from);
+        const target = candidateById.get(edge.to);
+        if (!source || !target) return;
 
-      next.nodes.features = nodes;
+        const sourceNode = ensureNode(source);
+        const targetNode = ensureNode(target);
+
+        sourceNode.properties.neighbors.push({
+          id: target.id,
+          weight: edge.weight,
+        });
+        targetNode.properties.neighbors.push({
+          id: source.id,
+          weight: edge.weight,
+        });
+      });
+
+      next.nodes.features = Array.from(nodeMap.values());
     });
-    toast.success("Waypoints generated.");
+
+    const summarizeRooms = (rooms) => {
+      const list = Array.from(rooms).filter(Boolean);
+      if (list.length <= 4) return list.join(", ");
+      return `${list.slice(0, 4).join(", ")} +${list.length - 4} more`;
+    };
+
+    const hasDoorWarnings = missingDoorRooms.size > 0;
+    const hasFrontWarnings = missingFrontRooms.size > 0;
+    const hasConnectivityWarnings = disconnectedRooms.size > 0;
+
+    if (!hasDoorWarnings && !hasFrontWarnings && !hasConnectivityWarnings) {
+      toast.success("Waypoints generated.");
+      return;
+    }
+
+    toast.success("Waypoints generated with warnings.");
+
+    if (hasDoorWarnings) {
+      toast(`No doors detected for: ${summarizeRooms(missingDoorRooms)}`);
+    }
+    if (hasFrontWarnings) {
+      toast(`Set a front point for: ${summarizeRooms(missingFrontRooms)}`);
+    }
+    if (hasConnectivityWarnings) {
+      toast(
+        `No walkable path detected for: ${summarizeRooms(disconnectedRooms)}`,
+      );
+    }
   };
 
   const validateMap = () => {
@@ -1848,6 +2808,33 @@ const MapEditor = forwardRef(function MapEditor(
     });
   };
 
+  const toggleRoomSelection = (roomId) => {
+    if (!roomId) return;
+    setSelection((current) => {
+      if (current?.kind === "multi") {
+        const ids = new Set(ensureArray(current.ids));
+        if (ids.has(roomId)) {
+          ids.delete(roomId);
+        } else {
+          ids.add(roomId);
+        }
+        const nextIds = Array.from(ids);
+        if (!nextIds.length) return null;
+        if (nextIds.length === 1) {
+          return { kind: "room", id: nextIds[0] };
+        }
+        return { kind: "multi", ids: nextIds };
+      }
+
+      if (current?.kind === "room") {
+        if (current.id === roomId) return null;
+        return { kind: "multi", ids: [current.id, roomId] };
+      }
+
+      return { kind: "room", id: roomId };
+    });
+  };
+
   const handleElementActivate = (nextSelection, options = {}) => {
     if (previewMode && tool !== "select") return;
 
@@ -1867,7 +2854,11 @@ const MapEditor = forwardRef(function MapEditor(
     }
 
     if (tool === "select" || options.forceSelect) {
-      setSelection(nextSelection);
+      if (options.multiToggle && nextSelection.kind === "room") {
+        toggleRoomSelection(nextSelection.id);
+      } else {
+        setSelection(nextSelection);
+      }
       setContextMenu(null);
     }
   };
@@ -1895,6 +2886,33 @@ const MapEditor = forwardRef(function MapEditor(
     const clickedOnEmpty = event.target === stage;
     const point = snapWorldPoint(getWorldPoint(event));
     if (!point || spacePressed) return;
+
+    if (frontPlacement && !previewMode) {
+      const room = roomMap.get(frontPlacement.roomId);
+      if (!room) {
+        setFrontPlacement(null);
+        return;
+      }
+      const nearest = findNearestRoomWall(
+        point,
+        [room],
+        Number.POSITIVE_INFINITY,
+      );
+      if (!nearest) {
+        toast.error("Unable to set front point for this room.");
+        setFrontPlacement(null);
+        return;
+      }
+      updateRoomFeature(room.id, (feature) => {
+        feature.properties.front = {
+          x: nearest.point.x,
+          y: nearest.point.y,
+          angle: nearest.angle,
+        };
+      });
+      setFrontPlacement(null);
+      return;
+    }
 
     if (tool === "select" && clickedOnEmpty) {
       setSelection(null);
@@ -1976,6 +2994,38 @@ const MapEditor = forwardRef(function MapEditor(
     openContextMenu(event, { kind: "empty" });
   };
 
+  const handleSelectedRoomTransformEnd = () => {
+    const transforms = selectedRoomIds
+      .map((id) => ({
+        id,
+        node: roomRefs.current.get(id),
+      }))
+      .filter((entry) => entry.node);
+
+    if (!transforms.length) return;
+
+    const snapshots = transforms.map(({ id, node }) => ({
+      id,
+      transform: node.getTransform().copy(),
+    }));
+
+    transforms.forEach(({ node }) => {
+      node.scaleX(1);
+      node.scaleY(1);
+      node.rotation(0);
+      node.position({ x: 0, y: 0 });
+    });
+
+    updateMvf((next) => {
+      snapshots.forEach(({ id, transform }) => {
+        const feature = next.spaces.features.find((entry) => entry.id === id);
+        if (!feature) return;
+        transformRoomFeature(feature, transform);
+        syncDoorsForRoom(next, id);
+      });
+    });
+  };
+
   useImperativeHandle(ref, () => ({
     save: saveMap,
     validateMap,
@@ -2004,6 +3054,7 @@ const MapEditor = forwardRef(function MapEditor(
 
     const handleKeyDown = (event) => {
       const key = event.key.toLowerCase();
+      const modifierPressed = event.ctrlKey || event.metaKey;
 
       if (event.code === "Space" && !isEditableTarget(event.target)) {
         setSpacePressed(true);
@@ -2018,27 +3069,27 @@ const MapEditor = forwardRef(function MapEditor(
         return;
       }
 
-      if (event.ctrlKey && key === "z" && !event.shiftKey) {
+      if (modifierPressed && key === "z" && !event.shiftKey) {
         event.preventDefault();
         undo();
         return;
       }
 
-      if (event.ctrlKey && (key === "y" || (event.shiftKey && key === "z"))) {
+      if (modifierPressed && (key === "y" || (event.shiftKey && key === "z"))) {
         event.preventDefault();
         redo();
         return;
       }
 
-      if (event.ctrlKey && key === "a") {
+      if (modifierPressed && key === "a") {
         event.preventDefault();
-        if (allSelectableIds.length) {
-          setSelection({ kind: "multi", ids: allSelectableIds });
+        if (allRoomIds.length) {
+          setSelection({ kind: "multi", ids: allRoomIds });
         }
         return;
       }
 
-      if (event.ctrlKey && key === "d") {
+      if (modifierPressed && key === "d") {
         event.preventDefault();
         duplicateSelectedRoom();
         return;
@@ -2046,6 +3097,10 @@ const MapEditor = forwardRef(function MapEditor(
 
       if (key === "escape") {
         event.preventDefault();
+        if (frontPlacement) {
+          setFrontPlacement(null);
+          return;
+        }
         setToolMode("select");
         setSelection(null);
         return;
@@ -2098,7 +3153,7 @@ const MapEditor = forwardRef(function MapEditor(
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", clearSpace);
     };
-  }, [allSelectableIds, previewMode, selection, tool]);
+  }, [allRoomIds, frontPlacement, previewMode, selection, tool]);
 
   useEffect(() => {
     const dismiss = () => setContextMenu(null);
@@ -2138,7 +3193,16 @@ const MapEditor = forwardRef(function MapEditor(
     tool,
   ]);
 
-  const selectedRoom = selection?.kind === "room" ? roomMap.get(selection.id) : null;
+  const isSelected = (kind, id) => {
+    if (!selection) return false;
+    if (selection.kind === "multi") {
+      return ensureArray(selection.ids).includes(id);
+    }
+    return selection.kind === kind && selection.id === id;
+  };
+
+  const selectedRoom =
+    selection?.kind === "room" ? roomMap.get(selection.id) : null;
   const selectedDoor =
     selection?.kind === "door" ? openingMap.get(selection.id) : null;
   const selectedWaypoint =
@@ -2158,6 +3222,10 @@ const MapEditor = forwardRef(function MapEditor(
     ? resolveDoorPlacement(selectedDoor, roomMap)
     : null;
 
+  const frontPlacementRoom = frontPlacement
+    ? roomMap.get(frontPlacement.roomId)
+    : null;
+
   const selectedHeader = (() => {
     if (!selection) {
       return {
@@ -2167,7 +3235,7 @@ const MapEditor = forwardRef(function MapEditor(
     }
     if (selection.kind === "multi") {
       return {
-        title: `${selection.ids.length} selected`,
+        title: `${selectedRoomIds.length} selected`,
         badge: "Multi",
       };
     }
@@ -2186,7 +3254,9 @@ const MapEditor = forwardRef(function MapEditor(
     if (selection.kind === "waypoint" && selectedWaypoint) {
       return {
         title: selectedWaypoint.properties?.name || "Waypoint",
-        badge: waypointTypeLabel(selectedWaypoint.properties?.type || "corridor"),
+        badge: waypointTypeLabel(
+          selectedWaypoint.properties?.type || "corridor",
+        ),
       };
     }
     if (selection.kind === "path" && selectedPath) {
@@ -2229,16 +3299,21 @@ const MapEditor = forwardRef(function MapEditor(
     if (selection.kind === "multi") {
       return (
         <div className="rounded-xl border border-default bg-surface-alt p-3 text-sm text-secondary">
-          {selection.ids.length} elements selected.
+          {selectedRoomIds.length} rooms selected.
         </div>
       );
     }
 
     if (selectedRoom) {
-      const roomColor =
-        String(selectedRoom.properties?.color || "").startsWith("#")
-          ? selectedRoom.properties.color
-          : roomTypeStyle(selectedRoom.properties?.kind || "room").fill;
+      const roomColor = String(selectedRoom.properties?.color || "").startsWith(
+        "#",
+      )
+        ? selectedRoom.properties.color
+        : roomTypeStyle(selectedRoom.properties?.kind || "room").fill;
+      const roomKind = normalizeRoomKind(selectedRoom);
+      const frontPoint = resolveRoomFront(selectedRoom);
+      const needsFront = FRONT_ROOM_TYPES.has(roomKind);
+      const frontActive = frontPlacement?.roomId === selectedRoom.id;
 
       return (
         <div className="space-y-3">
@@ -2300,6 +3375,41 @@ const MapEditor = forwardRef(function MapEditor(
               onChange={(event) => updateRoomColor(event.target.value)}
             />
           </div>
+          {needsFront && (
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+                Front point
+              </label>
+              <div className="mt-1 rounded-lg border border-default bg-surface-alt px-3 py-2 text-xs text-secondary">
+                {frontPoint
+                  ? `Front set (${Math.round(frontPoint.x)}, ${Math.round(
+                      frontPoint.y,
+                    )})`
+                  : "No front point set"}
+              </div>
+              <div className="mt-2 grid grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  className={`inline-flex items-center justify-center rounded-lg border px-3 py-2 text-sm font-medium ${
+                    frontActive
+                      ? "border-blue-200 bg-blue-50 text-blue-700"
+                      : "border-default bg-surface text-secondary"
+                  }`}
+                  onClick={() => startFrontPlacement(selectedRoom.id)}
+                >
+                  {frontActive ? "Click map to set" : "Set front"}
+                </button>
+                <button
+                  type="button"
+                  className="inline-flex items-center justify-center rounded-lg border border-default bg-surface px-3 py-2 text-sm font-medium text-secondary disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={() => clearFrontPoint(selectedRoom.id)}
+                  disabled={!frontPoint}
+                >
+                  Clear front
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       );
     }
@@ -2379,7 +3489,8 @@ const MapEditor = forwardRef(function MapEditor(
     if (selectedPath) {
       return (
         <div className="rounded-xl border border-default bg-surface-alt px-3 py-3 text-sm text-secondary">
-          Path between {selectedPath.source?.properties?.name || selectedPath.from} and{" "}
+          Path between{" "}
+          {selectedPath.source?.properties?.name || selectedPath.from} and{" "}
           {selectedPath.target?.properties?.name || selectedPath.to}
         </div>
       );
@@ -2405,6 +3516,22 @@ const MapEditor = forwardRef(function MapEditor(
           >
             <Copy className="h-4 w-4" />
             Duplicate
+          </button>
+          <button
+            type="button"
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-default bg-surface px-3 py-2 text-sm font-medium text-secondary"
+            onClick={() => rotateSelectedRooms(-90)}
+          >
+            <RotateCcw className="h-4 w-4" />
+            Rotate -90°
+          </button>
+          <button
+            type="button"
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-default bg-surface px-3 py-2 text-sm font-medium text-secondary"
+            onClick={() => rotateSelectedRooms(90)}
+          >
+            <RotateCw className="h-4 w-4" />
+            Rotate +90°
           </button>
           <button
             type="button"
@@ -2459,14 +3586,32 @@ const MapEditor = forwardRef(function MapEditor(
 
     if (selection.kind === "multi") {
       return (
-        <button
-          type="button"
-          className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white"
-          onClick={() => removeSelection(selection)}
-        >
-          <Trash2 className="h-4 w-4" />
-          Delete Selected
-        </button>
+        <div className="grid grid-cols-1 gap-2">
+          <button
+            type="button"
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-default bg-surface px-3 py-2 text-sm font-medium text-secondary"
+            onClick={() => rotateSelectedRooms(-90)}
+          >
+            <RotateCcw className="h-4 w-4" />
+            Rotate -90°
+          </button>
+          <button
+            type="button"
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-default bg-surface px-3 py-2 text-sm font-medium text-secondary"
+            onClick={() => rotateSelectedRooms(90)}
+          >
+            <RotateCw className="h-4 w-4" />
+            Rotate +90°
+          </button>
+          <button
+            type="button"
+            className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white"
+            onClick={() => removeSelection(selection)}
+          >
+            <Trash2 className="h-4 w-4" />
+            Delete Selected
+          </button>
+        </div>
       );
     }
 
@@ -2537,7 +3682,9 @@ const MapEditor = forwardRef(function MapEditor(
                     <textarea
                       className="mt-1 min-h-[96px] w-full rounded-lg border border-default bg-surface px-3 py-2 text-sm"
                       value={selectedRoom.properties?.description || ""}
-                      onChange={(event) => updateRoomDescription(event.target.value)}
+                      onChange={(event) =>
+                        updateRoomDescription(event.target.value)
+                      }
                     />
                   </div>
                 )}
@@ -2610,6 +3757,14 @@ const MapEditor = forwardRef(function MapEditor(
 
   const roomDragBound = (pos) =>
     snapEnabled ? snapPointToGrid(pos, gridStep) : pos;
+
+  const activateRoomSelection = (event, roomId) => {
+    event.cancelBubble = true;
+    handleElementActivate(
+      { kind: "room", id: roomId },
+      { multiToggle: event.evt.shiftKey },
+    );
+  };
 
   return (
     <>
@@ -2707,8 +3862,10 @@ const MapEditor = forwardRef(function MapEditor(
           className="relative min-h-0 flex-1 overflow-hidden bg-slate-100"
           style={{
             cursor:
-              spacePressed || tool === "select"
+              spacePressed
                 ? "grab"
+                : tool === "select"
+                  ? "default"
                 : tool === "door"
                   ? hoveredDoorTarget
                     ? "copy"
@@ -2724,14 +3881,17 @@ const MapEditor = forwardRef(function MapEditor(
             scaleY={scale}
             x={position.x}
             y={position.y}
-            draggable={!previewMode && (tool === "select" || spacePressed)}
+            draggable={!previewMode && spacePressed}
             onDragStart={() => setContextMenu(null)}
             onDragEnd={(event) =>
               setPosition({ x: event.target.x(), y: event.target.y() })
             }
             onWheel={(event) => {
               event.evt.preventDefault();
-              zoomBy(0.92 ** Math.sign(event.evt.deltaY || 1), stageRef.current?.getPointerPosition() || null);
+              zoomBy(
+                0.92 ** Math.sign(event.evt.deltaY || 1),
+                stageRef.current?.getPointerPosition() || null,
+              );
             }}
             onMouseDown={handleStageMouseDown}
             onMouseMove={handleStageMouseMove}
@@ -2743,14 +3903,14 @@ const MapEditor = forwardRef(function MapEditor(
               {layerVisibility.grid &&
                 (() => {
                   const startX =
-                    Math.floor((-position.x / scale) / gridStep) * gridStep;
+                    Math.floor(-position.x / scale / gridStep) * gridStep;
                   const endX =
-                    Math.ceil(((size.width - position.x) / scale) / gridStep) *
+                    Math.ceil((size.width - position.x) / scale / gridStep) *
                     gridStep;
                   const startY =
-                    Math.floor((-position.y / scale) / gridStep) * gridStep;
+                    Math.floor(-position.y / scale / gridStep) * gridStep;
                   const endY =
-                    Math.ceil(((size.height - position.y) / scale) / gridStep) *
+                    Math.ceil((size.height - position.y) / scale / gridStep) *
                     gridStep;
                   const lines = [];
 
@@ -2798,12 +3958,13 @@ const MapEditor = forwardRef(function MapEditor(
                 const points = roomPolygon(feature);
                 const center = polygonCenter(points);
                 const bounds = polygonBounds(points);
-                const selectedNow =
-                  selection?.kind === "room" && selection.id === feature.id;
+                const selectedNow = isSelected("room", feature.id);
                 const style = roomTypeStyle(feature.properties?.kind || "room");
                 const fill = feature.properties?.color || style.fill;
                 const listening =
                   !previewMode && (tool === "select" || tool === "erase");
+                const frontPoint = resolveRoomFront(feature);
+                const frontHighlight = frontPlacement?.roomId === feature.id;
 
                 return (
                   <Group
@@ -2815,6 +3976,7 @@ const MapEditor = forwardRef(function MapEditor(
                     draggable={
                       !previewMode &&
                       tool === "select" &&
+                      selectedRoomIds.length === 1 &&
                       selectedNow &&
                       !spacePressed
                     }
@@ -2825,37 +3987,7 @@ const MapEditor = forwardRef(function MapEditor(
                       event.target.position({ x: 0, y: 0 });
                       if (dx === 0 && dy === 0) return;
                       updateRoomFeature(feature.id, (target) => {
-                        const moved = roomPolygon(target).map((point) => ({
-                          x: point.x + dx,
-                          y: point.y + dy,
-                        }));
-                        writeRoomPoints(target, moved);
-                      });
-                    }}
-                    onTransformEnd={() => {
-                      const node = roomRefs.current.get(feature.id);
-                      if (!node) return;
-                      const dx = node.x();
-                      const dy = node.y();
-                      const nextScaleX = node.scaleX();
-                      const nextScaleY = node.scaleY();
-                      node.scaleX(1);
-                      node.scaleY(1);
-                      node.position({ x: 0, y: 0 });
-                      updateRoomFeature(feature.id, (target) => {
-                        const sourcePoints = roomPolygon(target);
-                        const baseBounds = polygonBounds(sourcePoints);
-                        const transformed = sourcePoints.map((point) => ({
-                          x:
-                            baseBounds.x +
-                            (point.x - baseBounds.x) * nextScaleX +
-                            dx,
-                          y:
-                            baseBounds.y +
-                            (point.y - baseBounds.y) * nextScaleY +
-                            dy,
-                        }));
-                        writeRoomPoints(target, transformed);
+                        translateRoomFeature(target, dx, dy);
                       });
                     }}
                   >
@@ -2869,12 +4001,15 @@ const MapEditor = forwardRef(function MapEditor(
                           strokeEnabled={false}
                           hitStrokeWidth={0}
                           listening={listening}
-                          onClick={(event) => {
-                            event.cancelBubble = true;
-                            handleElementActivate({ kind: "room", id: feature.id });
-                          }}
+                          onMouseDown={(event) =>
+                            activateRoomSelection(event, feature.id)
+                          }
+                          onTap={(event) => activateRoomSelection(event, feature.id)}
                           onContextMenu={(event) =>
-                            openContextMenu(event, { kind: "room", id: feature.id })
+                            openContextMenu(event, {
+                              kind: "room",
+                              id: feature.id,
+                            })
                           }
                         />
                         <Line
@@ -2890,11 +4025,29 @@ const MapEditor = forwardRef(function MapEditor(
                           y={center.y - 8}
                           width={128}
                           align="center"
-                          text={truncateLabel(feature.properties?.name || "Room")}
+                          text={truncateLabel(
+                            feature.properties?.name || "Room",
+                          )}
                           fontSize={12}
                           fill="#0F172A"
                           listening={false}
                         />
+                        {frontPoint && (
+                          <Group
+                            x={frontPoint.x}
+                            y={frontPoint.y}
+                            rotation={frontPoint.angle}
+                            listening={false}
+                          >
+                            <Line
+                              points={[-6, -4, 6, 0, -6, 4]}
+                              closed
+                              fill={frontHighlight ? "#2563EB" : "#0EA5E9"}
+                              stroke={frontHighlight ? "#1D4ED8" : "#0284C7"}
+                              strokeWidth={1}
+                            />
+                          </Group>
+                        )}
                       </>
                     )}
                     {selectedNow && (
@@ -2918,8 +4071,7 @@ const MapEditor = forwardRef(function MapEditor(
                 if (coords.length < 2) return null;
                 const a = toPointFromCoords(coords[0]);
                 const b = toPointFromCoords(coords[1]);
-                const selectedNow =
-                  selection?.kind === "wall" && selection.id === feature.id;
+                const selectedNow = isSelected("wall", feature.id);
                 const listening =
                   !previewMode && (tool === "select" || tool === "erase");
                 return (
@@ -2947,8 +4099,7 @@ const MapEditor = forwardRef(function MapEditor(
 
               {mvf.openings.features.map((feature) => {
                 const kind = feature.properties?.kind;
-                const selectedNow =
-                  selection?.kind === kind && selection.id === feature.id;
+                const selectedNow = isSelected(kind, feature.id);
                 const listening =
                   !previewMode && (tool === "select" || tool === "erase");
 
@@ -2963,6 +4114,7 @@ const MapEditor = forwardRef(function MapEditor(
                       draggable={
                         !previewMode &&
                         tool === "select" &&
+                        selection?.kind === "door" &&
                         selectedNow &&
                         !spacePressed
                       }
@@ -3092,8 +4244,7 @@ const MapEditor = forwardRef(function MapEditor(
                 navEdges.map((edge) => {
                   const a = edge.source.geometry.coordinates;
                   const b = edge.target.geometry.coordinates;
-                  const selectedNow =
-                    selection?.kind === "path" && selection.id === edge.key;
+                  const selectedNow = isSelected("path", edge.key);
                   const listening =
                     !previewMode && (tool === "select" || tool === "erase");
                   return (
@@ -3123,9 +4274,12 @@ const MapEditor = forwardRef(function MapEditor(
                 mvf.nodes.features.map((feature) => {
                   const point = toPointFromCoords(feature.geometry.coordinates);
                   const type = feature.properties?.type || "corridor";
-                  const color = WAYPOINT_TYPE_COLORS[type] || WAYPOINT_TYPE_COLORS.corridor;
-                  const selectedNow =
-                    selection?.kind === "waypoint" && selection.id === feature.id;
+                  const color =
+                    WAYPOINT_TYPE_COLORS[type] || WAYPOINT_TYPE_COLORS.corridor;
+                  const label = feature.properties?.generatedSupport
+                    ? ""
+                    : truncateLabel(feature.properties?.name || type, 16);
+                  const selectedNow = isSelected("waypoint", feature.id);
                   const selectedForPath = pathDraft === feature.id;
                   const listening =
                     !previewMode &&
@@ -3139,6 +4293,7 @@ const MapEditor = forwardRef(function MapEditor(
                       draggable={
                         !previewMode &&
                         tool === "select" &&
+                        selection?.kind === "waypoint" &&
                         selectedNow &&
                         !spacePressed
                       }
@@ -3146,10 +4301,16 @@ const MapEditor = forwardRef(function MapEditor(
                       listening={listening}
                       onClick={(event) => {
                         event.cancelBubble = true;
-                        handleElementActivate({ kind: "waypoint", id: feature.id });
+                        handleElementActivate({
+                          kind: "waypoint",
+                          id: feature.id,
+                        });
                       }}
                       onContextMenu={(event) =>
-                        openContextMenu(event, { kind: "waypoint", id: feature.id })
+                        openContextMenu(event, {
+                          kind: "waypoint",
+                          id: feature.id,
+                        })
                       }
                       onDragEnd={(event) => {
                         const nextPosition = {
@@ -3180,7 +4341,7 @@ const MapEditor = forwardRef(function MapEditor(
                         y={12}
                         width={88}
                         align="center"
-                        text={truncateLabel(feature.properties?.name || type, 16)}
+                        text={label}
                         fontSize={10}
                         fill="#0F172A"
                         listening={false}
@@ -3206,7 +4367,11 @@ const MapEditor = forwardRef(function MapEditor(
                     stroke="#2563EB"
                     strokeWidth={2}
                   />
-                  <Line points={[-8, 0, 8, 0]} stroke="#FFFFFF" strokeWidth={6} />
+                  <Line
+                    points={[-8, 0, 8, 0]}
+                    stroke="#FFFFFF"
+                    strokeWidth={6}
+                  />
                   <Rect
                     x={-3}
                     y={-8}
@@ -3220,20 +4385,23 @@ const MapEditor = forwardRef(function MapEditor(
                 </Group>
               )}
 
-              {tool === "path" && pathDraft && cursor && waypointMap.get(pathDraft) && (
-                <Line
-                  points={[
-                    waypointMap.get(pathDraft).geometry.coordinates[0],
-                    waypointMap.get(pathDraft).geometry.coordinates[1],
-                    cursor.x,
-                    cursor.y,
-                  ]}
-                  stroke="#22C55E"
-                  strokeWidth={2}
-                  dash={[6, 4]}
-                  listening={false}
-                />
-              )}
+              {tool === "path" &&
+                pathDraft &&
+                cursor &&
+                waypointMap.get(pathDraft) && (
+                  <Line
+                    points={[
+                      waypointMap.get(pathDraft).geometry.coordinates[0],
+                      waypointMap.get(pathDraft).geometry.coordinates[1],
+                      cursor.x,
+                      cursor.y,
+                    ]}
+                    stroke="#22C55E"
+                    strokeWidth={2}
+                    dash={[6, 4]}
+                    listening={false}
+                  />
+                )}
 
               {drawing?.kind === "wall" && (
                 <Line
@@ -3309,23 +4477,22 @@ const MapEditor = forwardRef(function MapEditor(
             <Layer listening={false}>
               <Transformer
                 ref={transformerRef}
-                rotateEnabled={false}
+                rotateEnabled={!spacePressed}
+                onTransformEnd={handleSelectedRoomTransformEnd}
                 enabledAnchors={
                   spacePressed
                     ? []
-                    : [
-                        "top-left",
-                        "top-right",
-                        "bottom-left",
-                        "bottom-right",
-                      ]
+                    : ["top-left", "top-right", "bottom-left", "bottom-right"]
                 }
                 anchorSize={8}
                 borderStroke="#2563EB"
                 anchorStroke="#2563EB"
                 anchorFill="#FFFFFF"
                 boundBoxFunc={(oldBox, newBox) => {
-                  if (newBox.width < MIN_ROOM_SIZE || newBox.height < MIN_ROOM_SIZE) {
+                  if (
+                    newBox.width < MIN_ROOM_SIZE ||
+                    newBox.height < MIN_ROOM_SIZE
+                  ) {
                     return oldBox;
                   }
                   return newBox;
@@ -3360,6 +4527,13 @@ const MapEditor = forwardRef(function MapEditor(
               Fit
             </button>
           </div>
+
+          {frontPlacement && (
+            <div className="absolute left-1/2 top-4 z-20 -translate-x-1/2 rounded-full border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 shadow">
+              Click the front edge for{" "}
+              {frontPlacementRoom?.properties?.name || "Room"} (Esc to cancel)
+            </div>
+          )}
 
           {tool === "door" && !hoveredDoorTarget && (
             <div className="absolute left-1/2 top-4 z-20 -translate-x-1/2 rounded-full border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 shadow">
