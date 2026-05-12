@@ -1,5 +1,10 @@
+<<<<<<<< HEAD:frontend/src/future/3d-navigation/LeafletNavigationMap.jsx
 // Archived experimental Leaflet renderer.
 // Intentionally isolated from production imports for future experimentation.
+========
+// CampusNav future module: LeafletNavigationMap.jsx
+// Archived from production rendering paths; preserved as a renderer experiment.
+>>>>>>>> a62161a (Archive future navigation foundations):frontend/src/future/navigation-rendering/LeafletNavigationMap.jsx
 import { useEffect } from "react";
 import {
   MapContainer,
@@ -11,7 +16,7 @@ import {
 import L from "leaflet";
 import "leaflet/dist/leaflet.css";
 import { Building2, ZoomIn, ZoomOut } from "lucide-react";
-import IndoorCanvas from "./IndoorCanvas.jsx";
+import IndoorCanvas from "../3d-navigation/IndoorCanvas.jsx";
 import { leafletAdapter } from "./adapters/leafletAdapter.js";
 
 delete L.Icon.Default.prototype._getIconUrl;

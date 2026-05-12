@@ -1,4 +1,5 @@
-// CampusNav update — leafletAdapter.js
+// CampusNav future module: leafletAdapter.js
+// Archived from production rendering paths; preserved for renderer experiments.
 import L from "leaflet";
 import {
   TILE_ATTRIBUTION,

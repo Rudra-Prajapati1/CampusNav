@@ -1,4 +1,5 @@
-// CampusNav update — mapLibreAdapter.js
+// CampusNav future module: mapLibreAdapter.js
+// Archived from production rendering paths; preserved for renderer experiments.
 import { MAPLIBRE_STYLE } from "../mapProviderConfig.js";
 
 export function toMapLibreLngLat(coords = []) {

@@ -1,4 +1,5 @@
-// CampusNav update — mapProviderConfig.js
+// CampusNav future module: mapProviderConfig.js
+// Archived from production rendering paths; preserved for renderer experiments.
 // Environment-driven renderer config. Product logic should use the adapter
 // registry and avoid branching on renderer details directly.
 

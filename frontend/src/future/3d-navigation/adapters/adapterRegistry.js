@@ -1,4 +1,5 @@
-// CampusNav update — adapterRegistry.js
+// CampusNav future module: adapterRegistry.js
+// Archived from production rendering paths; preserved for renderer experiments.
 import { leafletAdapter } from "./leafletAdapter.js";
 import { mapLibreAdapter } from "./mapLibreAdapter.js";
 

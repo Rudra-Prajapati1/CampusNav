@@ -1,4 +1,5 @@
-// CampusNav update — indoorMapModel.js
+// CampusNav future module: indoorMapModel.js
+// Archived from production rendering paths; preserved for future 3D/sensor work.
 // Canonical indoor map model utilities.
 // Product logic should read from this normalized model rather than directly
 // from any renderer-specific object shape.
