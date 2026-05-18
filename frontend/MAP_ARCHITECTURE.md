@@ -4,30 +4,25 @@
 ## Current direction
 
 - Product logic stays renderer-agnostic.
-- Indoor map data is normalized through `src/components/navigation/indoorMapModel.js`.
-- Renderer-specific code starts only inside:
-  - `src/components/navigation/LeafletNavigationMap.jsx`
-  - `src/components/navigation/MapLibreNavigationMap.jsx`
-  - `src/components/navigation/adapters/*`
+- Production navigation renderer is `src/components/navigation/MapLibreNavigationMap.jsx`.
+- Dormant renderer/sensor experiments are archived under `src/future/*` and are intentionally excluded from active production imports.
 
 ## Separation of concerns
 
 - `NavigatePage.jsx`
   - owns business flow: building selection, floor selection, indoor/outdoor mode, room search, routing, and route summaries.
-- `NavigationMapRenderer.jsx`
-  - chooses the active renderer after adapter resolution.
-- `adapters/*`
-  - own renderer capabilities such as tile config, coordinate projection bridges, and renderer configuration requirements.
-- `IndoorCanvas.jsx`
-  - renders the canonical indoor map model and does not depend on a specific map library.
-- `indoorMapModel.js`
-  - defines the canonical indoor schema for rooms, doors, waypoints, paths, walls, beacons, floors, overlay bounds, and future 3D metadata.
+- `MapLibreNavigationMap.jsx`
+  - current production renderer for indoor/outdoor navigation.
+- `src/future/3d-navigation/*`
+  - archived alternate renderers, indoor canvas, and model experiments retained for future roadmap work.
+- `src/future/sensor-fusion/*`
+  - archived device-motion and orientation experiments retained for future positioning work.
 
 ## Recommended long-term stack
 
 - Renderer: `MapLibre`
 - Basemap provider: `MapTiler` first, self-hosted vector tiles later if scale demands it
-- Development fallback: `Leaflet + OSM/MapTiler`
+- Experimental fallback (archived): `Leaflet + OSM/MapTiler`
 
 Why:
 

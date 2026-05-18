@@ -1,3 +1,5 @@
+// Archived experimental Three.js renderer.
+// Kept intentionally for future indoor 3D and AR visualization support.
 import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";

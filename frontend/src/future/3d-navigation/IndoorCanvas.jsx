@@ -1,4 +1,5 @@
-// CampusNav update — IndoorCanvas.jsx
+// Archived experimental indoor canvas.
+// Preserved for future 3D, sensor, and AR navigation work.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Layers, LocateFixed, Navigation, ZoomIn, ZoomOut } from "lucide-react";
 import {

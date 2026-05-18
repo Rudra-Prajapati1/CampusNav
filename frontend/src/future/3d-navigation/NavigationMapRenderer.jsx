@@ -1,6 +1,8 @@
-// CampusNav update — NavigationMapRenderer.jsx
+// Archived experimental renderer selector.
+// This module is intentionally isolated from production imports and kept for
+// future renderer experiments and potential fallback implementations.
 import LeafletNavigationMap from "./LeafletNavigationMap.jsx";
-import MapLibreNavigationMap from "./MapLibreNavigationMap.jsx";
+import MapLibreNavigationMap from "../../components/navigation/MapLibreNavigationMap.jsx";
 
 const rendererComponents = {
   leaflet: LeafletNavigationMap,
