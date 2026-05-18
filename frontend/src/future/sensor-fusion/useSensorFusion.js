@@ -1,3 +1,5 @@
+// Archived experimental sensor-fusion hook.
+// Kept for future gyro/orientation/motion-based positioning features.
 import { useCallback, useEffect, useRef, useState } from "react";
 
 const INITIAL_STATE = {

@@ -1,4 +1,5 @@
-// CampusNav update — LeafletNavigationMap.jsx
+// Archived experimental Leaflet renderer.
+// Intentionally isolated from production imports for future experimentation.
 import { useEffect } from "react";
 import {
   MapContainer,
