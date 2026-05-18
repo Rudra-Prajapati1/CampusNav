@@ -1,5 +1,12 @@
 // CampusNav update — AdminFloorEditor.jsx
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   ArrowLeft,
@@ -16,9 +23,10 @@ import {
   ZoomOut,
 } from "lucide-react";
 import toast from "react-hot-toast";
-import MapEditor from "../../components/MapEditor.jsx";
 import { useTheme } from "../../context/themeContext.jsx";
 import { api } from "../../utils/api.js";
+
+const MapEditor = lazy(() => import("../../components/MapEditor.jsx"));
 
 function defaultStatus() {
   return {
@@ -39,7 +47,13 @@ function defaultStatus() {
   };
 }
 
-function IconButton({ title, children, active = false, disabled = false, onClick }) {
+function IconButton({
+  title,
+  children,
+  active = false,
+  disabled = false,
+  onClick,
+}) {
   return (
     <button
       type="button"
@@ -48,7 +62,9 @@ function IconButton({ title, children, active = false, disabled = false, onClick
       disabled={disabled}
       onClick={onClick}
       className={`inline-flex h-8 w-8 items-center justify-center rounded-md border border-default text-secondary transition-colors ${
-        active ? "bg-accent text-white border-accent" : "bg-surface hover:bg-surface-alt"
+        active
+          ? "bg-accent text-white border-accent"
+          : "bg-surface hover:bg-surface-alt"
       } disabled:cursor-not-allowed disabled:opacity-50`}
     >
       {children}
@@ -131,7 +147,13 @@ export default function AdminFloorEditor() {
   }, [editorStatus.dirty]);
 
   const handleSave = useCallback(
-    async ({ rooms, waypoints, connections, map_data, scale_pixels_per_meter }) => {
+    async ({
+      rooms,
+      waypoints,
+      connections,
+      map_data,
+      scale_pixels_per_meter,
+    }) => {
       setSaving(true);
       setSaveSucceeded(false);
 
@@ -241,8 +263,8 @@ export default function AdminFloorEditor() {
               Floor not available
             </h2>
             <p className="mt-3 text-sm subtle-text">
-              CampusNav could not load the requested floor. Return to the buildings
-              workspace and try again.
+              CampusNav could not load the requested floor. Return to the
+              buildings workspace and try again.
             </p>
           </div>
         </div>
@@ -272,15 +294,21 @@ export default function AdminFloorEditor() {
               className="select h-8 min-w-[170px] py-1 text-sm"
               value={floorData.id}
               onChange={(event) => {
-                const nextFloor = floors.find((floor) => floor.id === event.target.value);
+                const nextFloor = floors.find(
+                  (floor) => floor.id === event.target.value,
+                );
                 if (!nextFloor || nextFloor.id === floorData.id) return;
                 if (
                   editorStatus.dirty &&
-                  !window.confirm("You have unsaved changes. Switch floors anyway?")
+                  !window.confirm(
+                    "You have unsaved changes. Switch floors anyway?",
+                  )
                 ) {
                   return;
                 }
-                navigate(`/admin/buildings/${buildingId}/floors/${nextFloor.id}/editor`);
+                navigate(
+                  `/admin/buildings/${buildingId}/floors/${nextFloor.id}/editor`,
+                );
               }}
             >
               {floors.map((floor) => (
@@ -397,31 +425,54 @@ export default function AdminFloorEditor() {
             title={isDark ? "Switch to light mode" : "Switch to dark mode"}
             onClick={toggleTheme}
           >
-            {isDark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+            {isDark ? (
+              <Sun className="h-4 w-4" />
+            ) : (
+              <Moon className="h-4 w-4" />
+            )}
           </IconButton>
         </div>
       </header>
 
       <div className="min-h-0 flex-1">
-        <MapEditor
-          ref={editorRef}
-          floorData={floorData}
-          floors={floors}
-          building={building}
-          buildingIndustry={building?.industry || "education"}
-          onSave={handleSave}
-          onStateChange={setEditorStatus}
-          previewMode={previewMode}
-          previewView={previewView}
-          autoOpenAiMapping={Boolean(location.state?.openAiMapping)}
-        />
+        <Suspense
+          fallback={
+            <div className="flex h-full items-center justify-center bg-bg px-6">
+              <div className="card-sm flex flex-col items-center gap-4 text-center">
+                <div className="h-10 w-10 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+                <div>
+                  <div className="text-base font-semibold">
+                    Loading map editor
+                  </div>
+                  <p className="mt-1 text-sm subtle-text">
+                    Preparing drawing tools and floor geometry.
+                  </p>
+                </div>
+              </div>
+            </div>
+          }
+        >
+          <MapEditor
+            ref={editorRef}
+            floorData={floorData}
+            floors={floors}
+            building={building}
+            buildingIndustry={building?.industry || "education"}
+            onSave={handleSave}
+            onStateChange={setEditorStatus}
+            previewMode={previewMode}
+            previewView={previewView}
+            autoOpenAiMapping={Boolean(location.state?.openAiMapping)}
+          />
+        </Suspense>
       </div>
 
       <footer className="flex h-7 shrink-0 items-center justify-between gap-4 border-t border-default bg-surface px-3 text-[11px] text-muted">
         <div>Tool: {editorStatus.tool || "select"}</div>
         <div className="hidden md:block">
           {totalElements} elements • {editorStatus.counts.rooms} rooms •{" "}
-          {editorStatus.counts.waypoints} waypoints • {editorStatus.counts.beacons || 0} beacons
+          {editorStatus.counts.waypoints} waypoints •{" "}
+          {editorStatus.counts.beacons || 0} beacons
         </div>
         <div className="flex items-center gap-3 font-mono">
           <span className="hidden md:inline">{editorStatus.readiness}</span>

@@ -1,18 +1,36 @@
 // CampusNav redesign — App.jsx — updated
-import { useEffect } from "react";
+import { Suspense, lazy, useEffect } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { Toaster } from "react-hot-toast";
 import { useAuthStore } from "./stores/authStore.js";
 import { ThemeProvider, useTheme } from "./context/themeContext.jsx";
 import LandingPage from "./pages/LandingPage.jsx";
 import NotFound from "./pages/NotFound.jsx";
-import AdminBuildings from "./pages/admin/AdminBuildings.jsx";
-import AdminDashboard from "./pages/admin/AdminDashboard.jsx";
-import AdminFloorEditor from "./pages/admin/AdminFloorEditor.jsx";
-import AdminFloorGeoreference from "./pages/admin/AdminFloorGeoreference.jsx";
-import AdminLayout from "./pages/admin/AdminLayout.jsx";
-import AdminLogin from "./pages/admin/AdminLogin.jsx";
-import NavigatePage from "./pages/user/NavigatePage.jsx";
+
+const AdminBuildings = lazy(() => import("./pages/admin/AdminBuildings.jsx"));
+const AdminDashboard = lazy(() => import("./pages/admin/AdminDashboard.jsx"));
+const AdminFloorEditor = lazy(
+  () => import("./pages/admin/AdminFloorEditor.jsx"),
+);
+const AdminFloorGeoreference = lazy(
+  () => import("./pages/admin/AdminFloorGeoreference.jsx"),
+);
+const AdminLayout = lazy(() => import("./pages/admin/AdminLayout.jsx"));
+const AdminLogin = lazy(() => import("./pages/admin/AdminLogin.jsx"));
+const NavigatePage = lazy(() => import("./pages/user/NavigatePage.jsx"));
+
+function RouteLoadingShell() {
+  return (
+    <div className="page-shell flex min-h-screen items-center justify-center px-6">
+      <div className="card-sm flex flex-col items-center gap-4 text-center">
+        <div className="h-10 w-10 animate-spin rounded-full border-2 border-accent border-t-transparent" />
+        <div className="text-base font-semibold">
+          Loading CampusNav workspace
+        </div>
+      </div>
+    </div>
+  );
+}
 
 function ProtectedRoute({ children }) {
   const { user, isAdmin, loading, authError } = useAuthStore();
@@ -23,7 +41,9 @@ function ProtectedRoute({ children }) {
         <div className="card-sm flex flex-col items-center gap-4 text-center">
           <div className="h-10 w-10 animate-spin rounded-full border-2 border-accent border-t-transparent" />
           <div>
-            <div className="text-base font-semibold">Loading admin workspace</div>
+            <div className="text-base font-semibold">
+              Loading admin workspace
+            </div>
             <p className="mt-1 text-sm subtle-text">
               Checking your CampusNav access.
             </p>
@@ -37,7 +57,9 @@ function ProtectedRoute({ children }) {
     return (
       <div className="page-shell flex min-h-screen items-center justify-center px-6">
         <div className="card-sm max-w-md text-center">
-          <div className="text-base font-semibold">Admin access check failed</div>
+          <div className="text-base font-semibold">
+            Admin access check failed
+          </div>
           <p className="mt-2 text-sm subtle-text">
             {authError.message ||
               "CampusNav could not verify your admin access right now."}
@@ -91,39 +113,41 @@ function AppRoutes() {
   return (
     <>
       <ThemedToaster />
-      <Routes>
-        <Route path="/" element={<LandingPage />} />
-        <Route path="/navigate/:buildingId" element={<NavigatePage />} />
-        <Route path="/admin/login" element={<AdminLogin />} />
-        <Route
-          path="/admin/buildings/:buildingId/floors/:floorId/georeference"
-          element={
-            <ProtectedRoute>
-              <AdminFloorGeoreference />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/admin/buildings/:buildingId/floors/:floorId/editor"
-          element={
-            <ProtectedRoute>
-              <AdminFloorEditor />
-            </ProtectedRoute>
-          }
-        />
-        <Route
-          path="/admin"
-          element={
-            <ProtectedRoute>
-              <AdminLayout />
-            </ProtectedRoute>
-          }
-        >
-          <Route index element={<AdminDashboard />} />
-          <Route path="buildings" element={<AdminBuildings />} />
-        </Route>
-        <Route path="*" element={<NotFound />} />
-      </Routes>
+      <Suspense fallback={<RouteLoadingShell />}>
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/navigate/:buildingId" element={<NavigatePage />} />
+          <Route path="/admin/login" element={<AdminLogin />} />
+          <Route
+            path="/admin/buildings/:buildingId/floors/:floorId/georeference"
+            element={
+              <ProtectedRoute>
+                <AdminFloorGeoreference />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin/buildings/:buildingId/floors/:floorId/editor"
+            element={
+              <ProtectedRoute>
+                <AdminFloorEditor />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/admin"
+            element={
+              <ProtectedRoute>
+                <AdminLayout />
+              </ProtectedRoute>
+            }
+          >
+            <Route index element={<AdminDashboard />} />
+            <Route path="buildings" element={<AdminBuildings />} />
+          </Route>
+          <Route path="*" element={<NotFound />} />
+        </Routes>
+      </Suspense>
     </>
   );
 }
