@@ -135,6 +135,115 @@ function cornersFromState(centerPixel, imageWidth, imageHeight, state) {
   }));
 }
 
+const CORNER_IDS = ["tl", "tr", "br", "bl"];
+
+function normalizeGeoCorners(corners) {
+  if (!Array.isArray(corners) || corners.length < 4) return [];
+
+  const byId = new Map(
+    corners
+      .filter((corner) => corner && typeof corner === "object" && corner.id)
+      .map((corner) => [corner.id, corner]),
+  );
+  const ordered = CORNER_IDS.every((id) => byId.has(id))
+    ? CORNER_IDS.map((id) => byId.get(id))
+    : corners.slice(0, 4);
+
+  const normalized = ordered.map((corner, index) => {
+    const lng = toNumber(Array.isArray(corner) ? corner[0] : corner?.lng, NaN);
+    const lat = toNumber(Array.isArray(corner) ? corner[1] : corner?.lat, NaN);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+    return { id: CORNER_IDS[index], lat, lng };
+  });
+
+  return normalized.every(Boolean) ? normalized : [];
+}
+
+function legacyStateToGeoCorners(map, imageWidth, imageHeight, state) {
+  if (!map) return [];
+  const centerPixel = map.project([state.centerLng, state.centerLat]);
+  return cornersFromState(centerPixel, imageWidth, imageHeight, state).map(
+    (corner, index) => {
+      const lngLat = map.unproject([corner.x, corner.y]);
+      return { id: CORNER_IDS[index], lat: lngLat.lat, lng: lngLat.lng };
+    },
+  );
+}
+
+function overlayViewFromGeoCorners(map, geoCorners) {
+  const normalized = normalizeGeoCorners(geoCorners);
+  if (!map || normalized.length !== 4) return null;
+
+  const corners = normalized.map((corner, index) => {
+    const point = map.project([corner.lng, corner.lat]);
+    return {
+      id: CORNER_IDS[index],
+      x: point.x,
+      y: point.y,
+    };
+  });
+
+  const center = corners.reduce(
+    (sum, corner) => ({
+      x: sum.x + corner.x / corners.length,
+      y: sum.y + corner.y / corners.length,
+    }),
+    { x: 0, y: 0 },
+  );
+  const width = Math.hypot(
+    corners[1].x - corners[0].x,
+    corners[1].y - corners[0].y,
+  );
+  const height = Math.hypot(
+    corners[3].x - corners[0].x,
+    corners[3].y - corners[0].y,
+  );
+  const rotation =
+    (Math.atan2(corners[1].y - corners[0].y, corners[1].x - corners[0].x) *
+      180) /
+    Math.PI;
+
+  return { center, corners, height, rotation, width };
+}
+
+function geoCornersToLngLats(geoCorners) {
+  return normalizeGeoCorners(geoCorners).map((corner) => [
+    corner.lng,
+    corner.lat,
+  ]);
+}
+
+function isMapInteractionEnabled(interaction) {
+  return typeof interaction?.isEnabled === "function"
+    ? interaction.isEnabled()
+    : true;
+}
+
+function setMapInteractionsEnabled(map, enabled, previousState = null) {
+  const interactions = [
+    ["dragPan", map?.dragPan],
+    ["dragRotate", map?.dragRotate],
+    ["scrollZoom", map?.scrollZoom],
+  ];
+
+  if (!enabled) {
+    return interactions.reduce((snapshot, [name, interaction]) => {
+      snapshot[name] = isMapInteractionEnabled(interaction);
+      interaction?.disable?.();
+      return snapshot;
+    }, {});
+  }
+
+  interactions.forEach(([name, interaction]) => {
+    if (previousState?.[name] === false) {
+      interaction?.disable?.();
+      return;
+    }
+    interaction?.enable?.();
+  });
+  return null;
+}
+
 export default function AdminFloorGeoreference() {
   const { buildingId, floorId } = useParams();
   const navigate = useNavigate();
@@ -142,6 +251,13 @@ export default function AdminFloorGeoreference() {
   const mapRef = useRef(null);
   const imageRef = useRef(null);
   const dragRef = useRef(null);
+  const mapInteractionStateRef = useRef(null);
+  const overlayFrameRef = useRef(null);
+  const overlayVisibleRef = useRef(false);
+  const cornerHandleRefs = useRef([]);
+  const rotationHandleRef = useRef(null);
+  const centerHandleRef = useRef(null);
+  const rotationLineRef = useRef(null);
   const pinModeRef = useRef(false);
   const pendingUvRef = useRef(null);
   const centerRef = useRef({ lat: 23.0225, lng: 72.5714 });
@@ -166,11 +282,181 @@ export default function AdminFloorGeoreference() {
     scaleY: 1,
     opacity: 0.65,
   });
-
-  const [projectedCenter, setProjectedCenter] = useState(null);
+  const stateRef = useRef(state);
+  const [geoCorners, setGeoCorners] = useState([]);
+  const geoCornersRef = useRef([]);
+  const [overlayView, setOverlayView] = useState(null);
+  const overlayViewRef = useRef(null);
+  const imageSizeRef = useRef({ width: 2000, height: 1500 });
 
   const imageWidth = Number(floor?.floor_plan_width || 2000);
   const imageHeight = Number(floor?.floor_plan_height || 1500);
+
+  function clientToMapPoint(clientX, clientY) {
+    const map = mapRef.current;
+    if (!map) return { x: clientX, y: clientY };
+    const rect = map.getContainer().getBoundingClientRect();
+    return {
+      x: clientX - rect.left,
+      y: clientY - rect.top,
+    };
+  }
+
+  function mapPointToOverlayPoint(mapX, mapY) {
+    const map = mapRef.current;
+    const container = mapContainerRef.current;
+    if (!map || !container) return { x: mapX, y: mapY };
+    const mapRect = map.getContainer().getBoundingClientRect();
+    const containerRect = container.getBoundingClientRect();
+    return {
+      x: mapX + (mapRect.left - containerRect.left),
+      y: mapY + (mapRect.top - containerRect.top),
+    };
+  }
+
+  function overlayDisplayFromView(view) {
+    if (!view) return null;
+
+    const corners = view.corners.map((corner) => ({
+      ...corner,
+      ...mapPointToOverlayPoint(corner.x, corner.y),
+    }));
+    const center = mapPointToOverlayPoint(view.center.x, view.center.y);
+    const width = Math.hypot(
+      corners[1].x - corners[0].x,
+      corners[1].y - corners[0].y,
+    );
+    const height = Math.hypot(
+      corners[3].x - corners[0].x,
+      corners[3].y - corners[0].y,
+    );
+    const rotation =
+      (Math.atan2(corners[1].y - corners[0].y, corners[1].x - corners[0].x) *
+        180) /
+      Math.PI;
+
+    return { center, corners, height, rotation, width };
+  }
+
+  function applyHandlePositions(display) {
+    if (!display || display.corners.length !== 4) return;
+
+    display.corners.forEach((corner, index) => {
+      const el = cornerHandleRefs.current[index];
+      if (!el) return;
+      el.style.left = `${corner.x}px`;
+      el.style.top = `${corner.y}px`;
+    });
+
+    const centerEl = centerHandleRef.current;
+    if (centerEl) {
+      centerEl.style.left = `${display.center.x}px`;
+      centerEl.style.top = `${display.center.y}px`;
+    }
+
+    const topCenter = {
+      x: (display.corners[0].x + display.corners[1].x) / 2,
+      y: (display.corners[0].y + display.corners[1].y) / 2,
+    };
+    const angle = (display.rotation * Math.PI) / 180;
+    const offsetX = -Math.sin(angle) * 40;
+    const offsetY = -Math.cos(angle) * 40;
+    const rotationX = topCenter.x + offsetX;
+    const rotationY = topCenter.y + offsetY;
+
+    const rotEl = rotationHandleRef.current;
+    if (rotEl) {
+      rotEl.style.left = `${rotationX}px`;
+      rotEl.style.top = `${rotationY}px`;
+    }
+
+    const lineEl = rotationLineRef.current;
+    if (lineEl) {
+      lineEl.setAttribute("x1", topCenter.x);
+      lineEl.setAttribute("y1", topCenter.y);
+      lineEl.setAttribute("x2", rotationX);
+      lineEl.setAttribute("y2", rotationY);
+    }
+  }
+
+  function applyOverlayImageStyle(view) {
+    const image = imageRef.current;
+    const display = overlayDisplayFromView(view);
+    if (!image || !display) return;
+    image.style.left = `${display.center.x}px`;
+    image.style.top = `${display.center.y}px`;
+    image.style.width = `${Math.max(1, display.width)}px`;
+    image.style.height = `${Math.max(1, display.height)}px`;
+    image.style.opacity = String(stateRef.current.opacity);
+    image.style.transform = `translate(-50%, -50%) rotate(${display.rotation}deg)`;
+    image.style.transformOrigin = "center center";
+    applyHandlePositions(display);
+  }
+
+  function projectOverlayNow(cornersOverride = null) {
+    const map = mapRef.current;
+    const view = overlayViewFromGeoCorners(
+      map,
+      cornersOverride || geoCornersRef.current,
+    );
+
+    if (!view) {
+      overlayViewRef.current = null;
+      overlayVisibleRef.current = false;
+      setOverlayView(null);
+      return null;
+    }
+
+    const shouldShowOverlay = !overlayVisibleRef.current;
+    applyOverlayImageStyle(view);
+    overlayViewRef.current = view;
+    if (shouldShowOverlay) {
+      overlayVisibleRef.current = true;
+      setOverlayView(view);
+    }
+    return view;
+  }
+
+  function scheduleOverlayProjection() {
+    if (overlayFrameRef.current !== null) {
+      window.cancelAnimationFrame(overlayFrameRef.current);
+    }
+    overlayFrameRef.current = window.requestAnimationFrame(() => {
+      overlayFrameRef.current = window.requestAnimationFrame(() => {
+        overlayFrameRef.current = null;
+        projectOverlayNow();
+      });
+    });
+  }
+
+  function deriveOverlayState(corners, viewOverride = null) {
+    const map = mapRef.current;
+    const view = viewOverride || overlayViewFromGeoCorners(map, corners);
+    if (!map || !view) return null;
+    const centerLngLat = map.unproject([view.center.x, view.center.y]);
+    const { width, height } = imageSizeRef.current;
+    return {
+      centerLat: centerLngLat.lat,
+      centerLng: centerLngLat.lng,
+      rotation: view.rotation,
+      scaleX: Math.max(0.05, view.width / width),
+      scaleY: Math.max(0.05, view.height / height),
+    };
+  }
+
+  function setCanonicalGeoCorners(nextCorners, options = {}) {
+    const normalized = normalizeGeoCorners(nextCorners);
+    if (normalized.length !== 4) return;
+
+    geoCornersRef.current = normalized;
+    setGeoCorners(normalized);
+    const view = projectOverlayNow(normalized);
+
+    if (options.syncState === false) return;
+    const derivedState = deriveOverlayState(normalized, view);
+    if (!derivedState) return;
+    setState((current) => ({ ...current, ...derivedState }));
+  }
 
   useEffect(() => {
     pinModeRef.current = pinMode;
@@ -181,8 +467,21 @@ export default function AdminFloorGeoreference() {
   }, [pendingUv]);
 
   useEffect(() => {
+    stateRef.current = state;
     centerRef.current = { lat: state.centerLat, lng: state.centerLng };
-  }, [state.centerLat, state.centerLng]);
+    if (imageRef.current) {
+      imageRef.current.style.opacity = String(state.opacity);
+    }
+  }, [state]);
+
+  useEffect(() => {
+    imageSizeRef.current = { width: imageWidth, height: imageHeight };
+  }, [imageHeight, imageWidth]);
+
+  useEffect(() => {
+    geoCornersRef.current = geoCorners;
+    scheduleOverlayProjection();
+  }, [geoCorners]);
 
   useEffect(() => {
     let cancelled = false;
@@ -212,6 +511,7 @@ export default function AdminFloorGeoreference() {
         setFloors(buildingFloors || []);
         setAddress(georef?.address || buildingData?.address || "");
         setLevel(georef?.level || floorData?.name || "Ground Floor");
+        centerRef.current = { lat: centerLat, lng: centerLng };
         setState((current) => ({
           ...current,
           centerLat,
@@ -221,6 +521,14 @@ export default function AdminFloorGeoreference() {
           scaleY: Math.max(0.05, toNumber(georef?.scaleY, 1)),
           opacity: Math.max(0.1, Math.min(1, toNumber(georef?.opacity, 0.65))),
         }));
+        const savedGeoCorners = normalizeGeoCorners(georef?.corners);
+        geoCornersRef.current = savedGeoCorners;
+        setGeoCorners(savedGeoCorners);
+        const map = mapRef.current;
+        if (map) {
+          map.setCenter([centerLng, centerLat]);
+          projectOverlayNow(savedGeoCorners);
+        }
       } catch (error) {
         toast.error(error.message || "Unable to load georeference data");
       } finally {
@@ -261,9 +569,11 @@ export default function AdminFloorGeoreference() {
       zoom: 17,
       pitch: 0,
       bearing: 0,
-      dragRotate: false,
+      scrollZoom: { around: "center" },
+      doubleClickZoom: false,
       touchPitch: false,
       pitchWithRotate: false,
+      dragRotate: false,
       attributionControl: true,
       fadeDuration: 0,
       trackResize: true,
@@ -275,6 +585,7 @@ export default function AdminFloorGeoreference() {
       setMapLoaded(true);
       map.setPitch(0);
       map.setBearing(0);
+      scheduleOverlayProjection();
     });
 
     map.on("error", (event) => {
@@ -288,14 +599,19 @@ export default function AdminFloorGeoreference() {
       }
     });
 
-    const syncCenter = () => {
-      const point = map.project([centerRef.current.lng, centerRef.current.lat]);
-      setProjectedCenter({ x: point.x, y: point.y });
+    const syncOverlay = () => {
+      if (overlayFrameRef.current !== null) {
+        window.cancelAnimationFrame(overlayFrameRef.current);
+        overlayFrameRef.current = null;
+      }
+      projectOverlayNow();
     };
 
-    map.on("move", syncCenter);
-    map.on("zoom", syncCenter);
-    map.on("resize", syncCenter);
+    map.on("move", syncOverlay);
+    map.on("zoom", syncOverlay);
+    map.on("rotate", syncOverlay);
+    map.on("pitch", syncOverlay);
+    map.on("resize", syncOverlay);
 
     map.on("click", (event) => {
       if (!pinModeRef.current || !pendingUvRef.current) return;
@@ -311,149 +627,181 @@ export default function AdminFloorGeoreference() {
     });
 
     mapRef.current = map;
-    syncCenter();
+    scheduleOverlayProjection();
 
     return () => {
       setMapLoaded(false);
+      if (overlayFrameRef.current !== null) {
+        window.cancelAnimationFrame(overlayFrameRef.current);
+        overlayFrameRef.current = null;
+      }
       map.remove();
       mapRef.current = null;
     };
   }, []);
 
   useEffect(() => {
-    const map = mapRef.current;
-    if (!map) return;
-    const currentCenter = map.getCenter();
-    if (
-      Math.abs(currentCenter.lng - state.centerLng) > 1e-9 ||
-      Math.abs(currentCenter.lat - state.centerLat) > 1e-9
-    ) {
-      map.setCenter([state.centerLng, state.centerLat]);
-    }
-    const projected = map.project([state.centerLng, state.centerLat]);
-    setProjectedCenter({ x: projected.x, y: projected.y });
+    if (!mapRef.current) return;
+    scheduleOverlayProjection();
   }, [state.centerLat, state.centerLng]);
 
-  const overlayPixelWidth = imageWidth * state.scaleX;
-  const overlayPixelHeight = imageHeight * state.scaleY;
-
-  const cornersPx = useMemo(() => {
-    if (!projectedCenter) return [];
-    return cornersFromState(projectedCenter, imageWidth, imageHeight, state);
-  }, [imageHeight, imageWidth, projectedCenter, state]);
-
-  const cornerLngLats = useMemo(() => {
+  useEffect(() => {
     const map = mapRef.current;
-    if (!map || cornersPx.length !== 4) return [];
-    return cornersPx.map((corner) => {
-      const ll = map.unproject([corner.x, corner.y]);
-      return [ll.lng, ll.lat];
-    });
-  }, [cornersPx]);
+    if (
+      !map ||
+      !mapLoaded ||
+      !floor?.floor_plan_url ||
+      geoCorners.length === 4
+    )
+      return;
 
-  const rotationHandle = useMemo(() => {
-    if (cornersPx.length !== 4) return null;
-    const topMid = {
-      x: (cornersPx[0].x + cornersPx[1].x) / 2,
-      y: (cornersPx[0].y + cornersPx[1].y) / 2,
-    };
-    return rotate({ x: topMid.x, y: topMid.y - 40 }, topMid, state.rotation);
-  }, [cornersPx, state.rotation]);
+    const seededCorners = legacyStateToGeoCorners(
+      map,
+      imageWidth,
+      imageHeight,
+      stateRef.current,
+    );
+    setCanonicalGeoCorners(seededCorners, { syncState: false });
+  }, [
+    floor?.floor_plan_url,
+    geoCorners.length,
+    imageHeight,
+    imageWidth,
+    mapLoaded,
+  ]);
 
   function beginDrag(kind, event, cornerId = null) {
     event.preventDefault();
+    event.stopPropagation();
+    const map = mapRef.current;
+    if (map && !mapInteractionStateRef.current) {
+      mapInteractionStateRef.current = setMapInteractionsEnabled(map, false);
+    }
     dragRef.current = {
       kind,
       cornerId,
       startClient: { x: event.clientX, y: event.clientY },
-      startState: { ...state },
+      startMapPoint: clientToMapPoint(event.clientX, event.clientY),
+      startGeoCorners: geoCornersRef.current,
+      startView: overlayViewRef.current,
     };
   }
 
   useEffect(() => {
+    function finishDrag() {
+      const map = mapRef.current;
+      if (map && mapInteractionStateRef.current) {
+        setMapInteractionsEnabled(map, true, mapInteractionStateRef.current);
+      }
+      mapInteractionStateRef.current = null;
+      dragRef.current = null;
+    }
+
     function onMove(event) {
       const map = mapRef.current;
-      if (
-        !map ||
-        !dragRef.current ||
-        !projectedCenter ||
-        cornersPx.length !== 4
-      )
-        return;
-      event.preventDefault();
-
       const drag = dragRef.current;
-      const currentClient = { x: event.clientX, y: event.clientY };
-      const dx = currentClient.x - drag.startClient.x;
-      const dy = currentClient.y - drag.startClient.y;
+      const startGeoCorners = normalizeGeoCorners(drag?.startGeoCorners);
+      const startView = drag?.startView;
+      if (!map || !drag || startGeoCorners.length !== 4 || !startView) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const currentMapPoint = clientToMapPoint(event.clientX, event.clientY);
+      const startMapPoint =
+        drag.startMapPoint ||
+        clientToMapPoint(drag.startClient.x, drag.startClient.y);
+      const dx = currentMapPoint.x - startMapPoint.x;
+      const dy = currentMapPoint.y - startMapPoint.y;
 
       if (drag.kind === "center") {
-        const from = map.unproject([projectedCenter.x, projectedCenter.y]);
-        const to = map.unproject([
-          projectedCenter.x + dx,
-          projectedCenter.y + dy,
-        ]);
-        setState((current) => ({
-          ...current,
-          centerLat: current.centerLat + (to.lat - from.lat),
-          centerLng: current.centerLng + (to.lng - from.lng),
-        }));
-        dragRef.current.startClient = currentClient;
+        const translatedCorners = startGeoCorners.map((corner) => {
+          const startPoint = map.project([corner.lng, corner.lat]);
+          const lngLat = map.unproject([startPoint.x + dx, startPoint.y + dy]);
+          return { ...corner, lat: lngLat.lat, lng: lngLat.lng };
+        });
+        setCanonicalGeoCorners(translatedCorners);
         return;
       }
 
       if (drag.kind === "rotation") {
         const startAngle = Math.atan2(
-          drag.startClient.y - projectedCenter.y,
-          drag.startClient.x - projectedCenter.x,
+          startMapPoint.y - startView.center.y,
+          startMapPoint.x - startView.center.x,
         );
         const currentAngle = Math.atan2(
-          currentClient.y - projectedCenter.y,
-          currentClient.x - projectedCenter.x,
+          currentMapPoint.y - startView.center.y,
+          currentMapPoint.x - startView.center.x,
         );
         const delta = ((currentAngle - startAngle) * 180) / Math.PI;
-        setState((current) => ({
-          ...current,
-          rotation: drag.startState.rotation + delta,
-        }));
+        const rotatedCorners = startView.corners.map((corner, index) => {
+          const rotated = rotate(corner, startView.center, delta);
+          const lngLat = map.unproject([rotated.x, rotated.y]);
+          return {
+            id: CORNER_IDS[index],
+            lat: lngLat.lat,
+            lng: lngLat.lng,
+          };
+        });
+        setCanonicalGeoCorners(rotatedCorners);
         return;
       }
 
       if (drag.kind === "corner") {
-        const cornerIndex = ["tl", "tr", "br", "bl"].indexOf(drag.cornerId);
+        const cornerIndex = CORNER_IDS.indexOf(drag.cornerId);
         if (cornerIndex < 0) return;
-        const opposite = cornersPx[(cornerIndex + 2) % 4];
-        const current = { x: currentClient.x, y: currentClient.y };
+        const opposite = startView.corners[(cornerIndex + 2) % 4];
         const midpoint = {
-          x: (current.x + opposite.x) / 2,
-          y: (current.y + opposite.y) / 2,
+          x: (currentMapPoint.x + opposite.x) / 2,
+          y: (currentMapPoint.y + opposite.y) / 2,
         };
-        const unrotated = rotate(current, midpoint, -state.rotation);
-        const halfW = Math.abs(unrotated.x - midpoint.x);
-        const halfH = Math.abs(unrotated.y - midpoint.y);
-
-        const centerLngLat = map.unproject([midpoint.x, midpoint.y]);
-        setState((prev) => ({
-          ...prev,
-          centerLat: centerLngLat.lat,
-          centerLng: centerLngLat.lng,
-          scaleX: Math.max(0.05, (halfW * 2) / imageWidth),
-          scaleY: Math.max(0.05, (halfH * 2) / imageHeight),
-        }));
+        const unrotated = rotate(currentMapPoint, midpoint, -startView.rotation);
+        const halfWidth = Math.abs(unrotated.x - midpoint.x);
+        const halfHeight = Math.abs(unrotated.y - midpoint.y);
+        const resizedPoints = [
+          { x: midpoint.x - halfWidth, y: midpoint.y - halfHeight },
+          { x: midpoint.x + halfWidth, y: midpoint.y - halfHeight },
+          { x: midpoint.x + halfWidth, y: midpoint.y + halfHeight },
+          { x: midpoint.x - halfWidth, y: midpoint.y + halfHeight },
+        ].map((point) => rotate(point, midpoint, startView.rotation));
+        const resizedCorners = resizedPoints.map((point, index) => {
+          const lngLat = map.unproject([point.x, point.y]);
+          return {
+            id: CORNER_IDS[index],
+            lat: lngLat.lat,
+            lng: lngLat.lng,
+          };
+        });
+        setCanonicalGeoCorners(resizedCorners, { syncState: false });
       }
     }
 
-    function onUp() {
-      dragRef.current = null;
-    }
-
     window.addEventListener("pointermove", onMove, { passive: false });
-    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointerup", finishDrag);
+    window.addEventListener("pointercancel", finishDrag);
     return () => {
       window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointerup", finishDrag);
+      window.removeEventListener("pointercancel", finishDrag);
     };
-  }, [cornersPx, imageHeight, imageWidth, projectedCenter, state]);
+  }, []);
+
+  function moveGeoCornersToCenter(lat, lng) {
+    const map = mapRef.current;
+    const currentCorners = normalizeGeoCorners(geoCornersRef.current);
+    const currentView = overlayViewRef.current || projectOverlayNow();
+    if (!map || currentCorners.length !== 4 || !currentView) return false;
+
+    const target = map.project([lng, lat]);
+    const dx = target.x - currentView.center.x;
+    const dy = target.y - currentView.center.y;
+    const translatedCorners = currentCorners.map((corner) => {
+      const point = map.project([corner.lng, corner.lat]);
+      const lngLat = map.unproject([point.x + dx, point.y + dy]);
+      return { ...corner, lat: lngLat.lat, lng: lngLat.lng };
+    });
+    setCanonicalGeoCorners(translatedCorners);
+    return true;
+  }
 
   function searchAddress() {
     const map = mapRef.current;
@@ -473,7 +821,13 @@ export default function AdminFloorGeoreference() {
         const lat = Number(top.lat);
         const lng = Number(top.lon);
         map.flyTo({ center: [lng, lat], zoom: 18, duration: 800 });
-        setState((current) => ({ ...current, centerLat: lat, centerLng: lng }));
+        if (!moveGeoCornersToCenter(lat, lng)) {
+          setState((current) => ({
+            ...current,
+            centerLat: lat,
+            centerLng: lng,
+          }));
+        }
       })
       .catch(() => toast.error("Geocoding failed."));
   }
@@ -484,10 +838,11 @@ export default function AdminFloorGeoreference() {
     if (!img) return;
 
     const rect = img.getBoundingClientRect();
+    const view = overlayViewRef.current;
     const cx = rect.left + rect.width / 2;
     const cy = rect.top + rect.height / 2;
     const local = { x: event.clientX - cx, y: event.clientY - cy };
-    const unrot = rotate(local, { x: 0, y: 0 }, -state.rotation);
+    const unrot = rotate(local, { x: 0, y: 0 }, -(view?.rotation || 0));
     const u = 0.5 + unrot.x / rect.width;
     const v = 0.5 + unrot.y / rect.height;
     if (u < 0 || u > 1 || v < 0 || v > 1) return;
@@ -521,55 +876,14 @@ export default function AdminFloorGeoreference() {
     const map = mapRef.current;
     if (!map) return;
 
-    const projected = corners.map((corner) =>
-      map.project([corner.lng, corner.lat]),
+    setCanonicalGeoCorners(
+      corners.map((corner, index) => ({
+        id: CORNER_IDS[index],
+        lat: corner.lat,
+        lng: corner.lng,
+      })),
     );
-    const widthPx = Math.hypot(
-      projected[1].x - projected[0].x,
-      projected[1].y - projected[0].y,
-    );
-    const heightPx = Math.hypot(
-      projected[3].x - projected[0].x,
-      projected[3].y - projected[0].y,
-    );
-    const angle =
-      (Math.atan2(
-        projected[1].y - projected[0].y,
-        projected[1].x - projected[0].x,
-      ) *
-        180) /
-      Math.PI;
-
-    const centerLat = corners.reduce((sum, corner) => sum + corner.lat, 0) / 4;
-    const centerLng = corners.reduce((sum, corner) => sum + corner.lng, 0) / 4;
-
-    setState((current) => ({
-      ...current,
-      centerLat,
-      centerLng,
-      rotation: angle,
-      scaleX: Math.max(0.05, widthPx / imageWidth),
-      scaleY: Math.max(0.05, heightPx / imageHeight),
-    }));
     toast.success("Affine pin transform applied.");
-  }
-
-  function currentCornerLngLats() {
-    const map = mapRef.current;
-    if (!map || !projectedCenter) return [];
-
-    const corners = cornersFromState(
-      projectedCenter,
-      imageWidth,
-      imageHeight,
-      state,
-    );
-    if (corners.length !== 4) return [];
-
-    return corners.map((corner) => {
-      const ll = map.unproject([corner.x, corner.y]);
-      return [ll.lng, ll.lat];
-    });
   }
 
   async function completeWorldPosition() {
@@ -583,8 +897,16 @@ export default function AdminFloorGeoreference() {
       return;
     }
 
-    const resolvedCorners =
-      cornerLngLats.length === 4 ? cornerLngLats : currentCornerLngLats();
+    const resolvedGeoCorners =
+      normalizeGeoCorners(geoCornersRef.current).length === 4
+        ? normalizeGeoCorners(geoCornersRef.current)
+        : legacyStateToGeoCorners(
+            mapRef.current,
+            imageWidth,
+            imageHeight,
+            stateRef.current,
+          );
+    const resolvedCorners = geoCornersToLngLats(resolvedGeoCorners);
 
     if (!floor || resolvedCorners.length !== 4) {
       toast.error("Overlay corners are not ready.");
@@ -604,16 +926,20 @@ export default function AdminFloorGeoreference() {
       return;
     }
 
+    const saveView = overlayViewFromGeoCorners(mapRef.current, resolvedGeoCorners);
+    const saveState =
+      deriveOverlayState(resolvedGeoCorners, saveView) || stateRef.current;
+
     setSaving(true);
     try {
       await api.maps.saveGeoreference({
         floor_id: floor.id,
-        anchorLat: state.centerLat,
-        anchorLng: state.centerLng,
-        rotation: state.rotation,
-        scaleX: state.scaleX,
-        scaleY: state.scaleY,
-        opacity: state.opacity,
+        anchorLat: saveState.centerLat,
+        anchorLng: saveState.centerLng,
+        rotation: saveState.rotation,
+        scaleX: saveState.scaleX,
+        scaleY: saveState.scaleY,
+        opacity: stateRef.current.opacity,
         level,
         corners: [
           {
@@ -667,7 +993,7 @@ export default function AdminFloorGeoreference() {
       const p = map.project([pair.geo.lng, pair.geo.lat]);
       return { ...pair, x: p.x, y: p.y };
     });
-  }, [pairs, state.centerLat, state.centerLng, projectedCenter]);
+  }, [overlayView, pairs]);
 
   return (
     <div className="relative h-screen w-full overflow-hidden bg-bg">
@@ -706,8 +1032,8 @@ export default function AdminFloorGeoreference() {
         </div>
       )}
 
-      {projectedCenter && floor?.floor_plan_url && (
-        <>
+      {overlayView && floor?.floor_plan_url && (
+        <div className="pointer-events-none absolute inset-0 z-[620]">
           <img
             ref={imageRef}
             src={floor.floor_plan_url}
@@ -715,15 +1041,10 @@ export default function AdminFloorGeoreference() {
             className="absolute z-[620] select-none"
             onClick={onImagePinClick}
             style={{
-              left: projectedCenter.x,
-              top: projectedCenter.y,
-              width: overlayPixelWidth,
-              height: overlayPixelHeight,
-              opacity: state.opacity,
-              transform: `translate(-50%, -50%) rotate(${state.rotation}deg)`,
               transformOrigin: "center center",
-              pointerEvents: "auto",
+              pointerEvents: pinMode ? "auto" : "none",
               userSelect: "none",
+              willChange: "transform, left, top, width, height, opacity",
             }}
           />
 
@@ -732,54 +1053,74 @@ export default function AdminFloorGeoreference() {
             width="100%"
             height="100%"
           >
-            {cornersPx.length === 4 && rotationHandle && (
-              <line
-                x1={(cornersPx[0].x + cornersPx[1].x) / 2}
-                y1={(cornersPx[0].y + cornersPx[1].y) / 2}
-                x2={rotationHandle.x}
-                y2={rotationHandle.y}
-                stroke="#2563eb"
-                strokeWidth="2"
-              />
-            )}
+            <line
+              ref={rotationLineRef}
+              x1="0"
+              y1="0"
+              x2="0"
+              y2="0"
+              stroke="#2563eb"
+              strokeWidth="2"
+            />
           </svg>
 
-          {cornersPx.map((corner) => (
+          {CORNER_IDS.map((cornerId, index) => (
             <button
-              key={corner.id}
+              key={cornerId}
+              ref={(el) => {
+                cornerHandleRefs.current[index] = el;
+              }}
               type="button"
               className="absolute z-[650] h-3 w-3 bg-blue-600"
-              style={{ left: corner.x - 6, top: corner.y - 6 }}
-              onPointerDown={(event) => beginDrag("corner", event, corner.id)}
+              style={{
+                left: 0,
+                top: 0,
+                pointerEvents: "auto",
+                transform: "translate(-50%, -50%)",
+              }}
+              onPointerDown={(event) => beginDrag("corner", event, cornerId)}
             />
           ))}
 
-          {rotationHandle && (
-            <button
-              type="button"
-              className="absolute z-[650] h-3 w-3 rounded-full border border-blue-600 bg-white"
-              style={{ left: rotationHandle.x - 6, top: rotationHandle.y - 6 }}
-              onPointerDown={(event) => beginDrag("rotation", event)}
-            />
-          )}
+          <button
+            ref={rotationHandleRef}
+            type="button"
+            className="absolute z-[650] h-3 w-3 rounded-full border border-blue-600 bg-white"
+            style={{
+              left: 0,
+              top: 0,
+              pointerEvents: "auto",
+              transform: "translate(-50%, -50%)",
+            }}
+            onPointerDown={(event) => beginDrag("rotation", event)}
+          />
 
           <button
+            ref={centerHandleRef}
             type="button"
             className="absolute z-[650] h-4 w-4 rounded-full bg-blue-600"
-            style={{ left: projectedCenter.x - 8, top: projectedCenter.y - 8 }}
+            style={{
+              left: 0,
+              top: 0,
+              pointerEvents: "auto",
+              transform: "translate(-50%, -50%)",
+            }}
             onPointerDown={(event) => beginDrag("center", event)}
           />
 
-          {projectedPins.map((pair, index) => (
-            <div
-              key={pair.id}
-              className="absolute z-[660] flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-[9px] font-semibold text-white"
-              style={{ left: pair.x - 8, top: pair.y - 8 }}
-            >
-              {index + 1}
-            </div>
-          ))}
-        </>
+          {projectedPins.map((pair, index) => {
+            const point = mapPointToOverlayPoint(pair.x, pair.y);
+            return (
+              <div
+                key={pair.id}
+                className="absolute z-[660] flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-[9px] font-semibold text-white"
+                style={{ left: point.x - 8, top: point.y - 8 }}
+              >
+                {index + 1}
+              </div>
+            );
+          })}
+        </div>
       )}
 
       <div className="absolute bottom-5 left-1/2 z-[700] w-[min(920px,94vw)] -translate-x-1/2 rounded-2xl bg-white/95 p-4 shadow-lg backdrop-blur">
