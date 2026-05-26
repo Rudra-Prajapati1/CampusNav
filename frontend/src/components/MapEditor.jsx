@@ -1243,6 +1243,7 @@ const MapEditor = forwardRef(function MapEditor(
   const mvfRef = useRef(null);
   const scaleRef = useRef(1);
   const positionRef = useRef({ x: 40, y: 40 });
+  const previewToastReadyRef = useRef(false);
 
   const [mvf, setMvf] = useState(() => buildMvfFromFloor(floorData));
   const [tool, setTool] = useState("select");
@@ -1318,6 +1319,19 @@ const MapEditor = forwardRef(function MapEditor(
       setPathDraft(null);
       setContextMenu(null);
       setFrontPlacement(null);
+    }
+
+    if (previewToastReadyRef.current) {
+      if (previewMode) {
+        toast("Preview mode on — switch off preview to edit", {
+          icon: "👁️",
+          duration: 3000,
+        });
+      } else {
+        toast.success("Back to edit mode");
+      }
+    } else {
+      previewToastReadyRef.current = true;
     }
   }, [previewMode]);
 
@@ -2140,526 +2154,624 @@ const MapEditor = forwardRef(function MapEditor(
   };
 
   const autoGenerateWaypoints = () => {
-    const missingDoorRooms = new Set();
-    const missingFrontRooms = new Set();
-    const disconnectedRooms = new Set();
+    const source = mvfRef.current;
+    const rooms = source.spaces.features;
+    const existingWaypoints = source.nodes.features;
+    const newWaypoints = [];
+    const newConnections = [];
 
-    updateMvf((next) => {
-      const candidateMap = new Map();
-      const roomMap = new Map(
-        next.spaces.features.map((feature) => [feature.id, feature]),
-      );
-      const corridorSpaces = next.spaces.features.filter(
-        (feature) => normalizeRoomKind(feature) === "corridor",
-      );
-      const blockedSpaces = next.spaces.features.filter(
-        (feature) => normalizeRoomKind(feature) !== "corridor",
-      );
-      const corridorPolygons = corridorSpaces
-        .map((feature) => roomPolygon(feature))
-        .filter((polygon) => polygon.length >= 3);
-      const blockedPolygons = blockedSpaces
-        .map((feature) => roomPolygon(feature))
-        .filter((polygon) => polygon.length >= 3);
-      const wallSegments = wallSegmentsFromFeatures(next.obstructions.features);
-      const doorPointsByRoom = new Map();
+    const waypointId = (feature) =>
+      feature?.id == null ? "" : String(feature.id);
 
-      next.openings.features.forEach((feature) => {
-        if (feature.properties?.kind !== "door") return;
-        const placement = resolveDoorPlacement(feature, roomMap);
-        let roomId = placement.roomId;
-        if (!roomId) {
-          const nearest = findNearestRoomWall(
-            placement.point,
-            next.spaces.features,
-            Number.POSITIVE_INFINITY,
-          );
-          roomId = nearest?.roomId;
-        }
-        if (!roomId) return;
-        const points = doorPointsByRoom.get(roomId) || [];
-        points.push(placement.point);
-        doorPointsByRoom.set(roomId, points);
-      });
+    const waypointPoint = (feature) =>
+      toPointFromCoords(feature?.geometry?.coordinates);
 
-      const findCorridorSpaceId = (point) => {
-        const corridor = corridorSpaces.find((space) => {
-          const polygon = roomPolygon(space);
-          return (
-            polygon.length >= 3 &&
-            (pointStrictlyInsidePolygon(point, polygon) ||
-              pointOnPolygonEdge(point, polygon))
-          );
-        });
-        return corridor?.id || null;
-      };
+    const waypointSpaceId = (feature) =>
+      feature?.properties?.spaceId ||
+      feature?.properties?.space_id ||
+      feature?.properties?.room_id ||
+      null;
 
-      const uniquePoints = (points) => {
-        const seen = new Set();
-        return points.filter((point) => {
-          const key = `${Math.round(point.x)}:${Math.round(point.y)}`;
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-      };
-
-      const addCandidate = ({
-        point,
-        type = "corridor",
-        name = "",
-        spaceId = null,
-        priority = 0,
-        isAnchor = false,
-        roomName = "",
-      }) => {
-        if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) return;
-        if (
-          blockedPolygons.some((polygon) =>
-            pointStrictlyInsidePolygon(point, polygon),
-          )
-        ) {
-          return;
-        }
-
-        const key = pointKey(point);
-        const existing = candidateMap.get(key);
-        const nextSpaceId = spaceId || findCorridorSpaceId(point) || null;
-
-        if (existing) {
-          if (priority > existing.priority) {
-            existing.type = type;
-            existing.name = name;
-            existing.spaceId = nextSpaceId;
-            existing.priority = priority;
-            existing.isAnchor = isAnchor;
-            existing.roomName = roomName || existing.roomName;
-          } else if (!existing.spaceId && nextSpaceId) {
-            existing.spaceId = nextSpaceId;
-          }
-          return;
-        }
-
-        candidateMap.set(key, {
-          id: uuidv4(),
-          point: { x: point.x, y: point.y },
-          type,
-          name,
-          spaceId: nextSpaceId,
-          priority,
-          isAnchor,
-          roomName,
-        });
-      };
-
-      const addAnchorWaypoint = ({
-        point,
-        type,
-        name,
-        spaceId,
-        roomFeature,
-        roomName,
-      }) => {
-        addCandidate({
-          point,
-          type,
-          name,
-          spaceId,
-          priority: 5,
-          isAnchor: true,
-          roomName,
-        });
-
-        const polygon = roomPolygon(roomFeature);
-        if (polygon.length < 3) return;
-        const helper = movePointAwayFrom(
-          point,
-          polygonCenter(polygon),
-          AUTO_ROUTE_CORNER_OFFSET,
-        );
-        addCandidate({
-          point: helper,
-          type: "corridor",
-          name: "",
-          spaceId: findCorridorSpaceId(helper),
-          priority: 1,
-          roomName,
-        });
-      };
-
-      const addCorridorGuides = (space) => {
-        const polygon = roomPolygon(space);
-        if (polygon.length < 3) return;
-        const center = polygonCenter(polygon);
-
-        addCandidate({
-          point: center,
-          type: "corridor",
-          name: String(space.properties?.name || "Corridor"),
-          spaceId: space.id,
-          priority: 3,
-        });
-
-        polygon.forEach((vertex, index) => {
-          const nextVertex = polygon[(index + 1) % polygon.length];
-          addCandidate({
-            point: movePointTowards(
-              vertex,
-              center,
-              AUTO_ROUTE_CORNER_OFFSET * 0.7,
-            ),
-            type: "corridor",
-            name: "",
-            spaceId: space.id,
-            priority: 1,
-          });
-          addCandidate({
-            point: movePointTowards(
-              midpoint(vertex, nextVertex),
-              center,
-              AUTO_ROUTE_CORNER_OFFSET * 0.4,
-            ),
-            type: "corridor",
-            name: "",
-            spaceId: space.id,
-            priority: 1,
-          });
-        });
-      };
-
-      const addBlockedRoomDetours = (space) => {
-        const polygon = roomPolygon(space);
-        if (polygon.length < 3) return;
-        const center = polygonCenter(polygon);
-
-        polygon.forEach((vertex) => {
-          const detour = movePointAwayFrom(
-            vertex,
-            center,
-            AUTO_ROUTE_CORNER_OFFSET,
-          );
-          addCandidate({
-            point: detour,
-            type: "corridor",
-            name: "",
-            spaceId: findCorridorSpaceId(detour),
-            priority: 1,
-          });
-        });
-      };
-
-      wallSegments.forEach((segment) => {
-        const dx = segment.end.x - segment.start.x;
-        const dy = segment.end.y - segment.start.y;
-        const length = Math.hypot(dx, dy);
-        const normal =
-          length > 0.0001
-            ? {
-                x: (-dy / length) * AUTO_ROUTE_CORNER_OFFSET,
-                y: (dx / length) * AUTO_ROUTE_CORNER_OFFSET,
-              }
-            : null;
-
-        [segment.start, segment.end].forEach((endpoint) => {
-          addCandidate({
-            point: endpoint,
-            type: "corridor",
-            name: "",
-            spaceId: findCorridorSpaceId(endpoint),
-            priority: 1,
-          });
-          if (!normal) return;
-          addCandidate({
-            point: {
-              x: endpoint.x + normal.x,
-              y: endpoint.y + normal.y,
-            },
-            type: "corridor",
-            name: "",
-            spaceId: findCorridorSpaceId({
-              x: endpoint.x + normal.x,
-              y: endpoint.y + normal.y,
-            }),
-            priority: 1,
-          });
-          addCandidate({
-            point: {
-              x: endpoint.x - normal.x,
-              y: endpoint.y - normal.y,
-            },
-            type: "corridor",
-            name: "",
-            spaceId: findCorridorSpaceId({
-              x: endpoint.x - normal.x,
-              y: endpoint.y - normal.y,
-            }),
-            priority: 1,
-          });
-        });
-      });
-
-      next.spaces.features.forEach((space) => {
-        const kind = normalizeRoomKind(space);
-        const roomName =
-          String(space.properties?.name || "Room").trim() || "Room";
-        const doorPoints = uniquePoints(doorPointsByRoom.get(space.id) || []);
-
-        if (kind === "corridor") {
-          addCorridorGuides(space);
-          return;
-        }
-
-        if (doorPoints.length > 0) {
-          doorPoints.forEach((point, index) => {
-            addAnchorWaypoint({
-              point,
-              type: "room_center",
-              name: `${roomName} Entry ${index + 1}`,
-              spaceId: space.id,
-              roomFeature: space,
-              roomName,
-            });
-          });
-        } else if (FRONT_ROOM_TYPES.has(kind)) {
-          const front = resolveRoomFront(space);
-          if (front) {
-            const waypointType = FRONT_TYPE_TO_WAYPOINT_TYPE[kind] || kind;
-            addAnchorWaypoint({
-              point: front,
-              type: waypointType,
-              name: `${roomName} Front`,
-              spaceId: space.id,
-              roomFeature: space,
-              roomName,
-            });
-          } else {
-            missingFrontRooms.add(roomName);
-          }
-        } else {
-          missingDoorRooms.add(roomName);
-        }
-
-        addBlockedRoomDetours(space);
-      });
-
-      const candidates = Array.from(candidateMap.values());
-      const allEdges = [];
-
-      for (let index = 0; index < candidates.length; index += 1) {
-        const source = candidates[index];
-        for (
-          let targetIndex = index + 1;
-          targetIndex < candidates.length;
-          targetIndex += 1
-        ) {
-          const target = candidates[targetIndex];
-          const distance = distanceBetween(source.point, target.point);
-          if (distance <= 2) continue;
-          if (segmentCrossesWall(source.point, target.point, wallSegments))
-            continue;
-          if (
-            segmentPassesBlockedSpace(
-              source.point,
-              target.point,
-              blockedPolygons,
-            )
-          ) {
-            continue;
-          }
-
-          const weight = Math.max(
-            1,
-            Math.round(
-              distance *
-                segmentCorridorPenalty(
-                  source.point,
-                  target.point,
-                  corridorPolygons,
-                ),
-            ),
-          );
-
-          allEdges.push({
-            key: edgeKey(source.id, target.id),
-            from: source.id,
-            to: target.id,
-            weight,
-          });
-        }
-      }
-
-      const adjacency = buildAdjacencyMap(allEdges);
-      const anchorCandidates = candidates.filter(
-        (candidate) => candidate.isAnchor,
-      );
-      const anchorIds = new Set(
-        anchorCandidates.map((candidate) => candidate.id),
-      );
-      const finalEdgeKeys = new Set();
-      const components = [];
-      const remainingAnchorIds = anchorCandidates.map(
-        (candidate) => candidate.id,
-      );
-
-      while (remainingAnchorIds.length > 0) {
-        const componentNodeIds = new Set([remainingAnchorIds[0]]);
-        const componentAnchorIds = new Set([remainingAnchorIds[0]]);
-        const componentEdgeKeys = new Set();
-
-        while (true) {
-          let bestPath = null;
-
-          anchorCandidates.forEach((candidate) => {
-            if (componentAnchorIds.has(candidate.id)) return;
-            const path = shortestPathToTargets(
-              candidate.id,
-              componentNodeIds,
-              adjacency,
-            );
-            if (!path) return;
-            if (!bestPath || path.distance < bestPath.distance) {
-              bestPath = {
-                anchorId: candidate.id,
-                distance: path.distance,
-                pathIds: path.pathIds,
+    const roomInfos = rooms
+      .map((feature) => {
+        const polygon = roomPolygon(feature);
+        const bounds = polygonBounds(polygon);
+        const center =
+          polygon.length >= 3
+            ? polygonCenter(polygon)
+            : {
+                x: bounds.x + bounds.width / 2,
+                y: bounds.y + bounds.height / 2,
               };
-            }
-          });
 
-          if (!bestPath) break;
-
-          bestPath.pathIds.forEach((id) => {
-            componentNodeIds.add(id);
-            if (anchorIds.has(id)) componentAnchorIds.add(id);
-          });
-
-          for (let index = 0; index < bestPath.pathIds.length - 1; index += 1) {
-            componentEdgeKeys.add(
-              edgeKey(bestPath.pathIds[index], bestPath.pathIds[index + 1]),
-            );
-          }
-        }
-
-        components.push({
-          nodeIds: componentNodeIds,
-          anchorIds: componentAnchorIds,
-          edgeKeys: componentEdgeKeys,
-        });
-
-        for (
-          let index = remainingAnchorIds.length - 1;
-          index >= 0;
-          index -= 1
-        ) {
-          if (componentAnchorIds.has(remainingAnchorIds[index])) {
-            remainingAnchorIds.splice(index, 1);
-          }
-        }
-      }
-
-      components.forEach((component) => {
-        component.edgeKeys.forEach((key) => finalEdgeKeys.add(key));
-      });
-
-      const finalEdges = allEdges.filter((edge) => finalEdgeKeys.has(edge.key));
-      const primaryComponent =
-        components
-          .slice()
-          .sort((a, b) => b.anchorIds.size - a.anchorIds.size)[0] || null;
-
-      if (
-        anchorCandidates.length > 1 &&
-        primaryComponent &&
-        components.length > 1
-      ) {
-        anchorCandidates.forEach((candidate) => {
-          if (!primaryComponent.anchorIds.has(candidate.id)) {
-            disconnectedRooms.add(
-              candidate.roomName || candidate.name || "Room",
-            );
-          }
-        });
-      }
-
-      const nodeMap = new Map();
-      const ensureNode = (candidate) => {
-        if (nodeMap.has(candidate.id)) return nodeMap.get(candidate.id);
-        const node = {
-          type: "Feature",
-          id: candidate.id,
-          properties: {
-            kind: "waypoint",
-            type: candidate.type,
-            name: candidate.name,
-            spaceId: candidate.spaceId,
-            neighbors: [],
-            autoGenerated: true,
-            generatedSupport: !candidate.isAnchor,
-          },
-          geometry: {
-            type: "Point",
-            coordinates: [candidate.point.x, candidate.point.y],
-          },
+        return {
+          feature,
+          id: feature.id == null ? "" : String(feature.id),
+          polygon,
+          bounds,
+          center,
+          name: String(feature.properties?.name || "Room").trim() || "Room",
         };
-        nodeMap.set(candidate.id, node);
-        return node;
-      };
+      })
+      .filter((info) => info.id);
 
-      const candidateById = new Map(
-        candidates.map((candidate) => [candidate.id, candidate]),
+    const roomInfoById = new Map(
+      roomInfos.map((info) => [info.id, info]),
+    );
+    const roomMap = new Map(rooms.map((feature) => [feature.id, feature]));
+
+    const roomContainsPoint = (info, point) => {
+      if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) {
+        return false;
+      }
+      if (info.polygon.length >= 3) {
+        return pointInsideAnyPolygon(point, [info.polygon]);
+      }
+      return (
+        point.x >= info.bounds.x &&
+        point.x <= info.bounds.x + info.bounds.width &&
+        point.y >= info.bounds.y &&
+        point.y <= info.bounds.y + info.bounds.height
       );
-      anchorCandidates.forEach((candidate) => {
-        ensureNode(candidate);
-      });
-      finalEdges.forEach((edge) => {
-        const source = candidateById.get(edge.from);
-        const target = candidateById.get(edge.to);
-        if (!source || !target) return;
-
-        const sourceNode = ensureNode(source);
-        const targetNode = ensureNode(target);
-
-        sourceNode.properties.neighbors.push({
-          id: target.id,
-          weight: edge.weight,
-        });
-        targetNode.properties.neighbors.push({
-          id: source.id,
-          weight: edge.weight,
-        });
-      });
-
-      next.nodes.features = Array.from(nodeMap.values());
-    });
-
-    const summarizeRooms = (rooms) => {
-      const list = Array.from(rooms).filter(Boolean);
-      if (list.length <= 4) return list.join(", ");
-      return `${list.slice(0, 4).join(", ")} +${list.length - 4} more`;
     };
 
-    const hasDoorWarnings = missingDoorRooms.size > 0;
-    const hasFrontWarnings = missingFrontRooms.size > 0;
-    const hasConnectivityWarnings = disconnectedRooms.size > 0;
+    const inferWaypointRoomIds = (feature) => {
+      const ids = new Set();
+      const explicitSpaceId = waypointSpaceId(feature);
+      if (explicitSpaceId) ids.add(String(explicitSpaceId));
 
-    if (!hasDoorWarnings && !hasFrontWarnings && !hasConnectivityWarnings) {
-      toast.success("Waypoints generated.");
-      return;
-    }
+      const point = waypointPoint(feature);
+      roomInfos.forEach((info) => {
+        if (roomContainsPoint(info, point)) ids.add(info.id);
+      });
+      return ids;
+    };
 
-    toast.success("Waypoints generated with warnings.");
+    const allWaypoints = [...existingWaypoints];
+    const waypointRoomIds = new Map();
 
-    if (hasDoorWarnings) {
-      toast(`No doors detected for: ${summarizeRooms(missingDoorRooms)}`);
-    }
-    if (hasFrontWarnings) {
-      toast(`Set a front point for: ${summarizeRooms(missingFrontRooms)}`);
-    }
-    if (hasConnectivityWarnings) {
-      toast(
-        `No walkable path detected for: ${summarizeRooms(disconnectedRooms)}`,
+    const registerWaypoint = (feature) => {
+      const id = waypointId(feature);
+      if (!id) return;
+      waypointRoomIds.set(id, inferWaypointRoomIds(feature));
+    };
+
+    existingWaypoints.forEach(registerWaypoint);
+
+    const existingWaypointIds = new Set(
+      existingWaypoints.map(waypointId).filter(Boolean),
+    );
+    const existingConnections = dedupeEdges(existingWaypoints).filter(
+      (edge) =>
+        existingWaypointIds.has(String(edge.from)) &&
+        existingWaypointIds.has(String(edge.to)),
+    );
+    const connectionKeys = new Set();
+    const degreeById = new Map(
+      existingWaypoints
+        .map((feature) => [waypointId(feature), 0])
+        .filter(([id]) => id),
+    );
+
+    existingConnections.forEach((edge) => {
+      const from = String(edge.from);
+      const to = String(edge.to);
+      connectionKeys.add(edgeKey(from, to));
+      degreeById.set(from, (degreeById.get(from) || 0) + 1);
+      degreeById.set(to, (degreeById.get(to) || 0) + 1);
+    });
+
+    const addWaypointFeature = ({ point, type, name, spaceId }) => {
+      if (!Number.isFinite(point?.x) || !Number.isFinite(point?.y)) {
+        return null;
+      }
+
+      const feature = {
+        type: "Feature",
+        id: uuidv4(),
+        properties: {
+          kind: "waypoint",
+          type,
+          name:
+            name ||
+            `Waypoint ${existingWaypoints.length + newWaypoints.length + 1}`,
+          spaceId: spaceId || null,
+          neighbors: [],
+          autoGenerated: true,
+        },
+        geometry: {
+          type: "Point",
+          coordinates: [point.x, point.y],
+        },
+      };
+
+      newWaypoints.push(feature);
+      allWaypoints.push(feature);
+      registerWaypoint(feature);
+      degreeById.set(feature.id, 0);
+      return feature;
+    };
+
+    const findNearbyWaypoint = (
+      point,
+      maxDistance,
+      waypointList = allWaypoints,
+    ) => {
+      let best = null;
+      let bestDistance = Number.POSITIVE_INFINITY;
+
+      waypointList.forEach((feature) => {
+        const id = waypointId(feature);
+        if (!id) return;
+        const distance = distanceBetween(point, waypointPoint(feature));
+        if (distance <= maxDistance && distance < bestDistance) {
+          best = feature;
+          bestDistance = distance;
+        }
+      });
+
+      return best;
+    };
+
+    const findNearestWaypoint = (
+      sourceFeature,
+      predicate,
+      maxDistance = Number.POSITIVE_INFINITY,
+    ) => {
+      const sourceId = waypointId(sourceFeature);
+      const sourcePoint = waypointPoint(sourceFeature);
+      let best = null;
+      let bestDistance = Number.POSITIVE_INFINITY;
+
+      allWaypoints.forEach((candidate) => {
+        const candidateId = waypointId(candidate);
+        if (!candidateId || candidateId === sourceId) return;
+        if (!predicate(candidate)) return;
+
+        const distance = distanceBetween(sourcePoint, waypointPoint(candidate));
+        if (distance <= maxDistance && distance < bestDistance) {
+          best = candidate;
+          bestDistance = distance;
+        }
+      });
+
+      return best;
+    };
+
+    const addConnection = (sourceFeature, targetFeature) => {
+      const from = waypointId(sourceFeature);
+      const to = waypointId(targetFeature);
+      if (!from || !to || from === to) return false;
+
+      const key = edgeKey(from, to);
+      if (connectionKeys.has(key)) return false;
+
+      const weight = Math.max(
+        1,
+        Math.round(
+          distanceBetween(
+            waypointPoint(sourceFeature),
+            waypointPoint(targetFeature),
+          ),
+        ),
       );
+
+      connectionKeys.add(key);
+      newConnections.push({ from, to, weight });
+      degreeById.set(from, (degreeById.get(from) || 0) + 1);
+      degreeById.set(to, (degreeById.get(to) || 0) + 1);
+      return true;
+    };
+
+    const findExistingWaypointForRoom = (info) => {
+      const matches = existingWaypoints.filter((feature) =>
+        waypointRoomIds.get(waypointId(feature))?.has(info.id),
+      );
+      if (!matches.length) return null;
+
+      return matches
+        .map((feature) => {
+          const explicitSpaceId = waypointSpaceId(feature);
+          const priority =
+            (explicitSpaceId && String(explicitSpaceId) === info.id ? 4 : 0) +
+            (feature.properties?.type === "room_center" ? 2 : 0) +
+            (!feature.properties?.autoGenerated ? 1 : 0);
+
+          return {
+            feature,
+            priority,
+            distance: distanceBetween(waypointPoint(feature), info.center),
+          };
+        })
+        .sort(
+          (a, b) => b.priority - a.priority || a.distance - b.distance,
+        )[0].feature;
+    };
+
+    const roomWaypointByRoomId = new Map();
+
+    roomInfos.forEach((info) => {
+      const existingWaypoint = findExistingWaypointForRoom(info);
+      if (existingWaypoint) {
+        roomWaypointByRoomId.set(info.id, existingWaypoint);
+        return;
+      }
+
+      const waypoint = addWaypointFeature({
+        point: info.center,
+        type: "room_center",
+        name: `${info.name} Center`,
+        spaceId: info.feature.id,
+      });
+      if (waypoint) roomWaypointByRoomId.set(info.id, waypoint);
+    });
+
+    const doorThresholdsById = new Map();
+
+    const registerDoorThreshold = (feature, roomId) => {
+      const id = waypointId(feature);
+      if (!id) return;
+
+      let entry = doorThresholdsById.get(id);
+      if (!entry) {
+        entry = { id, feature, roomIds: new Set() };
+        doorThresholdsById.set(id, entry);
+      }
+
+      if (!roomId) return;
+      entry.roomIds.add(roomId);
+    };
+
+    source.openings.features.forEach((feature) => {
+      if (feature.properties?.kind !== "door") return;
+
+      const placement = resolveDoorPlacement(feature, roomMap);
+      const doorCenter = placement.point;
+      let roomId = placement.roomId ? String(placement.roomId) : "";
+      let roomInfo = roomId ? roomInfoById.get(roomId) : null;
+
+      if (!roomInfo) {
+        const nearestRoom = findNearestRoomWall(
+          doorCenter,
+          rooms,
+          Number.POSITIVE_INFINITY,
+        );
+        roomId = nearestRoom?.roomId ? String(nearestRoom.roomId) : "";
+        roomInfo = roomId ? roomInfoById.get(roomId) : null;
+      }
+
+      const generatedThresholds = newWaypoints.filter(
+        (waypoint) => waypoint.properties?.type === "door_threshold",
+      );
+      let thresholdWaypoint =
+        findNearbyWaypoint(doorCenter, 40, existingWaypoints) ||
+        findNearbyWaypoint(doorCenter, 40, generatedThresholds);
+
+      if (!thresholdWaypoint) {
+        thresholdWaypoint = addWaypointFeature({
+          point: roomInfo
+            ? movePointTowards(doorCenter, roomInfo.center, 20)
+            : doorCenter,
+          type: "door_threshold",
+          name: `${roomInfo?.name || placement.roomName || "Door"} Threshold`,
+          spaceId: roomInfo?.feature.id || placement.roomId || null,
+        });
+      }
+
+      if (thresholdWaypoint) {
+        registerDoorThreshold(thresholdWaypoint, roomInfo?.id || roomId || "");
+      }
+    });
+
+    const uniqueWaypoints = () => {
+      const seen = new Set();
+      return allWaypoints.filter((feature) => {
+        const id = waypointId(feature);
+        if (!id || seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+    };
+
+    const hasConnection = (sourceFeature, targetFeature) => {
+      const from = waypointId(sourceFeature);
+      const to = waypointId(targetFeature);
+      return Boolean(from && to && connectionKeys.has(edgeKey(from, to)));
+    };
+
+    const roomCenterIds = new Set(
+      Array.from(roomWaypointByRoomId.values()).map(waypointId).filter(Boolean),
+    );
+    const roomIdsByCenterId = new Map();
+    roomWaypointByRoomId.forEach((feature, roomId) => {
+      const id = waypointId(feature);
+      if (!id) return;
+      const ids = roomIdsByCenterId.get(id) || new Set();
+      ids.add(String(roomId));
+      roomIdsByCenterId.set(id, ids);
+    });
+
+    const doorCorridorRadius = 260;
+
+    const isRoomCenterWaypoint = (feature) =>
+      roomCenterIds.has(waypointId(feature)) ||
+      feature?.properties?.type === "room_center";
+
+    const isDoorWaypoint = (feature) =>
+      doorThresholdsById.has(waypointId(feature)) ||
+      feature?.properties?.type === "door_threshold";
+
+    const isCorridorWaypoint = (feature) =>
+      !isRoomCenterWaypoint(feature) && !isDoorWaypoint(feature);
+
+    const roomIdsForCenter = (feature) =>
+      roomIdsByCenterId.get(waypointId(feature)) ||
+      waypointRoomIds.get(waypointId(feature)) ||
+      new Set();
+
+    const roomIdsForDoor = (feature) =>
+      doorThresholdsById.get(waypointId(feature))?.roomIds || new Set();
+
+    const waypointOutsideRooms = (feature, roomIds) => {
+      const candidateRooms = waypointRoomIds.get(waypointId(feature));
+      return roomIds.every((roomId) => !candidateRooms?.has(String(roomId)));
+    };
+
+    const corridorWaypoints = () =>
+      uniqueWaypoints().filter((feature) => isCorridorWaypoint(feature));
+
+    const addCorridorConnection = (sourceFeature, targetFeature) => {
+      if (hasConnection(sourceFeature, targetFeature)) return false;
+      return addConnection(sourceFeature, targetFeature);
+    };
+
+    const sortedCorridorChain = () => {
+      const remaining = corridorWaypoints()
+        .slice()
+        .sort((a, b) => {
+          const pointA = waypointPoint(a);
+          const pointB = waypointPoint(b);
+          return pointA.x - pointB.x || pointA.y - pointB.y;
+        });
+      if (remaining.length <= 2) return remaining;
+
+      const chain = [remaining.shift()];
+      while (remaining.length > 0) {
+        const current = chain[chain.length - 1];
+        let bestIndex = 0;
+        let bestDistance = Number.POSITIVE_INFINITY;
+
+        remaining.forEach((candidate, index) => {
+          const distance = distanceBetween(
+            waypointPoint(current),
+            waypointPoint(candidate),
+          );
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestIndex = index;
+          }
+        });
+
+        chain.push(remaining.splice(bestIndex, 1)[0]);
+      }
+
+      return chain;
+    };
+
+    const connectCorridorChain = () => {
+      const chain = sortedCorridorChain();
+      for (let index = 0; index < chain.length - 1; index += 1) {
+        addCorridorConnection(chain[index], chain[index + 1]);
+      }
+    };
+
+    const sharesRoom = (aIds, bIds) => {
+      for (const id of aIds) {
+        if (bIds.has(id)) return true;
+      }
+      return false;
+    };
+
+    const canAutoLink = (sourceFeature, targetFeature) => {
+      if (waypointId(sourceFeature) === waypointId(targetFeature)) return false;
+      if (hasConnection(sourceFeature, targetFeature)) return false;
+
+      const sourceRoomCenter = isRoomCenterWaypoint(sourceFeature);
+      const targetRoomCenter = isRoomCenterWaypoint(targetFeature);
+      const sourceDoor = isDoorWaypoint(sourceFeature);
+      const targetDoor = isDoorWaypoint(targetFeature);
+      const sourceCorridor = isCorridorWaypoint(sourceFeature);
+      const targetCorridor = isCorridorWaypoint(targetFeature);
+
+      if (sourceRoomCenter || targetRoomCenter) {
+        if (sourceRoomCenter && targetRoomCenter) return false;
+        const center = sourceRoomCenter ? sourceFeature : targetFeature;
+        const other = sourceRoomCenter ? targetFeature : sourceFeature;
+        if (!isDoorWaypoint(other)) return false;
+        return sharesRoom(roomIdsForCenter(center), roomIdsForDoor(other));
+      }
+
+      if (sourceDoor || targetDoor) {
+        const door = sourceDoor ? sourceFeature : targetFeature;
+        const other = sourceDoor ? targetFeature : sourceFeature;
+        const doorRoomIds = Array.from(roomIdsForDoor(door));
+        if (isCorridorWaypoint(other)) {
+          return waypointOutsideRooms(other, doorRoomIds);
+        }
+        return isDoorWaypoint(other);
+      }
+
+      return sourceCorridor && targetCorridor;
+    };
+
+    const findNearestValidNode = (sourceFeature) =>
+      uniqueWaypoints()
+        .filter((candidate) => canAutoLink(sourceFeature, candidate))
+        .map((candidate) => ({
+          feature: candidate,
+          distance: distanceBetween(
+            waypointPoint(sourceFeature),
+            waypointPoint(candidate),
+          ),
+        }))
+        .sort((a, b) => a.distance - b.distance)[0]?.feature || null;
+
+    const connectedComponents = () => {
+      const waypoints = uniqueWaypoints();
+      const nodeById = new Map(
+        waypoints.map((feature) => [waypointId(feature), feature]),
+      );
+      const adjacency = new Map(
+        waypoints.map((feature) => [waypointId(feature), new Set()]),
+      );
+
+      connectionKeys.forEach((key) => {
+        const [from, to] = key.split(":");
+        if (!adjacency.has(from) || !adjacency.has(to)) return;
+        adjacency.get(from).add(to);
+        adjacency.get(to).add(from);
+      });
+
+      const visited = new Set();
+      const components = [];
+
+      waypoints.forEach((feature) => {
+        const id = waypointId(feature);
+        if (!id || visited.has(id)) return;
+
+        const component = [];
+        const stack = [id];
+        visited.add(id);
+
+        while (stack.length > 0) {
+          const currentId = stack.pop();
+          const current = nodeById.get(currentId);
+          if (current) component.push(current);
+
+          adjacency.get(currentId)?.forEach((neighborId) => {
+            if (visited.has(neighborId)) return;
+            visited.add(neighborId);
+            stack.push(neighborId);
+          });
+        }
+
+        components.push(component);
+      });
+
+      return components;
+    };
+
+    connectCorridorChain();
+
+    doorThresholdsById.forEach((threshold) => {
+      const roomIds = Array.from(threshold.roomIds).filter(Boolean);
+
+      roomIds.forEach((roomId) => {
+        const roomWaypoint = roomWaypointByRoomId.get(roomId);
+        if (roomWaypoint) {
+          addConnection(roomWaypoint, threshold.feature);
+        }
+      });
+
+      const corridorWaypoint = findNearestWaypoint(
+        threshold.feature,
+        (candidate) =>
+          isCorridorWaypoint(candidate) &&
+          waypointOutsideRooms(candidate, roomIds),
+        doorCorridorRadius,
+      );
+      if (corridorWaypoint) {
+        addConnection(threshold.feature, corridorWaypoint);
+      }
+    });
+
+    const connectIsolatedNodes = () => {
+      uniqueWaypoints().forEach((feature) => {
+        const id = waypointId(feature);
+        if (!id || (degreeById.get(id) || 0) > 0) return;
+
+        const target = findNearestValidNode(feature);
+        if (target) addConnection(feature, target);
+      });
+    };
+
+    const connectComponents = () => {
+      let components = connectedComponents();
+
+      while (components.length > 1) {
+        let best = null;
+
+        for (let aIndex = 0; aIndex < components.length; aIndex += 1) {
+          for (
+            let bIndex = aIndex + 1;
+            bIndex < components.length;
+            bIndex += 1
+          ) {
+            components[aIndex].forEach((sourceFeature) => {
+              components[bIndex].forEach((targetFeature) => {
+                if (!canAutoLink(sourceFeature, targetFeature)) return;
+                const distance = distanceBetween(
+                  waypointPoint(sourceFeature),
+                  waypointPoint(targetFeature),
+                );
+                if (!best || distance < best.distance) {
+                  best = { sourceFeature, targetFeature, distance };
+                }
+              });
+            });
+          }
+        }
+
+        if (!best) break;
+        addConnection(best.sourceFeature, best.targetFeature);
+        components = connectedComponents();
+      }
+    };
+
+    connectIsolatedNodes();
+    connectComponents();
+
+    if (newWaypoints.length || newConnections.length) {
+      updateMvf((next) => {
+        const nodeById = new Map(
+          next.nodes.features.map((feature) => [waypointId(feature), feature]),
+        );
+
+        newWaypoints.forEach((feature) => {
+          const id = waypointId(feature);
+          if (!id || nodeById.has(id)) return;
+          const copy = deepClone(feature);
+          next.nodes.features.push(copy);
+          nodeById.set(id, copy);
+        });
+
+        newConnections.forEach((edge) => {
+          const sourceNode = nodeById.get(edge.from);
+          const targetNode = nodeById.get(edge.to);
+          if (!sourceNode || !targetNode) return;
+
+          sourceNode.properties = sourceNode.properties || {};
+          targetNode.properties = targetNode.properties || {};
+
+          const sourceNeighbors = ensureArray(sourceNode.properties.neighbors);
+          const targetNeighbors = ensureArray(targetNode.properties.neighbors);
+
+          if (!sourceNeighbors.some((entry) => String(entry.id) === edge.to)) {
+            sourceNeighbors.push({ id: edge.to, weight: edge.weight });
+          }
+          if (!targetNeighbors.some((entry) => String(entry.id) === edge.from)) {
+            targetNeighbors.push({ id: edge.from, weight: edge.weight });
+          }
+
+          sourceNode.properties.neighbors = sourceNeighbors;
+          targetNode.properties.neighbors = targetNeighbors;
+        });
+      });
     }
+
+    toast.success(
+      `Waypoints generated — ${newWaypoints.length} added, ${newConnections.length} connections created`,
+    );
   };
 
   const validateMap = () => {
