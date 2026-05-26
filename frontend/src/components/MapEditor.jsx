@@ -190,6 +190,7 @@ const AUTO_ROUTE_CORNER_OFFSET = 16;
 const AUTO_ROUTE_MAX_NEIGHBORS = 8;
 const AUTO_ROUTE_OUTSIDE_CORRIDOR_PENALTY = 0.35;
 const GEOMETRY_EPSILON = 1.5;
+const ROOM_CONNECTION_EPSILON = 8;
 
 const PRIMARY_TOOL_OPTIONS = [
   {
@@ -618,6 +619,96 @@ function pointKey(point) {
   return `${Number(point.x || 0).toFixed(2)}:${Number(point.y || 0).toFixed(2)}`;
 }
 
+function isRoomConnectionFeature(feature) {
+  return feature?.properties?.kind === "room_connection";
+}
+
+function roomConnectionType(feature) {
+  return (
+    feature?.properties?.connectionType ||
+    feature?.properties?.type ||
+    "internal"
+  );
+}
+
+function roomConnectionRoomIds(feature) {
+  return [
+    feature?.properties?.roomA || feature?.properties?.room_a,
+    feature?.properties?.roomB || feature?.properties?.room_b,
+  ].filter(Boolean);
+}
+
+function sharedBoundaryPoint(roomA, roomB, fallback = null) {
+  const segmentsA = roomSegments(roomA);
+  const segmentsB = roomSegments(roomB);
+  const fallbackPoint =
+    fallback ||
+    midpoint(
+      polygonCenter(roomPolygon(roomA)),
+      polygonCenter(roomPolygon(roomB)),
+    );
+  let best = null;
+
+  segmentsA.forEach((segmentA) => {
+    segmentsB.forEach((segmentB) => {
+      const candidates = [];
+
+      [segmentA.start, segmentA.end].forEach((point) => {
+        const projected = projectPointToSegment(
+          point,
+          segmentB.start,
+          segmentB.end,
+        );
+        candidates.push({
+          distance: projected.distance,
+          point: midpoint(point, projected.point),
+        });
+      });
+
+      [segmentB.start, segmentB.end].forEach((point) => {
+        const projected = projectPointToSegment(
+          point,
+          segmentA.start,
+          segmentA.end,
+        );
+        candidates.push({
+          distance: projected.distance,
+          point: midpoint(point, projected.point),
+        });
+      });
+
+      if (
+        segmentsIntersect(
+          segmentA.start,
+          segmentA.end,
+          segmentB.start,
+          segmentB.end,
+        )
+      ) {
+        candidates.push({
+          distance: 0,
+          point: midpoint(
+            midpoint(segmentA.start, segmentA.end),
+            midpoint(segmentB.start, segmentB.end),
+          ),
+        });
+      }
+
+      candidates.forEach((candidate) => {
+        if (!best || candidate.distance < best.distance) {
+          best = candidate;
+        }
+      });
+    });
+  });
+
+  if (best && best.distance <= ROOM_CONNECTION_EPSILON) {
+    return { point: best.point, shared: true };
+  }
+
+  return { point: fallbackPoint, shared: false };
+}
+
 function sampleSegmentInterior(start, end, step = AUTO_ROUTE_SAMPLE_STEP) {
   const distance = distanceBetween(start, end);
   const count = Math.max(1, Math.ceil(distance / Math.max(step, 1)));
@@ -766,6 +857,24 @@ function syncDoorsForRoom(next, roomId) {
   const roomMap = new Map([[room.id, room]]);
 
   next.openings.features.forEach((feature) => {
+    if (isRoomConnectionFeature(feature)) {
+      const [roomAId, roomBId] = roomConnectionRoomIds(feature);
+      if (roomAId !== roomId && roomBId !== roomId) return;
+
+      const roomA = next.spaces.features.find((entry) => entry.id === roomAId);
+      const roomB = next.spaces.features.find((entry) => entry.id === roomBId);
+      if (!roomA || !roomB) return;
+
+      const currentPoint = toPointFromCoords(feature.geometry?.coordinates);
+      const snapped = sharedBoundaryPoint(roomA, roomB, currentPoint);
+      feature.geometry.coordinates = [snapped.point.x, snapped.point.y];
+      if (snapped.shared && roomConnectionType(feature) === "internal") {
+        feature.properties.type = "shared";
+        feature.properties.connectionType = "shared";
+      }
+      return;
+    }
+
     if (feature.properties?.kind !== "door") return;
     const linkedRoomId =
       feature.properties?.linkedRoomId || feature.properties?.linked_room_id;
@@ -1267,6 +1376,7 @@ const MapEditor = forwardRef(function MapEditor(
   const [backgroundOpacity, setBackgroundOpacity] = useState(0.4);
   const [contextMenu, setContextMenu] = useState(null);
   const [frontPlacement, setFrontPlacement] = useState(null);
+  const [roomConnectionDraft, setRoomConnectionDraft] = useState(null);
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [spacePressed, setSpacePressed] = useState(false);
   const [aiModalOpen, setAiModalOpen] = useState(false);
@@ -1301,6 +1411,7 @@ const MapEditor = forwardRef(function MapEditor(
     setLayerVisibility(LAYER_VISIBILITY_DEFAULTS);
     setSnapEnabled(true);
     setFrontPlacement(null);
+    setRoomConnectionDraft(null);
   }, [floorData]);
 
   useEffect(() => {
@@ -1319,6 +1430,7 @@ const MapEditor = forwardRef(function MapEditor(
       setPathDraft(null);
       setContextMenu(null);
       setFrontPlacement(null);
+      setRoomConnectionDraft(null);
     }
 
     if (previewToastReadyRef.current) {
@@ -1511,6 +1623,7 @@ const MapEditor = forwardRef(function MapEditor(
     if (nextTool !== "polygon") setPolygonDraft([]);
     if (nextTool !== "path") setPathDraft(null);
     if (nextTool !== "room" && nextTool !== "wall") setDrawing(null);
+    if (nextTool !== "select") setRoomConnectionDraft(null);
   };
 
   const startFrontPlacement = (roomId) => {
@@ -1824,6 +1937,89 @@ const MapEditor = forwardRef(function MapEditor(
     setSelection({ kind: "door", id });
   };
 
+  const startRoomConnection = (roomId = selection?.id) => {
+    if (!roomId || previewMode || !roomMap.has(roomId)) return;
+    setRoomConnectionDraft({ roomA: roomId, roomB: null });
+    setToolMode("select");
+    setSelection({ kind: "room", id: roomId });
+    toast("Select the room to connect.");
+  };
+
+  const addRoomConnection = (roomAId, roomBId, point) => {
+    if (!roomAId || !roomBId || roomAId === roomBId) return;
+    const roomA = roomMap.get(roomAId);
+    const roomB = roomMap.get(roomBId);
+    if (!roomA || !roomB) return;
+
+    const snapped = sharedBoundaryPoint(roomA, roomB, point);
+    const connectionType = snapped.shared ? "shared" : "internal";
+    const id = uuidv4();
+
+    updateMvf((next) => {
+      next.openings.features.push({
+        type: "Feature",
+        id,
+        properties: {
+          kind: "room_connection",
+          type: connectionType,
+          connectionType,
+          roomA: roomAId,
+          roomB: roomBId,
+          label:
+            connectionType === "shared"
+              ? "Shared connector"
+              : "Room connector",
+        },
+        geometry: {
+          type: "Point",
+          coordinates: [snapped.point.x, snapped.point.y],
+        },
+      });
+    });
+
+    setRoomConnectionDraft(null);
+    setSelection({ kind: "roomConnection", id });
+    toast.success("Rooms connected.");
+  };
+
+  const handleRoomConnectionRoomClick = (roomId, point) => {
+    if (!roomConnectionDraft || previewMode) return false;
+
+    if (!roomConnectionDraft.roomB) {
+      if (roomId === roomConnectionDraft.roomA) {
+        toast("Select a different room to connect.");
+        return true;
+      }
+      setRoomConnectionDraft({
+        ...roomConnectionDraft,
+        roomB: roomId,
+      });
+      setSelection({ kind: "room", id: roomId });
+      toast("Place the connector on the shared wall or between rooms.");
+      return true;
+    }
+
+    if (
+      roomId === roomConnectionDraft.roomA ||
+      roomId === roomConnectionDraft.roomB
+    ) {
+      addRoomConnection(
+        roomConnectionDraft.roomA,
+        roomConnectionDraft.roomB,
+        point,
+      );
+      return true;
+    }
+
+    setRoomConnectionDraft({
+      ...roomConnectionDraft,
+      roomB: roomId,
+    });
+    setSelection({ kind: "room", id: roomId });
+    toast("Place the connector on the shared wall or between rooms.");
+    return true;
+  };
+
   const addWaypoint = (point) => {
     const id = uuidv4();
     updateMvf((next) => {
@@ -1915,7 +2111,13 @@ const MapEditor = forwardRef(function MapEditor(
         const linkedRoomId =
           feature.properties?.linkedRoomId ||
           feature.properties?.linked_room_id;
-        return !idSet.has(feature.id) && !removedRoomIds.has(linkedRoomId);
+        const [roomA, roomB] = roomConnectionRoomIds(feature);
+        return (
+          !idSet.has(feature.id) &&
+          !removedRoomIds.has(linkedRoomId) &&
+          !removedRoomIds.has(roomA) &&
+          !removedRoomIds.has(roomB)
+        );
       });
       next.nodes.features = next.nodes.features.filter(
         (feature) => !idSet.has(feature.id),
@@ -2408,14 +2610,21 @@ const MapEditor = forwardRef(function MapEditor(
 
     const doorThresholdsById = new Map();
 
-    const registerDoorThreshold = (feature, roomId) => {
+    const registerDoorThreshold = (feature, roomId, options = {}) => {
       const id = waypointId(feature);
       if (!id) return;
 
       let entry = doorThresholdsById.get(id);
       if (!entry) {
-        entry = { id, feature, roomIds: new Set() };
+        entry = {
+          id,
+          feature,
+          roomIds: new Set(),
+          connectsCorridor: Boolean(options.connectsCorridor),
+        };
         doorThresholdsById.set(id, entry);
+      } else if (options.connectsCorridor) {
+        entry.connectsCorridor = true;
       }
 
       if (!roomId) return;
@@ -2459,7 +2668,48 @@ const MapEditor = forwardRef(function MapEditor(
       }
 
       if (thresholdWaypoint) {
-        registerDoorThreshold(thresholdWaypoint, roomInfo?.id || roomId || "");
+        registerDoorThreshold(thresholdWaypoint, roomInfo?.id || roomId || "", {
+          connectsCorridor: true,
+        });
+      }
+    });
+
+    source.openings.features.forEach((feature) => {
+      if (!isRoomConnectionFeature(feature)) return;
+      if (roomConnectionType(feature) === "closed") return;
+
+      const [roomAId, roomBId] = roomConnectionRoomIds(feature).map(String);
+      if (!roomAId || !roomBId) return;
+
+      const connectorPoint = toPointFromCoords(feature.geometry?.coordinates);
+      const generatedConnectors = newWaypoints.filter(
+        (waypoint) => waypoint.properties?.type === "door_threshold",
+      );
+      let connectorWaypoint =
+        findNearbyWaypoint(
+          connectorPoint,
+          40,
+          existingWaypoints.filter(
+            (waypoint) => waypoint.properties?.type !== "room_center",
+          ),
+        ) || findNearbyWaypoint(connectorPoint, 40, generatedConnectors);
+
+      if (!connectorWaypoint) {
+        connectorWaypoint = addWaypointFeature({
+          point: connectorPoint,
+          type: "door_threshold",
+          name: feature.properties?.label || "Room Connector",
+          spaceId: null,
+        });
+      }
+
+      if (connectorWaypoint) {
+        registerDoorThreshold(connectorWaypoint, roomAId, {
+          connectsCorridor: false,
+        });
+        registerDoorThreshold(connectorWaypoint, roomBId, {
+          connectsCorridor: false,
+        });
       }
     });
 
@@ -2511,6 +2761,9 @@ const MapEditor = forwardRef(function MapEditor(
 
     const roomIdsForDoor = (feature) =>
       doorThresholdsById.get(waypointId(feature))?.roomIds || new Set();
+
+    const doorConnectsCorridor = (feature) =>
+      doorThresholdsById.get(waypointId(feature))?.connectsCorridor !== false;
 
     const waypointOutsideRooms = (feature, roomIds) => {
       const candidateRooms = waypointRoomIds.get(waypointId(feature));
@@ -2596,9 +2849,16 @@ const MapEditor = forwardRef(function MapEditor(
         const other = sourceDoor ? targetFeature : sourceFeature;
         const doorRoomIds = Array.from(roomIdsForDoor(door));
         if (isCorridorWaypoint(other)) {
-          return waypointOutsideRooms(other, doorRoomIds);
+          return (
+            doorConnectsCorridor(door) &&
+            waypointOutsideRooms(other, doorRoomIds)
+          );
         }
-        return isDoorWaypoint(other);
+        return (
+          isDoorWaypoint(other) &&
+          doorConnectsCorridor(door) &&
+          doorConnectsCorridor(other)
+        );
       }
 
       return sourceCorridor && targetCorridor;
@@ -2673,15 +2933,17 @@ const MapEditor = forwardRef(function MapEditor(
         }
       });
 
-      const corridorWaypoint = findNearestWaypoint(
-        threshold.feature,
-        (candidate) =>
-          isCorridorWaypoint(candidate) &&
-          waypointOutsideRooms(candidate, roomIds),
-        doorCorridorRadius,
-      );
-      if (corridorWaypoint) {
-        addConnection(threshold.feature, corridorWaypoint);
+      if (threshold.connectsCorridor) {
+        const corridorWaypoint = findNearestWaypoint(
+          threshold.feature,
+          (candidate) =>
+            isCorridorWaypoint(candidate) &&
+            waypointOutsideRooms(candidate, roomIds),
+          doorCorridorRadius,
+        );
+        if (corridorWaypoint) {
+          addConnection(threshold.feature, corridorWaypoint);
+        }
       }
     });
 
@@ -2999,6 +3261,19 @@ const MapEditor = forwardRef(function MapEditor(
     const point = snapWorldPoint(getWorldPoint(event));
     if (!point || spacePressed) return;
 
+    if (roomConnectionDraft && !previewMode) {
+      if (!roomConnectionDraft.roomB) {
+        toast("Select the room to connect.");
+        return;
+      }
+      addRoomConnection(
+        roomConnectionDraft.roomA,
+        roomConnectionDraft.roomB,
+        point,
+      );
+      return;
+    }
+
     if (frontPlacement && !previewMode) {
       const room = roomMap.get(frontPlacement.roomId);
       if (!room) {
@@ -3209,6 +3484,10 @@ const MapEditor = forwardRef(function MapEditor(
 
       if (key === "escape") {
         event.preventDefault();
+        if (roomConnectionDraft) {
+          setRoomConnectionDraft(null);
+          return;
+        }
         if (frontPlacement) {
           setFrontPlacement(null);
           return;
@@ -3265,7 +3544,14 @@ const MapEditor = forwardRef(function MapEditor(
       window.removeEventListener("keyup", handleKeyUp);
       window.removeEventListener("blur", clearSpace);
     };
-  }, [allRoomIds, frontPlacement, previewMode, selection, tool]);
+  }, [
+    allRoomIds,
+    frontPlacement,
+    previewMode,
+    roomConnectionDraft,
+    selection,
+    tool,
+  ]);
 
   useEffect(() => {
     const dismiss = () => setContextMenu(null);
@@ -3317,6 +3603,8 @@ const MapEditor = forwardRef(function MapEditor(
     selection?.kind === "room" ? roomMap.get(selection.id) : null;
   const selectedDoor =
     selection?.kind === "door" ? openingMap.get(selection.id) : null;
+  const selectedRoomConnection =
+    selection?.kind === "roomConnection" ? openingMap.get(selection.id) : null;
   const selectedWaypoint =
     selection?.kind === "waypoint" ? waypointMap.get(selection.id) : null;
   const selectedPath =
@@ -3361,6 +3649,15 @@ const MapEditor = forwardRef(function MapEditor(
       return {
         title: `Door on ${selectedDoorPlacement.roomName}`,
         badge: "Door",
+      };
+    }
+    if (selection.kind === "roomConnection" && selectedRoomConnection) {
+      const [roomAId, roomBId] = roomConnectionRoomIds(selectedRoomConnection);
+      return {
+        title: `${roomMap.get(roomAId)?.properties?.name || "Room"} to ${
+          roomMap.get(roomBId)?.properties?.name || "Room"
+        }`,
+        badge: roomConnectionType(selectedRoomConnection),
       };
     }
     if (selection.kind === "waypoint" && selectedWaypoint) {
@@ -3554,6 +3851,38 @@ const MapEditor = forwardRef(function MapEditor(
       );
     }
 
+    if (selectedRoomConnection) {
+      const [roomAId, roomBId] = roomConnectionRoomIds(selectedRoomConnection);
+      return (
+        <div className="space-y-3">
+          <div className="rounded-xl border border-default bg-surface-alt px-3 py-2 text-sm text-secondary">
+            {roomMap.get(roomAId)?.properties?.name || "Room"} to{" "}
+            {roomMap.get(roomBId)?.properties?.name || "Room"}
+          </div>
+          <div>
+            <label className="text-xs font-semibold uppercase tracking-[0.12em] text-muted">
+              Connection type
+            </label>
+            <select
+              className="mt-1 w-full rounded-lg border border-default bg-surface px-3 py-2 text-sm"
+              value={roomConnectionType(selectedRoomConnection)}
+              onChange={(event) =>
+                updateOpeningFeature(selectedRoomConnection.id, (feature) => {
+                  feature.properties.type = event.target.value;
+                  feature.properties.connectionType = event.target.value;
+                })
+              }
+            >
+              <option value="closed">Closed wall</option>
+              <option value="door">Door</option>
+              <option value="internal">Internal</option>
+              <option value="shared">Shared wall</option>
+            </select>
+          </div>
+        </div>
+      );
+    }
+
     if (selectedWaypoint) {
       return (
         <div className="space-y-3">
@@ -3631,6 +3960,14 @@ const MapEditor = forwardRef(function MapEditor(
           </button>
           <button
             type="button"
+            className="inline-flex items-center justify-center gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-700"
+            onClick={() => startRoomConnection(selection.id)}
+          >
+            <GitBranch className="h-4 w-4" />
+            Connect Rooms
+          </button>
+          <button
+            type="button"
             className="inline-flex items-center justify-center gap-2 rounded-lg border border-default bg-surface px-3 py-2 text-sm font-medium text-secondary"
             onClick={() => rotateSelectedRooms(-90)}
           >
@@ -3666,6 +4003,19 @@ const MapEditor = forwardRef(function MapEditor(
         >
           <Trash2 className="h-4 w-4" />
           Delete Door
+        </button>
+      );
+    }
+
+    if (selection.kind === "roomConnection") {
+      return (
+        <button
+          type="button"
+          className="inline-flex w-full items-center justify-center gap-2 rounded-lg bg-red-600 px-3 py-2 text-sm font-medium text-white"
+          onClick={() => removeSelection(selection)}
+        >
+          <Trash2 className="h-4 w-4" />
+          Delete Connector
         </button>
       );
     }
@@ -3737,6 +4087,11 @@ const MapEditor = forwardRef(function MapEditor(
       metadata = selectedRoom.properties;
     } else if (selection?.kind === "door" && selectedDoor?.properties) {
       metadata = selectedDoor.properties;
+    } else if (
+      selection?.kind === "roomConnection" &&
+      selectedRoomConnection?.properties
+    ) {
+      metadata = selectedRoomConnection.properties;
     } else if (selection?.kind === "waypoint" && selectedWaypoint?.properties) {
       metadata = selectedWaypoint.properties;
     } else if (selection?.kind === "path" && selectedPath) {
@@ -3872,6 +4227,12 @@ const MapEditor = forwardRef(function MapEditor(
 
   const activateRoomSelection = (event, roomId) => {
     event.cancelBubble = true;
+    if (
+      roomConnectionDraft &&
+      handleRoomConnectionRoomClick(roomId, snapWorldPoint(getWorldPoint(event)))
+    ) {
+      return;
+    }
     handleElementActivate(
       { kind: "room", id: roomId },
       { multiToggle: event.evt.shiftKey },
@@ -4306,6 +4667,131 @@ const MapEditor = forwardRef(function MapEditor(
                   );
                 }
 
+                if (isRoomConnectionFeature(feature)) {
+                  const point = toPointFromCoords(feature.geometry?.coordinates);
+                  const [roomAId, roomBId] = roomConnectionRoomIds(feature);
+                  const roomA = roomMap.get(roomAId);
+                  const roomB = roomMap.get(roomBId);
+                  const centerA = roomA
+                    ? polygonCenter(roomPolygon(roomA))
+                    : point;
+                  const centerB = roomB
+                    ? polygonCenter(roomPolygon(roomB))
+                    : point;
+                  const connectionType = roomConnectionType(feature);
+                  const connectionSelected = isSelected(
+                    "roomConnection",
+                    feature.id,
+                  );
+                  const activeConnection = connectionType !== "closed";
+                  const markerColor = activeConnection ? "#F97316" : "#94A3B8";
+
+                  return (
+                    <Group
+                      key={feature.id}
+                      x={point.x}
+                      y={point.y}
+                      draggable={
+                        !previewMode &&
+                        tool === "select" &&
+                        selection?.kind === "roomConnection" &&
+                        connectionSelected &&
+                        !spacePressed
+                      }
+                      dragBoundFunc={roomDragBound}
+                      listening={listening}
+                      onClick={(event) => {
+                        event.cancelBubble = true;
+                        handleElementActivate(
+                          { kind: "roomConnection", id: feature.id },
+                          { forceSelect: true },
+                        );
+                      }}
+                      onContextMenu={(event) =>
+                        openContextMenu(event, {
+                          kind: "roomConnection",
+                          id: feature.id,
+                        })
+                      }
+                      onDragEnd={(event) => {
+                        const nextPoint = {
+                          x: event.target.x(),
+                          y: event.target.y(),
+                        };
+                        event.target.position({ x: point.x, y: point.y });
+                        updateOpeningFeature(feature.id, (target) => {
+                          const [targetRoomAId, targetRoomBId] =
+                            roomConnectionRoomIds(target);
+                          const targetRoomA =
+                            mvfRef.current.spaces.features.find(
+                              (entry) => entry.id === targetRoomAId,
+                            );
+                          const targetRoomB =
+                            mvfRef.current.spaces.features.find(
+                              (entry) => entry.id === targetRoomBId,
+                            );
+                          const snapped =
+                            targetRoomA && targetRoomB
+                              ? sharedBoundaryPoint(
+                                  targetRoomA,
+                                  targetRoomB,
+                                  nextPoint,
+                                )
+                              : { point: nextPoint, shared: false };
+                          target.geometry.coordinates = [
+                            snapped.point.x,
+                            snapped.point.y,
+                          ];
+                          if (
+                            snapped.shared &&
+                            roomConnectionType(target) === "internal"
+                          ) {
+                            target.properties.type = "shared";
+                            target.properties.connectionType = "shared";
+                          }
+                        });
+                      }}
+                    >
+                      {layerVisibility.doors && (
+                        <>
+                          <Line
+                            points={[
+                              centerA.x - point.x,
+                              centerA.y - point.y,
+                              0,
+                              0,
+                              centerB.x - point.x,
+                              centerB.y - point.y,
+                            ]}
+                            stroke={markerColor}
+                            opacity={activeConnection ? 0.55 : 0.3}
+                            strokeWidth={connectionSelected ? 2.2 : 1.4}
+                            dash={activeConnection ? [6, 4] : [3, 5]}
+                            listening={false}
+                          />
+                          <Circle
+                            radius={connectionSelected ? 8 : 6}
+                            fill={markerColor}
+                            stroke={connectionSelected ? "#EA580C" : "#FFFFFF"}
+                            strokeWidth={2}
+                            listening={false}
+                          />
+                          <Text
+                            x={-42}
+                            y={10}
+                            width={84}
+                            align="center"
+                            text={connectionType}
+                            fontSize={10}
+                            fill="#9A3412"
+                            listening={false}
+                          />
+                        </>
+                      )}
+                    </Group>
+                  );
+                }
+
                 const point = toPointFromCoords(feature.geometry?.coordinates);
                 const rotation = Number(feature.properties?.rotation || 0);
                 const radians = (rotation * Math.PI) / 180;
@@ -4644,6 +5130,15 @@ const MapEditor = forwardRef(function MapEditor(
             <div className="absolute left-1/2 top-4 z-20 -translate-x-1/2 rounded-full border border-blue-200 bg-blue-50 px-3 py-2 text-xs font-medium text-blue-700 shadow">
               Click the front edge for{" "}
               {frontPlacementRoom?.properties?.name || "Room"} (Esc to cancel)
+            </div>
+          )}
+
+          {roomConnectionDraft && (
+            <div className="absolute left-1/2 top-4 z-20 -translate-x-1/2 rounded-full border border-amber-200 bg-amber-50 px-3 py-2 text-xs font-medium text-amber-700 shadow">
+              {roomConnectionDraft.roomB
+                ? "Place the room connector"
+                : "Select the second room"}{" "}
+              (Esc to cancel)
             </div>
           )}
 
